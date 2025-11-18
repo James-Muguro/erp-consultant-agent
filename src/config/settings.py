@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     
     # Gemini API Configuration
     gemini_api_key: str = Field(..., description="Gemini API Key")
+    serpapi_api_key: str = Field(..., description="SerpApi API Key")
     gemini_model: str = Field(
         default="gemini-2.0-flash-exp",
         description="Gemini model to use"
