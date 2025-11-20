@@ -1,0 +1,15 @@
+{
+  "entry_id": "req_template_001",
+  "category": "requirements_template",
+  "content": "Requirement Document Structure:\n1. Executive Summary\n2. Business Context and Objectives\n3. Functional Requirements (by module)\n4. Technical Requirements\n5. Integration Requirements\n6. Reporting Requirements\n7. Dependencies and Constraints\n8. Acceptance Criteria",
+  "metadata": {},
+  "created_at": "2025-11-20T14:23:12.052774",
+  "access_count": 0,
+  "last_accessed": null,
+  "tags": [
+    "template",
+    "requirements",
+    "structure"
+  ],
+  "importance": 1.0
+}

@@ -59,9 +59,7 @@ class TestCaseGenerator:
         module: str
     ) -> List[Dict[str, Any]]:
         """Generate functional test cases from requirements"""
-        
         test_cases = []
-        
         for req in requirements:
             req_id = req.get('id', 'REQ-XXX')
             description = req.get('description', '')
@@ -121,15 +119,12 @@ class TestCaseGenerator:
         integration_points: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
         """Generate integration test cases"""
-        
         test_cases = []
-        
         for integration in integration_points:
             source = integration.get('source', 'Source System')
             target = integration.get('target', 'Target System')
             description = integration.get('description', 'Data integration')
             
-            # End-to-end integration test
             tc = self.generate_test_case(
                 scenario=f"Verify data flow from {source} to {target}",
                 test_type="Integration",
@@ -155,7 +150,6 @@ class TestCaseGenerator:
             )
             test_cases.append(tc)
             
-            # Error handling test
             error_tc = self.generate_test_case(
                 scenario=f"Verify error handling for {source} to {target} integration",
                 test_type="Integration",
@@ -187,11 +181,8 @@ class TestCaseGenerator:
         critical_transactions: List[str]
     ) -> List[Dict[str, Any]]:
         """Generate performance test cases"""
-        
         test_cases = []
-        
         for transaction in critical_transactions:
-            # Response time test
             tc = self.generate_test_case(
                 scenario=f"Verify response time for {transaction}",
                 test_type="Performance",
@@ -215,7 +206,6 @@ class TestCaseGenerator:
             )
             test_cases.append(tc)
             
-            # Load test
             load_tc = self.generate_test_case(
                 scenario=f"Verify {transaction} under load",
                 test_type="Performance",
@@ -247,12 +237,9 @@ class TestCaseGenerator:
         sensitive_transactions: List[str]
     ) -> List[Dict[str, Any]]:
         """Generate security and authorization test cases"""
-        
         test_cases = []
-        
         for transaction in sensitive_transactions:
             for role in roles:
-                # Authorization test
                 tc = self.generate_test_case(
                     scenario=f"Verify {role} access to {transaction}",
                     test_type="Security",
@@ -276,7 +263,6 @@ class TestCaseGenerator:
                 )
                 test_cases.append(tc)
         
-        # Audit trail test
         audit_tc = self.generate_test_case(
             scenario="Verify audit trail logging for sensitive transactions",
             test_type="Security",
@@ -306,15 +292,12 @@ class TestCaseGenerator:
         business_processes: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
         """Generate user acceptance test scenarios"""
-        
         test_cases = []
-        
         for process in business_processes:
             process_name = process.get('name', 'Business Process')
             description = process.get('description', '')
             user_role = process.get('user_role', 'Business User')
             
-            # End-to-end business scenario
             tc = self.generate_test_case(
                 scenario=f"Execute complete {process_name} process",
                 test_type="UAT",
@@ -325,7 +308,7 @@ class TestCaseGenerator:
                     "Complete all process steps",
                     "Verify final output"
                 ]),
-                expected_result=process.get('expected_outcome', f"{process_name} completes successfully with expected business outcome"),
+                expected_result=process.get('expected_outcome', f"{process_name} completes successfully"),
                 test_data={
                     'process': process_name,
                     'user_role': user_role,
@@ -347,14 +330,10 @@ class TestCaseGenerator:
         changes: List[str]
     ) -> List[Dict[str, Any]]:
         """Generate regression test suite based on changes"""
-        
-        # Filter critical test cases
         regression_suite = [
             tc for tc in existing_test_cases
             if tc.get('priority') in ['Critical', 'High']
         ]
-        
-        # Add specific tests for areas affected by changes
         for change in changes:
             impact_tc = self.generate_test_case(
                 scenario=f"Verify no regression impact from: {change}",
@@ -385,7 +364,6 @@ class TestCaseGenerator:
         test_cases: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """Generate test summary statistics"""
-        
         summary = {
             'total_test_cases': len(test_cases),
             'by_type': {},
@@ -396,26 +374,18 @@ class TestCaseGenerator:
                 'modules_covered': set()
             }
         }
-        
         for tc in test_cases:
-            # Count by type
             test_type = tc.get('type', 'Unknown')
             summary['by_type'][test_type] = summary['by_type'].get(test_type, 0) + 1
-            
-            # Count by priority
             priority = tc.get('priority', 'Unknown')
             summary['by_priority'][priority] = summary['by_priority'].get(priority, 0) + 1
-            
-            # Count by status
             status = tc.get('status', 'Not Executed')
             summary['by_status'][status] = summary['by_status'].get(status, 0) + 1
-            
-            # Track coverage
             req_id = tc.get('test_data', {}).get('requirement_id')
             if req_id:
                 summary['coverage']['requirements_covered'].add(req_id)
         
-        # Convert sets to lists for JSON serialization
+        # Convert sets to lists
         summary['coverage']['requirements_covered'] = list(summary['coverage']['requirements_covered'])
         summary['coverage']['modules_covered'] = list(summary['coverage']['modules_covered'])
         
@@ -424,6 +394,37 @@ class TestCaseGenerator:
     def reset_counter(self):
         """Reset test case counter"""
         self.test_case_counter = 1
+
+
+# Tool wrapper class
+class TestCaseGeneratorTool:
+    """Tool interface for the TestCaseGenerator"""
+    def __init__(self):
+        self.generator = test_generator
+
+    def generate(self, *args, **kwargs):
+        return self.generator.generate_test_case(*args, **kwargs)
+
+    def generate_functional(self, *args, **kwargs):
+        return self.generator.generate_functional_test_cases(*args, **kwargs)
+
+    def generate_integration(self, *args, **kwargs):
+        return self.generator.generate_integration_test_cases(*args, **kwargs)
+
+    def generate_performance(self, *args, **kwargs):
+        return self.generator.generate_performance_test_cases(*args, **kwargs)
+
+    def generate_security(self, *args, **kwargs):
+        return self.generator.generate_security_test_cases(*args, **kwargs)
+
+    def generate_uat(self, *args, **kwargs):
+        return self.generator.generate_uat_scenarios(*args, **kwargs)
+
+    def generate_regression(self, *args, **kwargs):
+        return self.generator.generate_regression_test_suite(*args, **kwargs)
+
+    def summary(self, *args, **kwargs):
+        return self.generator.generate_test_summary(*args, **kwargs)
 
 
 # Global test case generator instance

@@ -534,3 +534,54 @@ For assistance, please contact:
 # Global document generator instance
 doc_generator = DocumentGenerator()
 
+# -------------------------------------------------------------------
+# DocumentGeneratorTool (ADD THIS AT THE VERY BOTTOM OF THE FILE)
+# -------------------------------------------------------------------
+
+from typing import Optional, Dict, Any
+from langchain.tools import BaseTool
+
+class DocumentGeneratorTool(BaseTool):
+    name: str = "document_generator"
+    description: str = "Generate ERP documentation: requirements docs, test cases, manuals, solution designs."
+
+    def _run(
+        self,
+        action: str,
+        project_name: str,
+        module: str,
+        payload: Dict[str, Any],
+    ) -> str:
+        """
+        Runs the document generator.
+        action: one of ["requirements", "test_cases", "user_manual", "solution_design"]
+        """
+        if action == "requirements":
+            return doc_generator.generate_requirements_document(
+                project_name, module, payload
+            )
+
+        elif action == "test_cases":
+            return doc_generator.generate_test_case_document(
+                project_name, module, payload.get("test_cases", []),
+                payload.get("test_type", "QA"),
+            )
+
+        elif action == "user_manual":
+            return doc_generator.generate_user_manual(
+                payload.get("process_name", ""),
+                module,
+                payload.get("steps", []),
+            )
+
+        elif action == "solution_design":
+            return doc_generator.generate_solution_design(
+                project_name, module, payload
+            )
+
+        else:
+            return f"Unknown action: {action}"
+
+    async def _arun(self, *args, **kwargs):
+        raise NotImplementedError("Async version not implemented.")
+
