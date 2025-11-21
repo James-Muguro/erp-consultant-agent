@@ -204,7 +204,7 @@ erp-consultant-agent/
 
 This project is submitted for the **Enterprise Agents** track of the AI Agent course.
 
-**See [SUBMISSION.md](SUBMISSION.md) for complete project writeup.**
+For the complete project write-up, see the full documentation in [submission.md](submission.md).
 
 ---
 
