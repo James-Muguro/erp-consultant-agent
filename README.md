@@ -157,25 +157,6 @@ erp-consultant-agent/
 └── docs/                # Documentation
 ```
 
-## 🤝 Contributing
-
-This is a capstone project, but feedback and suggestions are welcome!
-
-## 📄 License
-
-MIT License
-
-## 👤 Author
-
-Your Name - ERP Functional Consultant
-
-## 🙏 Acknowledgments
-
-- Google AI for Gemini API and ADK
-- Enterprise AI Agents Course
-
----
-
 ---
 
 ## 📊 Project Highlights
