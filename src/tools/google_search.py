@@ -1,4 +1,21 @@
-from serpapi import GoogleSearch
+try:
+    from serpapi import GoogleSearch
+except Exception:
+    # Provide a fallback stub if serpapi isn't installed or a different package is available
+    class GoogleSearch:
+        def __init__(self, params: dict):
+            self._params = params
+
+        def get_dict(self):
+            return {
+                "organic_results": [
+                    {
+                        "title": "DEV-STUB: Search unavailable",
+                        "link": "",
+                        "snippet": "Search API is not installed in this environment; install serpapi for real web results."
+                    }
+                ]
+            }
 from pydantic import BaseModel, Field
 from typing import Type
 

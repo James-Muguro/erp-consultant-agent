@@ -1,7 +1,7 @@
 """
 Testing Agents - QA and UAT Testing
 """
-import google.generativeai as genai
+from src.utils.llm import get_llm
 from typing import Dict, List, Any, Optional
 import time
 
@@ -19,15 +19,12 @@ class QATestingAgent:
         self.config = QA_TESTING_AGENT_CONFIG
         self.logger = AgentLogger(self.config.name)
         
-        # Configure Gemini
-        genai.configure(api_key=settings.gemini_api_key)
-        self.model = genai.GenerativeModel(
-            model_name=settings.gemini_model,
-            generation_config={
-                'temperature': self.config.temperature,
-                'max_output_tokens': settings.max_tokens,
-            }
-        )
+        # Get the singleton model instance
+        self.model = get_llm()
+
+    def reload_model(self):
+        """Reload the model for QA testing agent."""
+        self.model = get_llm()
         
         self.logger.info(f"{self.config.name} initialized")
     
@@ -81,9 +78,15 @@ class QATestingAgent:
                 context
             )
             
+            # Define generation config
+            generation_config = {
+                'temperature': self.config.temperature,
+                'max_output_tokens': settings.max_tokens,
+            }
+            
             # Generate test cases using Gemini
             self.logger.info("Calling Gemini API for QA test case generation")
-            response = self.model.generate_content(prompt)
+            response = self.model.generate_content(prompt, generation_config=generation_config)
             
             test_cases_text = response.text
             
@@ -279,15 +282,12 @@ class UATTestingAgent:
         self.config = UAT_TESTING_AGENT_CONFIG
         self.logger = AgentLogger(self.config.name)
         
-        # Configure Gemini
-        genai.configure(api_key=settings.gemini_api_key)
-        self.model = genai.GenerativeModel(
-            model_name=settings.gemini_model,
-            generation_config={
-                'temperature': self.config.temperature,
-                'max_output_tokens': settings.max_tokens,
-            }
-        )
+        # Get the singleton model instance
+        self.model = get_llm()
+
+    def reload_model(self):
+        """Reload the model for UAT testing agent."""
+        self.model = get_llm()
         
         self.logger.info(f"{self.config.name} initialized")
     
@@ -338,9 +338,15 @@ class UATTestingAgent:
                 context
             )
             
+            # Define generation config
+            generation_config = {
+                'temperature': self.config.temperature,
+                'max_output_tokens': settings.max_tokens,
+            }
+            
             # Generate UAT scenarios using Gemini
             self.logger.info("Calling Gemini API for UAT scenario generation")
-            response = self.model.generate_content(prompt)
+            response = self.model.generate_content(prompt, generation_config=generation_config)
             
             uat_text = response.text
             

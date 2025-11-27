@@ -1,7 +1,7 @@
 """
 Process Mapping Agent - Creates detailed business process maps
 """
-import google.generativeai as genai
+from src.utils.llm import get_llm
 from typing import Dict, List, Any, Optional
 import time
 
@@ -19,15 +19,12 @@ class ProcessMappingAgent:
         self.config = PROCESS_MAPPING_AGENT_CONFIG
         self.logger = AgentLogger(self.config.name)
         
-        # Configure Gemini
-        genai.configure(api_key=settings.gemini_api_key)
-        self.model = genai.GenerativeModel(
-            model_name=settings.gemini_model,
-            generation_config={
-                'temperature': self.config.temperature,
-                'max_output_tokens': settings.max_tokens,
-            }
-        )
+        # Get the singleton model instance
+        self.model = get_llm()
+
+    def reload_model(self):
+        """Reload the GenAI model instance for process mapping agent."""
+        self.model = get_llm()
         
         self.logger.info(f"{self.config.name} initialized")
     
@@ -89,9 +86,15 @@ class ProcessMappingAgent:
                 context
             )
             
+            # Define generation config
+            generation_config = {
+                'temperature': self.config.temperature,
+                'max_output_tokens': settings.max_tokens,
+            }
+            
             # Generate process map using Gemini
             self.logger.info("Calling Gemini API for process mapping")
-            response = self.model.generate_content(prompt)
+            response = self.model.generate_content(prompt, generation_config=generation_config)
             
             process_map_text = response.text
             

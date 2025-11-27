@@ -7,6 +7,8 @@ Custom tools and factory instances for ERP Consultant Agent
 from .google_search import GoogleSearchTool
 from .document_analyzer import DocumentAnalyzerTool
 from .process_visualizer import ProcessVisualizerTool
+from .info_retriever import info_retriever
+from .reasoning import reasoning_tool
 from .erp_knowledge_base import ERPKnowledgeBaseTool, ERPKnowledgeBase, erp_kb
 from .test_case_generator import (
     TestCaseGeneratorTool,
@@ -38,5 +40,7 @@ __all__ = [
     # Pre-built instances
     "erp_kb",
     "doc_generator",
+    "info_retriever",
+    "reasoning_tool",
     "test_generator",
 ]

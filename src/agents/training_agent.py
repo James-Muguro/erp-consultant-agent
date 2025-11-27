@@ -1,7 +1,7 @@
 """
 Training & Documentation Agent - Creates training materials and user documentation
 """
-import google.generativeai as genai
+from src.utils.llm import get_llm
 from typing import Dict, List, Any, Optional
 import time
 
@@ -19,15 +19,12 @@ class TrainingAgent:
         self.config = TRAINING_AGENT_CONFIG
         self.logger = AgentLogger(self.config.name)
         
-        # Configure Gemini
-        genai.configure(api_key=settings.gemini_api_key)
-        self.model = genai.GenerativeModel(
-            model_name=settings.gemini_model,
-            generation_config={
-                'temperature': self.config.temperature,
-                'max_output_tokens': settings.max_tokens,
-            }
-        )
+        # Get the singleton model instance
+        self.model = get_llm()
+
+    def reload_model(self):
+        """Reload the LLM model instance for training agent."""
+        self.model = get_llm()
         
         self.logger.info(f"{self.config.name} initialized")
     
@@ -81,9 +78,15 @@ class TrainingAgent:
                 context
             )
             
+            # Define generation config
+            generation_config = {
+                'temperature': self.config.temperature,
+                'max_output_tokens': settings.max_tokens,
+            }
+            
             # Generate training materials using Gemini
             self.logger.info("Calling Gemini API for training materials generation")
-            response = self.model.generate_content(prompt)
+            response = self.model.generate_content(prompt, generation_config=generation_config)
             
             training_text = response.text
             

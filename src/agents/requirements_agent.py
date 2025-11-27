@@ -1,7 +1,11 @@
 """
 Requirements Gathering Agent - Analyzes stakeholder inputs and generates requirement documents
 """
-import google.generativeai as genai
+from src.utils.llm import get_llm
+try:
+    import google.generativeai as genai  # type: ignore
+except Exception:
+    genai = None
 from typing import Dict, List, Any, Optional
 import time
 
@@ -19,18 +23,20 @@ class RequirementsAgent:
         self.config = REQUIREMENTS_AGENT_CONFIG
         self.logger = AgentLogger(self.config.name)
         
-        # Configure Gemini
-        genai.configure(api_key=settings.gemini_api_key)
-        self.model = genai.GenerativeModel(
-            model_name=settings.gemini_model,
-            generation_config={
-                'temperature': self.config.temperature,
-                'max_output_tokens': settings.max_tokens,
-            }
-        )
-        
-        self.logger.info(f"{self.config.name} initialized")
-    
+        # Get the singleton model instance (no args allowed in get_llm)
+        self.model = get_llm()
+
+        # Store generation configuration for Gemini API calls
+        self.generation_config = {
+            'temperature': self.config.temperature,
+            'max_output_tokens': settings.max_tokens,
+        }
+
+    def reload_model(self):
+        """Reload the GenAI model instance (used when provider changes)."""
+        self.model = get_llm()
+        self.logger.info(f"{self.config.name} model reloaded")
+
     def gather_requirements(
         self,
         session_id: str,
@@ -41,16 +47,6 @@ class RequirementsAgent:
     ) -> Dict[str, Any]:
         """
         Gather and document requirements based on stakeholder input
-        
-        Args:
-            session_id: Session identifier
-            project_name: Name of the project
-            module: ERP module (e.g., 'FI', 'MM', 'SD')
-            stakeholder_input: Raw stakeholder requirements
-            erp_system: Target ERP system
-            
-        Returns:
-            Dictionary containing structured requirements and document path
         """
         start_time = time.time()
         
@@ -102,7 +98,10 @@ class RequirementsAgent:
             
             # Generate requirements using Gemini
             self.logger.info("Calling Gemini API for requirements generation")
-            response = self.model.generate_content(prompt)
+            response = self.model.generate_content(
+                prompt,
+                generation_config=self.generation_config
+            )
             
             requirements_text = response.text
             
@@ -248,9 +247,6 @@ Please provide a comprehensive requirements document with clear structure and ER
     def _parse_requirements(self, requirements_text: str) -> Dict[str, Any]:
         """Parse requirements text into structured format"""
         
-        # This is a simplified parser
-        # In production, you might use more sophisticated NLP
-        
         structured = {
             'executive_summary': '',
             'business_context': '',
@@ -264,7 +260,6 @@ Please provide a comprehensive requirements document with clear structure and ER
             'assumptions': []
         }
         
-        # Simple section-based parsing
         current_section = None
         lines = requirements_text.split('\n')
         
@@ -290,11 +285,9 @@ Please provide a comprehensive requirements document with clear structure and ER
             elif 'assumption' in line_lower:
                 current_section = 'assumptions'
             elif current_section and line.strip():
-                # Add content to current section
                 if current_section in ['executive_summary', 'business_context']:
                     structured[current_section] += line + '\n'
                 elif current_section == 'functional_requirements':
-                    # Try to parse functional requirements
                     if line.startswith('-') or line.startswith('*') or line[0].isdigit():
                         if 'general' not in structured['functional_requirements']:
                             structured['functional_requirements']['general'] = []
@@ -323,7 +316,6 @@ Please provide a comprehensive requirements document with clear structure and ER
             'completeness_score': 0.0
         }
         
-        # Check for required sections
         required_sections = [
             'executive_summary',
             'business_context',
@@ -335,12 +327,10 @@ Please provide a comprehensive requirements document with clear structure and ER
                 validation_result['issues'].append(f"Missing required section: {section}")
                 validation_result['is_valid'] = False
         
-        # Calculate completeness score
         total_sections = 10
         completed_sections = sum(1 for k, v in requirements.items() if v)
         validation_result['completeness_score'] = (completed_sections / total_sections) * 100
         
-        # Check functional requirements
         func_reqs = requirements.get('functional_requirements', {})
         if func_reqs:
             total_reqs = sum(len(reqs) for reqs in func_reqs.values())

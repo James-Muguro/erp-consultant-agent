@@ -97,7 +97,17 @@ cp .env.example .env
 
 ### 4. Run the Agent
 ```bash
-python src/main.py
+python src/main.py  # existing CLI entry
+
+# To run the API server with the demo UI
+python -m src.orchestrator_api
+```
+
+If you do not have Gemini or want to run locally without it, set the following environment variable before running the API server:
+
+```bash
+export USE_DEV_LLM=1
+python -m src.orchestrator_api
 ```
 
 ## 📖 Usage Examples
