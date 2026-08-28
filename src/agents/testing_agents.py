@@ -11,6 +11,9 @@ from src.utils.prompts import QA_TESTING_SYSTEM_PROMPT, QA_TESTING_TASK_PROMPT, 
 from src.tools import test_generator, doc_generator
 from src.memory import agent_memory
 
+from pydantic import ValidationError
+from src.models.test_case_schema import TestCasesDocument
+
 
 class QATestingAgent:
     """Agent specialized in generating QA test cases"""
@@ -84,14 +87,21 @@ class QATestingAgent:
                 'max_output_tokens': settings.max_tokens,
             }
             
-            # Generate test cases using Gemini
+            # Generate test cases using Gemini, constrained to our schema
             self.logger.info("Calling Gemini API for QA test case generation")
+            generation_config = {**generation_config, 'response_schema': TestCasesDocument}
             response = self.model.generate_content(prompt, generation_config=generation_config)
             
             test_cases_text = response.text
             
-            # Parse into structured test cases
-            structured_test_cases = self._parse_test_cases(test_cases_text, module)
+            # Parse and validate against schema, falling back to the old
+            # heuristic parser only if validation ever fails
+            try:
+                validated = TestCasesDocument.model_validate_json(test_cases_text)
+                structured_test_cases = [tc.to_legacy_dict() for tc in validated.test_cases]
+            except ValidationError as e:
+                self.logger.error(f"Schema validation failed, falling back to heuristic parsing: {e}")
+                structured_test_cases = self._parse_test_cases(test_cases_text, module)
             
             # Add to conversation memory
             agent_memory.session_service.add_to_conversation(
@@ -344,14 +354,22 @@ class UATTestingAgent:
                 'max_output_tokens': settings.max_tokens,
             }
             
-            # Generate UAT scenarios using Gemini
+            # Generate UAT scenarios using Gemini, constrained to our schema
             self.logger.info("Calling Gemini API for UAT scenario generation")
+            generation_config = {**generation_config, 'response_schema': TestCasesDocument}
             response = self.model.generate_content(prompt, generation_config=generation_config)
             
             uat_text = response.text
             
-            # Parse into structured scenarios
-            structured_scenarios = self._parse_uat_scenarios(uat_text, user_roles)
+            # Parse and validate against schema, so Gemini's real scenarios
+            # are actually used. Falls back to the old hardcoded-placeholder
+            # generator only if validation ever fails.
+            try:
+                validated = TestCasesDocument.model_validate_json(uat_text)
+                structured_scenarios = [tc.to_legacy_dict() for tc in validated.test_cases]
+            except ValidationError as e:
+                self.logger.error(f"Schema validation failed, falling back to generic scenarios: {e}")
+                structured_scenarios = self._parse_uat_scenarios(uat_text, user_roles)
             
             # Add to conversation memory
             agent_memory.session_service.add_to_conversation(
