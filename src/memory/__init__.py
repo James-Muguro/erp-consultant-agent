@@ -2,6 +2,7 @@
 """
 Unified memory interface for ERP Consultant Agent
 """
+import uuid
 from .session_manager import (
     SessionState,
     InMemorySessionService,
@@ -33,7 +34,6 @@ class AgentMemory:
         self.session_service = session_service
         self.memory_bank = memory_bank
     
-    # Session operations
     def create_project(
         self,
         project_name: str,
@@ -41,7 +41,8 @@ class AgentMemory:
         erp_system: str = "SAP S/4HANA"
     ) -> str:
         """Create a new project session"""
-        session_id = f"prj_{project_name.lower().replace(' ', '_')}"
+        slug = project_name.lower().replace(' ', '_')[:30]
+        session_id = f"prj_{slug}_{uuid.uuid4().hex[:8]}"
         session = self.session_service.create_session(
             session_id=session_id,
             project_name=project_name,
