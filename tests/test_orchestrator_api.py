@@ -1,6 +1,9 @@
 from fastapi.testclient import TestClient
 from unittest.mock import patch, MagicMock
 from src.orchestrator_api import app
+from src.config.settings import settings
+
+AUTH_HEADERS = {'X-API-Key': settings.api_auth_key}
 
 
 def test_health():
@@ -13,7 +16,7 @@ def test_health():
 def test_start_project_minimal():
     client = TestClient(app)
     payload = {'project_name': 'Test Project', 'module': 'FI'}
-    r = client.post('/api/projects/start', json=payload)
+    r = client.post('/api/projects/start', json=payload, headers=AUTH_HEADERS)
     assert r.status_code == 200
     data = r.json()
     assert data.get('success') is True
@@ -45,7 +48,7 @@ def test_chat_end_to_end(mock_get_llm, mock_info_retriever):
 
     # 2. Call the API
     payload = {'message': 'What is a bill of lading?'}
-    r = client.post('/api/chat', json=payload)
+    r = client.post('/api/chat', json=payload, headers=AUTH_HEADERS)
 
     # 3. Assert the response
     assert r.status_code == 200
