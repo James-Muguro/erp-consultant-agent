@@ -70,3 +70,4 @@ tmp/
 temp/
 *.tmp
 *.bak
+*sample_test.py
