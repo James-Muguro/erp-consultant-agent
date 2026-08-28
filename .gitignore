@@ -50,6 +50,8 @@ htmlcov/
 *.log
 logs/
 *.log.*
+# Runtime-generated output
+output/
 
 # Documentation builds
 docs/_build/
@@ -68,5 +70,3 @@ tmp/
 temp/
 *.tmp
 *.bak
-*smoke_test.py
-*requirements_Smoke_Test_Project_20260828.md
