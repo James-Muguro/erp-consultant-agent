@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Optional
 from datetime import datetime
 from dataclasses import dataclass, field
 import json
+import os
+import threading
 from pathlib import Path
 
 from src.config.settings import settings
@@ -76,6 +78,7 @@ class InMemorySessionService:
         self.logger = AgentLogger("SessionManager")
         self.persistence_dir = Path(settings.output_dir) / "sessions"
         self.persistence_dir.mkdir(parents=True, exist_ok=True)
+        self._save_lock = threading.Lock()
     
     def create_session(
         self,
@@ -256,10 +259,17 @@ class InMemorySessionService:
         return False
     
     def _save_session(self, session: SessionState):
-        """Save session to disk"""
+        """Save session to disk atomically. Writes to a temp file first,
+        then does an atomic rename - a concurrent reader or a crash
+        mid-write can never see a partially-written file. The lock
+        prevents two threads' writes from interleaving in the temp
+        file itself."""
         session_file = self.persistence_dir / f"{session.session_id}.json"
-        with open(session_file, 'w') as f:
-            json.dump(session.to_dict(), f, indent=2, default=str)
+        tmp_file = self.persistence_dir / f"{session.session_id}.json.tmp"
+        with self._save_lock:
+            with open(tmp_file, 'w') as f:
+                json.dump(session.to_dict(), f, indent=2, default=str)
+            os.replace(tmp_file, session_file)
     
     def _load_session(self, session_id: str) -> Optional[SessionState]:
         """Load session from disk"""
