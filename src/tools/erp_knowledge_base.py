@@ -196,6 +196,11 @@ class ERPKnowledgeBase:
         module = self.sap_modules.get(module_code.upper())
         return module.best_practices if module else []
     
+    def get_integration_points(self, module_code: str) -> List[str]:
+        """Get standard integration points for a module"""
+        module = self.sap_modules.get(module_code.upper())
+        return module.integration_points if module else []
+    
     def get_process_flow(self, process_name: str) -> Optional[Dict[str, Any]]:
         """Get a standard process flow by name, if one is defined.
         NOTE: no standard process flow data currently exists in this
