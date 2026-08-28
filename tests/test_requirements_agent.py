@@ -90,8 +90,7 @@ class TestRequirementsAgent:
         assert validation['is_valid'] == False
         assert len(validation['issues']) > 0
     
-    @patch('src.agents.requirements_agent.genai.GenerativeModel')
-    def test_gather_requirements_success(self, mock_model, test_session_id, sample_stakeholder_input):
+    def test_gather_requirements_success(self, test_session_id, sample_stakeholder_input):
         """Test successful requirements gathering"""
         # Mock the Gemini API response
         mock_response = Mock()
@@ -108,11 +107,9 @@ class TestRequirementsAgent:
         
         mock_model_instance = Mock()
         mock_model_instance.generate_content.return_value = mock_response
-        mock_model.return_value = mock_model_instance
         
         agent = RequirementsAgent()
         agent.model = mock_model_instance
-        
         result = agent.gather_requirements(
             session_id=test_session_id,
             project_name="Test Project",
