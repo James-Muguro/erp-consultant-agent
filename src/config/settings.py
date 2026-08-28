@@ -65,6 +65,17 @@ class Settings(BaseSettings):
     output_dir: str = Field(default="output")
     logs_dir: str = Field(default="logs")
     
+    # API security
+    api_auth_key: str = Field(..., description="Required API key for accessing orchestrator_api.py endpoints")
+    allowed_origins: str = Field(
+        default="http://localhost:3000,http://localhost:8000",
+        description="Comma-separated list of allowed CORS origins"
+    )
+    
+    @property
+    def allowed_origins_list(self) -> List[str]:
+        return [origin.strip() for origin in self.allowed_origins.split(",") if origin.strip()]
+    
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         os.makedirs(self.output_dir, exist_ok=True)
