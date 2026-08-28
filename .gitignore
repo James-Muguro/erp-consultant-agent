@@ -68,3 +68,4 @@ tmp/
 temp/
 *.tmp
 *.bak
+*smoke_test.py
