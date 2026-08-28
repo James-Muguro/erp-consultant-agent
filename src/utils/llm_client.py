@@ -48,27 +48,25 @@ class LLMClient:
             logger.warning("No LLM available, using dev stub")
 
     def generate_content(self, prompt: str, generation_config: Optional[dict] = None):
-        """
-        Generate content using the chosen LLM.
-        Args:
-            prompt: The prompt to send to the model
-            generation_config: Dict of parameters (temperature, max_output_tokens)
-        Returns:
-            response object with `.text` attribute
-        """
         generation_config = generation_config or {}
         temperature = generation_config.get("temperature", self.temperature)
         max_tokens = generation_config.get("max_output_tokens", settings.max_tokens)
+        response_schema = generation_config.get("response_schema")
 
         if self.client_type == "gemini":
             try:
+                config_kwargs = {
+                    "temperature": temperature,
+                    "max_output_tokens": max_tokens,
+                }
+                if response_schema is not None:
+                    config_kwargs["response_mime_type"] = "application/json"
+                    config_kwargs["response_schema"] = response_schema
+
                 response = self.gemini_client.models.generate_content(
                     model=settings.gemini_model,
                     contents=prompt,
-                    config=genai_types.GenerateContentConfig(
-                        temperature=temperature,
-                        max_output_tokens=max_tokens
-                    )
+                    config=genai_types.GenerateContentConfig(**config_kwargs)
                 )
                 text = response.text or ""
                 return type("LLMResponse", (), {"text": text})()
