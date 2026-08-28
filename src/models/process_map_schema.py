@@ -5,6 +5,8 @@ Process Mapping Agent.
 """
 from typing import List
 from pydantic import BaseModel, Field
+from pydantic import ValidationError
+from src.models.process_map_schema import ProcessMap
 
 
 class ProcessStep(BaseModel):
