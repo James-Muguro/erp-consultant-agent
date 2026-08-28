@@ -11,6 +11,9 @@ from src.utils.prompts import PROCESS_MAPPING_SYSTEM_PROMPT, PROCESS_MAPPING_TAS
 from src.tools import erp_kb
 from src.memory import agent_memory
 
+from pydantic import ValidationError
+from src.models.process_map_schema import ProcessMap
+
 
 class ProcessMappingAgent:
     """Agent specialized in creating business process maps"""
@@ -92,22 +95,21 @@ class ProcessMappingAgent:
                 'max_output_tokens': settings.max_tokens,
             }
             
-            # Generate process map using Gemini
+            # Generate process map using Gemini, constrained to our schema
             self.logger.info("Calling Gemini API for process mapping")
+            generation_config = {**generation_config, 'response_schema': ProcessMap}
             response = self.model.generate_content(prompt, generation_config=generation_config)
             
             process_map_text = response.text
             
-            # Parse and structure the process map
-            structured_process = self._parse_process_map(process_map_text)
-            
-            # Add to conversation memory
-            agent_memory.session_service.add_to_conversation(
-                session_id,
-                'assistant',
-                process_map_text,
-                self.config.name
-            )
+            # Parse and validate against schema, falling back to the old
+            # heuristic parser only if validation ever fails
+            try:
+                validated = ProcessMap.model_validate_json(process_map_text)
+                structured_process = validated.model_dump()
+            except ValidationError as e:
+                self.logger.error(f"Schema validation failed, falling back to heuristic parsing: {e}")
+                structured_process = self._parse_process_map(process_map_text)
             
             # Save to session
             session = agent_memory.session_service.get_session(session_id)
