@@ -36,7 +36,7 @@ class LLMClient:
         # Determine which LLM to use
         self.client_type = None
         if GEMINI_AVAILABLE and settings.gemini_api_key:
-            genai.configure(api_key=settings.gemini_api_key)
+            self.gemini_client = genai.Client(api_key=settings.gemini_api_key)
             self.client_type = "gemini"
             logger.info("Using Gemini LLM")
         elif OPENAI_AVAILABLE and os.getenv("OPENAI_API_KEY"):
@@ -62,14 +62,15 @@ class LLMClient:
 
         if self.client_type == "gemini":
             try:
-                response = genai.generate_text(
+                response = self.gemini_client.models.generate_content(
                     model=settings.gemini_model,
-                    prompt=prompt,
-                    temperature=temperature,
-                    max_output_tokens=max_tokens
+                    contents=prompt,
+                    config=genai_types.GenerateContentConfig(
+                        temperature=temperature,
+                        max_output_tokens=max_tokens
+                    )
                 )
-                # Gemini returns a dict with 'candidates' list
-                text = response.candidates[0].output if response.candidates else ""
+                text = response.text or ""
                 return type("LLMResponse", (), {"text": text})()
             except Exception as e:
                 logger.error(f"Gemini API failed: {e}")
