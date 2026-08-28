@@ -11,6 +11,9 @@ from src.utils.prompts import TRAINING_SYSTEM_PROMPT, TRAINING_TASK_PROMPT
 from src.tools import doc_generator
 from src.memory import agent_memory
 
+from pydantic import ValidationError
+from src.models.training_schema import TrainingMaterials
+
 
 class TrainingAgent:
     """Agent specialized in creating training materials and documentation"""
@@ -84,14 +87,21 @@ class TrainingAgent:
                 'max_output_tokens': settings.max_tokens,
             }
             
-            # Generate training materials using Gemini
+            # Generate training materials using Gemini, constrained to our schema
             self.logger.info("Calling Gemini API for training materials generation")
+            generation_config = {**generation_config, 'response_schema': TrainingMaterials}
             response = self.model.generate_content(prompt, generation_config=generation_config)
             
             training_text = response.text
             
-            # Parse into structured materials
-            structured_materials = self._parse_training_materials(training_text)
+            # Parse and validate against schema, falling back to the old
+            # heuristic parser only if validation ever fails
+            try:
+                validated = TrainingMaterials.model_validate_json(training_text)
+                structured_materials = validated.model_dump()
+            except ValidationError as e:
+                self.logger.error(f"Schema validation failed, falling back to heuristic parsing: {e}")
+                structured_materials = self._parse_training_materials(training_text)
             
             # Add to conversation memory
             agent_memory.session_service.add_to_conversation(
