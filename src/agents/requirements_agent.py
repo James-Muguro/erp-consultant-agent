@@ -2,18 +2,17 @@
 Requirements Gathering Agent - Analyzes stakeholder inputs and generates requirement documents
 """
 from src.utils.llm import get_llm
-try:
-    import google.generativeai as genai  # type: ignore
-except Exception:
-    genai = None
 from typing import Dict, List, Any, Optional
 import time
+
+from pydantic import ValidationError
 
 from src.config.settings import settings, REQUIREMENTS_AGENT_CONFIG
 from src.utils.logger import AgentLogger, metrics_collector
 from src.utils.prompts import REQUIREMENTS_SYSTEM_PROMPT, REQUIREMENTS_TASK_PROMPT
 from src.tools import erp_kb, doc_generator
 from src.memory import agent_memory
+from src.models.requirements_schema import RequirementsDocument
 
 
 class RequirementsAgent:
@@ -96,17 +95,23 @@ class RequirementsAgent:
                 self.config.name
             )
             
-            # Generate requirements using Gemini
+            # Generate requirements using Gemini, constrained to our schema
             self.logger.info("Calling Gemini API for requirements generation")
             response = self.model.generate_content(
                 prompt,
-                generation_config=self.generation_config
+                generation_config={**self.generation_config, 'response_schema': RequirementsDocument}
             )
             
             requirements_text = response.text
             
-            # Parse and structure the requirements
-            structured_requirements = self._parse_requirements(requirements_text)
+            # Parse and validate requirements against schema, with the old
+            # heuristic parser as a fallback if validation ever fails
+            try:
+                validated = RequirementsDocument.model_validate_json(requirements_text)
+                structured_requirements = validated.to_legacy_dict()
+            except ValidationError as e:
+                self.logger.error(f"Schema validation failed, falling back to heuristic parsing: {e}")
+                structured_requirements = self._parse_requirements(requirements_text)
             
             # Add conversation to memory
             agent_memory.session_service.add_to_conversation(
