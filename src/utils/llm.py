@@ -5,7 +5,7 @@ This version implements a hybrid approach: Gemini primary, GPT-4 fallback.
 from typing import Optional
 import logging
 from src.utils.llm_client import LLMClient as GeminiLLMClient
-import openai
+from openai import OpenAI
 from src.config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -29,13 +29,14 @@ class HybridLLMClient:
             self.gemini = None
             self.use_gemini = False
 
-        # Initialize GPT-4 fallback (OpenAI)
+        # Initialize GPT-4 fallback (OpenAI) - only if a key is actually configured
         self.gpt_model = "gpt-4"
-        if not openai.api_key:
-            openai.api_key = settings.openai_api_key  # must be set in .env
+        self.openai_client = OpenAI(api_key=settings.openai_api_key) if settings.openai_api_key else None
 
-    def generate_content(self, prompt: str, generation_config: Optional[dict] = None) -> str:
-        """Generate content using Gemini if available, otherwise GPT-4."""
+    def generate_content(self, prompt: str, generation_config: Optional[dict] = None):
+        """Generate content using Gemini if available, otherwise GPT-4.
+        Always returns an object with a `.text` attribute, regardless of
+        which path was used - every agent relies on that being consistent."""
         generation_config = generation_config or {}
         temperature = generation_config.get("temperature", self.temperature)
         max_tokens = generation_config.get("max_output_tokens", settings.max_tokens)
@@ -48,17 +49,21 @@ class HybridLLMClient:
                 logger.warning(f"HybridLLM: Gemini generation failed, falling back to GPT-4: {e}")
 
         # GPT-4 fallback
-        try:
-            response = openai.ChatCompletion.create(
-                model=self.gpt_model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-            return response.choices[0].message.content.strip()
-        except Exception as e:
-            logger.error(f"HybridLLM: GPT-4 generation failed: {e}")
-            return "Error generating response: LLM unavailable"
+        if self.openai_client:
+            try:
+                response = self.openai_client.chat.completions.create(
+                    model=self.gpt_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                text = response.choices[0].message.content.strip()
+                return type("LLMResponse", (), {"text": text})()
+            except Exception as e:
+                logger.error(f"HybridLLM: GPT-4 generation failed: {e}")
+
+        logger.error("HybridLLM: No LLM backend succeeded")
+        return type("LLMResponse", (), {"text": "Error generating response: LLM unavailable"})()
 
 def get_llm(model_key: str = "default", temperature: float = 0.7) -> HybridLLMClient:
     """Return the singleton hybrid LLM client."""

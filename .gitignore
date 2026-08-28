@@ -69,3 +69,4 @@ temp/
 *.tmp
 *.bak
 *smoke_test.py
+*requirements_Smoke_Test_Project_20260828.md
