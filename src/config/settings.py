@@ -2,7 +2,7 @@
 Configuration settings for ERP Consultant Agent
 """
 import os
-from typing import Optional
+from typing import Optional, Dict, List
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 
@@ -19,11 +19,25 @@ class Settings(BaseSettings):
     
     # Gemini API Configuration
     gemini_api_key: str = Field(..., description="Gemini API Key")
+    
+    # OpenAI API Configuration (fallback)
+    openai_api_key: Optional[str] = Field(None, description="OpenAI API Key for fallback LLM")
+    
+    # SerpApi
     serpapi_api_key: str = Field(..., description="SerpApi API Key")
-    gemini_model: str = Field(
-        default="gemini-2.0-flash-exp",
-        description="Gemini model to use"
+    
+    # LLM / Model Configuration
+    gemini_model: str = Field(default="gemini-2.0-flash-exp", description="Default Gemini model to use")
+    MODEL_MAP: Dict[str, str] = Field(
+        default_factory=lambda: {
+            "default": "gemini-2.0-flash-exp",
+            "qa": "gemini-2.0-qa",
+            "uat": "gemini-2.0-uat",
+            "training": "gemini-2.0-training"
+        },
+        description="Mapping of logical model keys to Gemini model names"
     )
+    
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     max_tokens: int = Field(default=8192, gt=0)
     
@@ -53,21 +67,19 @@ class Settings(BaseSettings):
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        # Create output directories if they don't exist
         os.makedirs(self.output_dir, exist_ok=True)
         os.makedirs(self.logs_dir, exist_ok=True)
 
 
 class AgentConfig:
     """Configuration for individual agents"""
-    
     def __init__(
         self,
         name: str,
         description: str,
         temperature: float = 0.7,
         max_iterations: int = 5,
-        tools: Optional[list] = None
+        tools: Optional[List[str]] = None
     ):
         self.name = name
         self.description = description
@@ -128,3 +140,5 @@ TRAINING_AGENT_CONFIG = AgentConfig(
 
 # Global settings instance
 settings = Settings()
+
+

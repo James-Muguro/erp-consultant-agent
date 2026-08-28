@@ -83,6 +83,15 @@ class AgentLogger:
             error=str(exception)
         )
 
+    def log_agent_complete(self, action: str, details: dict, duration: float):
+        """Log completion of an agent task with a small details dict and duration."""
+        self.logger.info(
+            "Agent action completed",
+            action=action,
+            duration=duration,
+            **(details or {})
+        )
+
     # ----------------------------
     # MemoryBank Logging (Flexible)
     # ----------------------------
@@ -107,6 +116,15 @@ class AgentLogger:
             "Memory operation failed",
             args=args,
             **kwargs
+        )
+
+    def log_tool_usage(self, action: str, details: dict, note: str = ""):
+        """Log usage of a tool from within an agent or orchestrator."""
+        self.logger.info(
+            "Tool usage",
+            action=action,
+            note=note,
+            **(details or {})
         )
 
     # ----------------------------

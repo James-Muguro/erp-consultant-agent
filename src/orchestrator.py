@@ -1,7 +1,7 @@
 """
 Orchestrator Agent - Coordinates all specialized agents and manages workflow
 """
-import google.generativeai as genai
+from src.utils.llm import get_llm
 from typing import Dict, List, Any, Optional
 import time
 from enum import Enum
@@ -39,15 +39,8 @@ class ERPOrchestratorAgent:
     def __init__(self):
         self.logger = AgentLogger("OrchestratorAgent")
         
-        # Configure Gemini for orchestration decisions
-        genai.configure(api_key=settings.gemini_api_key)
-        self.model = genai.GenerativeModel(
-            model_name=settings.gemini_model,
-            generation_config={
-                'temperature': 0.3,  # Lower temperature for more deterministic routing
-                'max_output_tokens': 2048,
-            }
-        )
+        # Get the singleton model instance
+        self.model = get_llm()
         
         # Phase workflow mapping
         self.phase_workflow = {
@@ -192,6 +185,21 @@ class ERPOrchestratorAgent:
         )
         
         if result['success']:
+            # Persist phase output if agent did not write it to memory (helpful for mocked tests)
+            phase_output = agent_memory.get_phase_output(session_id, 'requirements_gathering')
+            if not phase_output:
+                structured = result.get('requirements') or result.get('structured_requirements') or {}
+                doc_path = result.get('document_path')
+                agent_memory.save_phase_output(
+                    session_id,
+                    'requirements_gathering',
+                    {
+                        'structured_requirements': structured,
+                        'document_path': doc_path,
+                        'raw_text': result.get('raw_text', '')
+                    }
+                )
+
             # Advance phase
             agent_memory.advance_phase(session_id, ProjectPhase.PROCESS_MAPPING.value)
             self.logger.info("Requirements phase completed", session_id=session_id)
@@ -572,7 +580,7 @@ class ERPOrchestratorAgent:
             workflow_info = self.phase_workflow.get(phase_enum)
             if workflow_info:
                 return workflow_info['next_phase'].value
-        except:
+        except Exception:
             pass
         return "unknown"
 

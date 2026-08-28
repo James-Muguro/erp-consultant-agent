@@ -138,7 +138,7 @@ class DocumentGenerator:
         filename = f"requirements_{project_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.md"
         filepath = self.output_dir / filename
         
-        with open(filepath, 'w') as f:
+        with open(filepath, 'w', encoding='utf-8') as f:
             f.write(doc_content)
         
         self.logger.log_tool_usage(
@@ -241,7 +241,7 @@ _________________________________
         filename = f"test_cases_{test_type}_{project_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.md"
         filepath = self.output_dir / filename
         
-        with open(filepath, 'w') as f:
+        with open(filepath, 'w', encoding='utf-8') as f:
             f.write(doc_content)
         
         self.logger.log_tool_usage(
@@ -358,7 +358,7 @@ For assistance, please contact:
         filename = f"user_manual_{process_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.md"
         filepath = self.output_dir / filename
         
-        with open(filepath, 'w') as f:
+        with open(filepath, 'w', encoding='utf-8') as f:
             f.write(doc_content)
         
         self.logger.log_tool_usage(
@@ -492,7 +492,7 @@ For assistance, please contact:
         filename = f"solution_design_{project_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.md"
         filepath = self.output_dir / filename
         
-        with open(filepath, 'w') as f:
+        with open(filepath, 'w', encoding='utf-8') as f:
             f.write(doc_content)
         
         self.logger.log_tool_usage(
@@ -538,8 +538,25 @@ doc_generator = DocumentGenerator()
 # DocumentGeneratorTool (ADD THIS AT THE VERY BOTTOM OF THE FILE)
 # -------------------------------------------------------------------
 
-from typing import Optional, Dict, Any
-from langchain.tools import BaseTool
+from typing import Any
+try:
+    from langchain.tools import BaseTool  # type: ignore
+except Exception:
+    # Provide a minimal BaseTool fallback for dev mode when langchain is missing
+    class BaseTool:
+        """Minimal fallback for langchain.tools.BaseTool used for local development.
+
+        This keeps the DocumentGeneratorTool class importable for the POC without adding
+        a hard dependency on langchain.
+        """
+        name: str = "base_tool"
+        description: str = "fallback BaseTool for development"
+
+        def _run(self, *args, **kwargs):  # pragma: no cover - dev fallback
+            raise NotImplementedError("BaseTool._run not implemented in fallback")
+
+        async def _arun(self, *args, **kwargs):  # pragma: no cover - dev fallback
+            raise NotImplementedError("BaseTool._arun not implemented in fallback")
 
 class DocumentGeneratorTool(BaseTool):
     name: str = "document_generator"

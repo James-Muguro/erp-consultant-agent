@@ -1,0 +1,23 @@
+{"event": "FORCING dev LLM stub via USE_DEV_LLM environment variable", "level": "info", "timestamp": "2025-11-26T09:39:37.169844Z"}
+{"event": "Using dev stub LLM; to use the real Gemini client, install google-genai and configure GEMINI_API_KEY", "level": "info", "timestamp": "2025-11-26T09:39:37.174341Z"}
+{"event": "Using dev stub LLM; to use the real Gemini client, install google-genai and configure GEMINI_API_KEY", "level": "info", "timestamp": "2025-11-26T09:39:37.338896Z"}
+{"event": "Using dev stub LLM; to use the real Gemini client, install google-genai and configure GEMINI_API_KEY", "level": "info", "timestamp": "2025-11-26T09:39:37.340071Z"}
+{"event": "Requirements Gathering Agent initialized", "level": "info", "timestamp": "2025-11-26T09:39:37.340157Z"}
+{"event": "Using dev stub LLM; to use the real Gemini client, install google-genai and configure GEMINI_API_KEY", "level": "info", "timestamp": "2025-11-26T09:39:37.340379Z"}
+{"event": "Process Mapping Agent initialized", "level": "info", "timestamp": "2025-11-26T09:39:37.340428Z"}
+{"event": "Using dev stub LLM; to use the real Gemini client, install google-genai and configure GEMINI_API_KEY", "level": "info", "timestamp": "2025-11-26T09:39:37.340638Z"}
+{"event": "Solution Design Agent initialized", "level": "info", "timestamp": "2025-11-26T09:39:37.340687Z"}
+{"event": "Using dev stub LLM; to use the real Gemini client, install google-genai and configure GEMINI_API_KEY", "level": "info", "timestamp": "2025-11-26T09:39:37.340914Z"}
+{"event": "QA Testing Agent initialized", "level": "info", "timestamp": "2025-11-26T09:39:37.340959Z"}
+{"event": "Using dev stub LLM; to use the real Gemini client, install google-genai and configure GEMINI_API_KEY", "level": "info", "timestamp": "2025-11-26T09:39:37.340992Z"}
+{"event": "UAT Testing Agent initialized", "level": "info", "timestamp": "2025-11-26T09:39:37.341024Z"}
+{"event": "Using dev stub LLM; to use the real Gemini client, install google-genai and configure GEMINI_API_KEY", "level": "info", "timestamp": "2025-11-26T09:39:37.341205Z"}
+{"event": "Training & Documentation Agent initialized", "level": "info", "timestamp": "2025-11-26T09:39:37.341245Z"}
+{"event": "Using dev stub LLM; to use the real Gemini client, install google-genai and configure GEMINI_API_KEY", "level": "info", "timestamp": "2025-11-26T09:39:37.341432Z"}
+{"event": "Orchestrator Agent initialized", "level": "info", "timestamp": "2025-11-26T09:39:37.341478Z"}
+INFO:     Started server process [79519]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+ERROR:    [Errno 98] error while attempting to bind on address ('127.0.0.1', 8000): [errno 98] address already in use
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.

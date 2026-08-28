@@ -151,3 +151,35 @@ QA_TESTING_TASK_PROMPT = "Generate functional, integration, performance, and sec
 # UAT Testing Prompts
 UAT_TESTING_SYSTEM_PROMPT = "You are a UAT testing agent. Your task is to validate business processes from an end-user perspective."
 UAT_TESTING_TASK_PROMPT = "Create user acceptance test scenarios and verify business process flows for ERP implementations."
+
+
+def get_synthesis_prompt(query: str, data: dict) -> str:
+    """Create a prompt for LLM to synthesize knowledge base and web results into a concise answer."""
+    kb_results = data.get("kb_results", [])
+    web_results = data.get("web_results", [])
+    sources = data.get("sources", [])
+
+    prompt_parts = [
+        f"User question: {query}",
+        "Use the following information from knowledge base and web results to craft a concise, actionable response:",
+    ]
+
+    if kb_results:
+        prompt_parts.append("Knowledge base excerpts:")
+        for idx, item in enumerate(kb_results[:3], 1):
+            prompt_parts.append(f"{idx}. {item}")
+
+    if web_results:
+        prompt_parts.append("Web results:")
+        for idx, item in enumerate(web_results[:3], 1):
+            prompt_parts.append(f"{idx}. {item}")
+
+    if sources:
+        prompt_parts.append("Cite the key sources used:")
+        for src in sources[:5]:
+            prompt_parts.append(f"- {src}")
+
+    prompt_parts.append("Return a short answer and suggested next steps.")
+
+    return "\n\n".join(prompt_parts)
+
