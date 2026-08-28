@@ -92,24 +92,37 @@ class TestRequirementsAgent:
     
     def test_gather_requirements_success(self, test_session_id, sample_stakeholder_input):
         """Test successful requirements gathering"""
-        # Mock the Gemini API response
+        # Mock the Gemini API response with schema-conformant JSON,
+        # matching what the real Gemini structured-output call returns
         mock_response = Mock()
-        mock_response.text = """
-        # Executive Summary
-        Implementing Purchase Order management system.
-        
-        ## Functional Requirements
-        ### Purchase Order Management
-        - REQ-001: Create purchase orders
-        - REQ-002: Approve purchase orders
-        - REQ-003: Three-way matching
-        """
+        mock_response.text = """{
+            "executive_summary": "Implementing Purchase Order management system.",
+            "business_context": "Procurement needs a standardized PO workflow.",
+            "objectives": ["Reduce manual PO errors"],
+            "functional_requirements": [
+                {
+                    "category": "Purchase Order Management",
+                    "requirements": [
+                        {"id": "REQ-001", "description": "Create purchase orders", "priority": "High", "type": "Functional"},
+                        {"id": "REQ-002", "description": "Approve purchase orders", "priority": "High", "type": "Functional"},
+                        {"id": "REQ-003", "description": "Three-way matching", "priority": "High", "type": "Functional"}
+                    ]
+                }
+            ],
+            "technical_requirements": [],
+            "integration_requirements": [],
+            "reporting_requirements": [],
+            "dependencies": [],
+            "constraints": [],
+            "assumptions": []
+        }"""
         
         mock_model_instance = Mock()
         mock_model_instance.generate_content.return_value = mock_response
         
         agent = RequirementsAgent()
         agent.model = mock_model_instance
+        
         result = agent.gather_requirements(
             session_id=test_session_id,
             project_name="Test Project",
@@ -122,6 +135,10 @@ class TestRequirementsAgent:
         assert 'requirements' in result
         assert 'document_path' in result
         assert result['duration'] >= 0
+        # Confirm schema-validated parsing actually ran, not the fallback
+        func_reqs = result['requirements']['functional_requirements']
+        assert 'Purchase Order Management' in func_reqs
+        assert len(func_reqs['Purchase Order Management']) == 3
     
     def test_build_context(self):
         """Test context building"""
