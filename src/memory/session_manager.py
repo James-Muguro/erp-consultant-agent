@@ -195,6 +195,27 @@ class InMemorySessionService:
         
         self._save_session(session)
     
+    def advance_phase(self, session_id: str, new_phase: str):
+        """Move session to next phase"""
+        session = self.get_session(session_id)
+        if not session:
+            return
+        
+        if session.current_phase not in session.completed_phases:
+            session.completed_phases.append(session.current_phase)
+        
+        session.current_phase = new_phase
+        session.updated_at = datetime.now()
+        
+        self.logger.info(
+            "Phase advanced",
+            session_id=session_id,
+            old_phase=session.current_phase,
+            new_phase=new_phase
+        )
+        
+        self._save_session(session)
+    
     def get_phase_output(
         self,
         session_id: str,
