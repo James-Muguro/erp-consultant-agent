@@ -7,14 +7,18 @@ from typing import List
 from pydantic import BaseModel, Field
 
 
+class UserManualField(BaseModel):
+    name: str
+    description: str = ""
+    required: str = "No"
+    example: str = ""
+
 class UserManualStep(BaseModel):
     title: str
     transaction: str = ""
     instructions: str = ""
-    fields: List[str] = Field(default_factory=list)
+    fields: List[UserManualField] = Field(default_factory=list)
     tips: List[str] = Field(default_factory=list)
-
-
 class UserManual(BaseModel):
     steps: List[UserManualStep] = Field(default_factory=list)
     tips: List[str] = Field(default_factory=list)
