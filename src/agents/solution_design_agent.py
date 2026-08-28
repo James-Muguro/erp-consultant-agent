@@ -11,6 +11,9 @@ from src.utils.prompts import SOLUTION_DESIGN_SYSTEM_PROMPT, SOLUTION_DESIGN_TAS
 from src.tools import erp_kb, doc_generator
 from src.memory import agent_memory
 
+from pydantic import ValidationError
+from src.models.solution_design_schema import SolutionDesign
+
 
 class SolutionDesignAgent:
     """Agent specialized in designing ERP solutions"""
@@ -96,14 +99,21 @@ class SolutionDesignAgent:
                 'max_output_tokens': settings.max_tokens,
             }
             
-            # Generate solution design using Gemini
+            # Generate solution design using Gemini, constrained to our schema
             self.logger.info("Calling Gemini API for solution design")
+            generation_config = {**generation_config, 'response_schema': SolutionDesign}
             response = self.model.generate_content(prompt, generation_config=generation_config)
             
             design_text = response.text
             
-            # Parse and structure the design
-            structured_design = self._parse_design(design_text)
+            # Parse and validate against schema, falling back to the old
+            # heuristic parser only if validation ever fails
+            try:
+                validated = SolutionDesign.model_validate_json(design_text)
+                structured_design = validated.to_legacy_dict()
+            except ValidationError as e:
+                self.logger.error(f"Schema validation failed, falling back to heuristic parsing: {e}")
+                structured_design = self._parse_design(design_text)
             
             # Add to conversation memory
             agent_memory.session_service.add_to_conversation(
