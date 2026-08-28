@@ -1,7 +1,8 @@
 """
 FastAPI wrapper for ERP Orchestrator with hybrid LLM support (Gemini + GPT-4 fallback)
 """
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Security, Depends
+from fastapi.security import APIKeyHeader
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -31,6 +32,13 @@ app.add_middleware(
 
 app.mount("/ui", StaticFiles(directory="ui"), name="ui")
 
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+def verify_api_key(api_key: str = Security(api_key_header)):
+    if api_key != settings.api_auth_key:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    return api_key
 
 class ProjectStart(BaseModel):
     project_name: str
@@ -83,7 +91,7 @@ def health():
 
 
 @app.post("/api/projects/start")
-def start_project(req: ProjectStart):
+def start_project(req: ProjectStart, _: str = Depends(verify_api_key)):
     result = orchestrator.start_project(
         project_name=req.project_name,
         module=req.module,
@@ -96,7 +104,7 @@ def start_project(req: ProjectStart):
 
 
 @app.post("/api/projects/{session_id}/phase/{phase_name}/execute")
-def execute_phase(session_id: str, phase_name: str):
+def execute_phase(session_id: str, phase_name: str, _: str = Depends(verify_api_key)):
     phase_map = {
         'requirements': orchestrator.execute_requirements_phase,
         'process_mapping': orchestrator.execute_process_mapping_phase,
@@ -116,7 +124,7 @@ def execute_phase(session_id: str, phase_name: str):
 
 
 @app.get("/api/projects/{session_id}/status")
-def project_status(session_id: str):
+def project_status(session_id: str, _: str = Depends(verify_api_key)):
     return orchestrator.get_project_status(session_id)
 
 
@@ -129,7 +137,7 @@ def _chat_response(answer: str, llm_mode: str, success: bool = True):
 
 
 @app.post("/api/chat")
-def chat(req: ChatRequest):
+def chat(req: ChatRequest, _: str = Depends(verify_api_key)):
     logger.info({"event": "Chat request received", "message": req.message, "session_id": req.session_id})
 
     m_lower = req.message.lower()
