@@ -141,6 +141,8 @@ def chat(req: ChatRequest, _: str = Depends(verify_api_key)):
     logger.info({"event": "Chat request received", "message": req.message, "session_id": req.session_id})
 
     m_lower = req.message.lower()
+    llm_instance = llm_mod.get_llm()
+    llm_mode = "gemini" if getattr(llm_instance, "use_gemini", True) else "gpt-4"
 
     # Special commands
     if 'start project' in m_lower or 'start workflow' in m_lower:
@@ -149,14 +151,14 @@ def chat(req: ChatRequest, _: str = Depends(verify_api_key)):
         res = orchestrator.start_project(project_name, 'FI', initial_input=None)
         if res.get('success'):
             return _chat_response(f"Project '{project_name}' started successfully with session ID: {res.get('session_id')}.",
-                                  llm_mode="gemini")
+                                  llm_mode=llm_mode)
         else:
             return _chat_response(f"Failed to start project: {res.get('error', 'Unknown error')}",
-                                  llm_mode="gemini", success=False)
+                                  llm_mode=llm_mode, success=False)
 
     if 'run phase' in m_lower or 'execute phase' in m_lower:
         if not req.session_id:
-            return _chat_response("session_id is required to run a phase.", llm_mode="gemini", success=False)
+            return _chat_response("session_id is required to run a phase.", llm_mode=llm_mode, success=False)
 
         phase_map = {
             'requirements': orchestrator.execute_requirements_phase,
@@ -170,11 +172,11 @@ def chat(req: ChatRequest, _: str = Depends(verify_api_key)):
             if p in m_lower:
                 result = func(session_id=req.session_id)
                 if result.get('success'):
-                    return _chat_response(f"Phase '{p}' executed successfully.", llm_mode="gemini")
+                    return _chat_response(f"Phase '{p}' executed successfully.", llm_mode=llm_mode)
                 else:
                     return _chat_response(f"Failed to execute phase '{p}': {result.get('error', 'Unknown error')}",
-                                          llm_mode="gemini", success=False)
-        return _chat_response("Could not determine which phase to run.", llm_mode="gemini", success=False)
+                                          llm_mode=llm_mode, success=False)
+        return _chat_response("Could not determine which phase to run.", llm_mode=llm_mode, success=False)
 
     # Agent hint
     if req.agent_hint and req.session_id:
