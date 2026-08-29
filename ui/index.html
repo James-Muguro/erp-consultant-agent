@@ -1,21 +1,53 @@
-<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
     <title>ERP Consultant Agent</title>
-    <link rel="stylesheet" href="/ui/style.css" />
-  </head>
-  <body>
+
+    <link rel="stylesheet" href="/ui/style.css">
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.0/marked.min.js"></script>
+</head>
+
+<body>
     <div class="container">
-      <h1>ERP Consultant Agent</h1>
-      <div id="session-banner" class="session-banner">No active project - just tell me what you'd like to start.</div>
-      <div id="chat" class="chat-box"></div>
-      <div class="chat-input">
-        <input id="msg" type="text" placeholder="e.g. 'Start a project for Contoso Manufacturing' or ask any question..." />
-        <button id="send">Send</button>
-      </div>
+
+        <div class="header">
+            <h1>ERP Consultant Agent</h1>
+        </div>
+
+        <div id="session-banner" class="session-banner">
+            No active project yet - describe what you'd like to work on.
+        </div>
+
+        <div id="chat" class="chat-box">
+            {% for message in conversation %}
+                <div
+                    class="chat-entry {{ message.role }}"
+                    data-role="{{ message.role }}"
+                    data-content="{{ message.content | e }}"
+                ></div>
+            {% endfor %}
+        </div>
+
+        <div class="chat-input">
+            <input
+                id="msg"
+                type="text"
+                name="user_prompt"
+                placeholder="Ask a question, or describe what you need (e.g. a new implementation, requirements, test cases)..."
+                autofocus
+            >
+
+            <button id="send" type="button">
+                Send
+            </button>
+        </div>
+
     </div>
+
     <script src="/ui/app.js"></script>
-  </body>
+</body>
 </html>
