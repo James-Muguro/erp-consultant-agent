@@ -8,7 +8,11 @@ let currentSessionId = null;
 function appendMessage(role, text) {
   const entry = document.createElement('div');
   entry.className = 'chat-entry ' + role;
-  entry.innerText = `${role}: ${text}`;
+  if (role === 'assistant' && window.marked) {
+    entry.innerHTML = window.marked.parse(text);
+  } else {
+    entry.innerText = text;
+  }
   chatEl.appendChild(entry);
   chatEl.scrollTop = chatEl.scrollHeight;
 }
