@@ -268,33 +268,38 @@ The system includes automated evaluation metrics to assess output quality:
 
 ## Project Structure
 
+```text
 erp-consultant-agent/
 ├── src/
-│ ├── orchestrator.py # Main workflow coordinator
-│ ├── main.py # CLI interface
-│ ├── orchestrator_api.py # API server with demo UI
-│ ├── agents/ # 6 specialized agents
-│ │ ├── requirements_agent.py
-│ │ ├── process_mapping_agent.py
-│ │ ├── solution_design_agent.py
-│ │ ├── testing_agents.py # QA and UAT agents
-│ │ └── training_agent.py
-│ ├── models/ # Pydantic schemas for structured LLM output
-│ ├── tools/ # Custom tools (ERP KB, Doc Gen, Test Gen)
-│ ├── memory/ # Session & memory management
-│ ├── utils/ # Logging, prompts, context management
-│ └── config/ # Configuration & settings
+│   ├── orchestrator.py              # Main workflow coordinator
+│   ├── main.py                      # CLI interface
+│   ├── orchestrator_api.py          # API server with demo UI
+│   ├── agents/                      # 6 specialized agents
+│   │   ├── requirements_agent.py
+│   │   ├── process_mapping_agent.py
+│   │   ├── solution_design_agent.py
+│   │   ├── testing_agents.py        # QA and UAT agents
+│   │   └── training_agent.py
+│   ├── models/                      # Pydantic schemas for structured LLM output
+│   ├── tools/                       # Custom tools (ERP KB, Doc Gen, Test Gen)
+│   ├── memory/                      # Session and memory management
+│   ├── utils/                       # Logging, prompts, context management
+│   └── config/                      # Configuration and settings
+│
 ├── tests/
-│ ├── test_requirements_agent.py
-│ ├── test_orchestrator.py
-│ ├── evaluation_metrics.py
-│ └── run_tests.py
+│   ├── test_requirements_agent.py
+│   ├── test_orchestrator.py
+│   ├── evaluation_metrics.py
+│   └── run_tests.py
+│
 ├── docs/
-│ ├── architecture.md # Technical architecture
-│ ├── user_guide.md # User documentation
-│ └── SUBMISSION.md # Original project writeup
-├── demo.py # Interactive demo
-└── requirements.txt # Dependencies
+│   ├── architecture.md              # Technical architecture
+│   ├── user_guide.md                # User documentation
+│   └── SUBMISSION.md                # Original project writeup
+│
+├── demo.py                          # Interactive demo
+└── requirements.txt                 # Dependencies
+```
 
 ---
 
