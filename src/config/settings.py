@@ -20,8 +20,13 @@ class Settings(BaseSettings):
     # Gemini API Configuration
     gemini_api_key: str = Field(..., description="Gemini API Key")
     
-    # OpenAI API Configuration (fallback)
-    openai_api_key: Optional[str] = Field(None, description="OpenAI API Key for fallback LLM")
+    # OpenAI API Configuration (secondary fallback)
+    openai_api_key: Optional[str] = Field(None, description="OpenAI API Key for secondary fallback LLM")
+    openai_model: str = Field(default="gpt-4o", description="OpenAI model for the secondary fallback tier")
+    
+    # Anthropic API Configuration (tertiary fallback)
+    anthropic_api_key: Optional[str] = Field(None, description="Anthropic API Key for tertiary fallback LLM")
+    anthropic_model: str = Field(default="claude-sonnet-4-6", description="Anthropic model for the tertiary fallback tier")
     
     # SerpApi
     serpapi_api_key: str = Field(..., description="SerpApi API Key")
