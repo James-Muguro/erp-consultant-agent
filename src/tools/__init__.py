@@ -15,7 +15,6 @@ from .test_case_generator import (
     TestCaseGenerator,
     test_generator,
 )
-from .code_execution import CodeExecutionTool
 from .document_generator import (
     DocumentGeneratorTool,
     DocumentGenerator,
@@ -29,7 +28,6 @@ __all__ = [
     "ProcessVisualizerTool",
     "ERPKnowledgeBaseTool",
     "TestCaseGeneratorTool",
-    "CodeExecutionTool",
     "DocumentGeneratorTool",
 
     # Core classes
