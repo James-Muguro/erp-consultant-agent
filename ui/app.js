@@ -1,8 +1,9 @@
 const chatEl = document.getElementById('chat');
 const msgInput = document.getElementById('msg');
 const sendBtn = document.getElementById('send');
-const projectForm = document.getElementById('project-form');
-const projectStatus = document.getElementById('project-status');
+const sessionBanner = document.getElementById('session-banner');
+
+let currentSessionId = null;
 
 function appendMessage(role, text) {
   const entry = document.createElement('div');
@@ -12,7 +13,13 @@ function appendMessage(role, text) {
   chatEl.scrollTop = chatEl.scrollHeight;
 }
 
-sendBtn.addEventListener('click', async () => {
+function updateSessionBanner() {
+  sessionBanner.innerText = currentSessionId
+    ? `Active project session: ${currentSessionId}`
+    : "No active project - just tell me what you'd like to start.";
+}
+
+async function sendMessage() {
   const message = msgInput.value.trim();
   if (!message) return;
   appendMessage('user', message);
@@ -23,7 +30,7 @@ sendBtn.addEventListener('click', async () => {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-API-Key': window.API_KEY },
-      body: JSON.stringify({ message })
+      body: JSON.stringify({ message, session_id: currentSessionId })
     });
 
     if (!res.ok) {
@@ -34,36 +41,22 @@ sendBtn.addEventListener('click', async () => {
 
     const resp = await res.json();
     if (resp && resp.success) {
-      if (resp.llm_mode) appendMessage('system', `LLM mode: ${resp.llm_mode}`);
+      if (resp.session_id && resp.session_id !== currentSessionId) {
+        currentSessionId = resp.session_id;
+        updateSessionBanner();
+      }
       appendMessage('assistant', resp.answer);
     } else {
-      appendMessage('assistant', 'Error: ' + (resp.error || 'Unknown'));
+      appendMessage('assistant', 'Error: ' + (resp.answer || resp.error || 'Unknown'));
     }
   } catch (err) {
     appendMessage('assistant', 'Network error: ' + err.message);
   } finally {
     sendBtn.disabled = false;
   }
-});
+}
 
-projectForm.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const data = new FormData(projectForm);
-  const payload = {
-    project_name: data.get('project_name'),
-    module: data.get('module')
-  };
-
-  const resp = await fetch('/api/projects/start', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-API-Key': window.API_KEY },
-    body: JSON.stringify(payload)
-  }).then(r => r.json());
-
-  if (resp && resp.success) {
-    projectStatus.innerText = `Project created: ${resp.project_name} (session: ${resp.session_id})`;
-    appendMessage('system', `Project ${resp.project_name} created with session ${resp.session_id}`);
-  } else {
-    projectStatus.innerText = 'Failed to create project';
-  }
+sendBtn.addEventListener('click', sendMessage);
+msgInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') sendMessage();
 });
