@@ -18,6 +18,7 @@ from src.memory import agent_memory
 from src.tools.info_retriever import info_retriever
 from src.utils.logger import get_logger
 from src.utils.prompts import get_synthesis_prompt
+from src.models.chat_intent_schema import ChatIntent, ChatIntentDecision
 
 logger = get_logger(__name__)
 
@@ -135,19 +136,59 @@ def _chat_response(answer: str, llm_mode: str, success: bool = True):
         'llm_mode': llm_mode,
     }
 
+def classify_intent(message: str, has_session: bool) -> ChatIntentDecision:
+    """Classify the user's chat message into a known action. Falls back
+    to ASK_QUESTION on any failure - an unclear or misclassified message
+    should never accidentally trigger a workflow action."""
+    prompt = f"""Classify this user message into exactly one intent.
+
+Message: "{message}"
+User currently has an active project session: {has_session}
+
+Intents:
+- start_project: user explicitly wants to begin a new ERP project (e.g. "start a new project called X", "let's begin implementation for Y")
+- run_phase: user explicitly wants to execute a specific workflow phase on their CURRENT project. Only valid if a session already exists. Phase must be one of: requirements, process_mapping, solution_design, qa_testing, uat_testing, training
+- generate_training: user explicitly wants training materials or a user guide generated as a document
+- ask_question: anything else - general questions, discussion, or requests for information, even if they mention topics like "training" or "requirements" without asking to generate or run something
+
+Default to ask_question whenever the message is ambiguous, conversational, or informational rather than a direct command."""
+
+    try:
+        llm_instance = llm_mod.get_llm()
+        response = llm_instance.generate_content(
+            prompt,
+            generation_config={'response_schema': ChatIntentDecision, 'temperature': 0.0}
+        )
+        return ChatIntentDecision.model_validate_json(response.text)
+    except Exception as e:
+        logger.warning(f"Intent classification failed, defaulting to ask_question: {e}")
+        return ChatIntentDecision(intent=ChatIntent.ASK_QUESTION)
 
 @app.post("/api/chat")
 def chat(req: ChatRequest, _: str = Depends(verify_api_key)):
     logger.info({"event": "Chat request received", "message": req.message, "session_id": req.session_id})
 
-    m_lower = req.message.lower()
     llm_instance = llm_mod.get_llm()
     llm_mode = "gemini" if getattr(llm_instance, "use_gemini", True) else "gpt-4"
 
-    # Special commands
-    if 'start project' in m_lower or 'start workflow' in m_lower:
-        parts = req.message.split(':')
-        project_name = parts[1].strip() if len(parts) > 1 else 'Chat Project'
+    # Explicit agent_hint always wins - it's a direct instruction from the
+    # caller, not something that needs classifying
+    if req.agent_hint and req.session_id:
+        if req.agent_hint.lower() == 'requirements':
+            res = requirements_agent.gather_requirements(
+                session_id=req.session_id,
+                project_name='Chat Project',
+                module='FI',
+                stakeholder_input=req.message
+            )
+            summary = res.get('requirements', {}).get('executive_summary', 'No summary available.')
+            return _chat_response(f"Requirements gathered: {summary}", llm_mode=llm_mode)
+
+    decision = classify_intent(req.message, has_session=bool(req.session_id))
+    logger.info({"event": "Intent classified", "intent": decision.intent.value})
+
+    if decision.intent == ChatIntent.START_PROJECT:
+        project_name = decision.project_name or 'Chat Project'
         res = orchestrator.start_project(project_name, 'FI', initial_input=None)
         if res.get('success'):
             return _chat_response(f"Project '{project_name}' started successfully with session ID: {res.get('session_id')}.",
@@ -156,7 +197,7 @@ def chat(req: ChatRequest, _: str = Depends(verify_api_key)):
             return _chat_response(f"Failed to start project: {res.get('error', 'Unknown error')}",
                                   llm_mode=llm_mode, success=False)
 
-    if 'run phase' in m_lower or 'execute phase' in m_lower:
+    if decision.intent == ChatIntent.RUN_PHASE:
         if not req.session_id:
             return _chat_response("session_id is required to run a phase.", llm_mode=llm_mode, success=False)
 
@@ -168,34 +209,17 @@ def chat(req: ChatRequest, _: str = Depends(verify_api_key)):
             'uat_testing': orchestrator.execute_uat_testing_phase,
             'training': orchestrator.execute_training_phase
         }
-        for p, func in phase_map.items():
-            if p in m_lower:
-                result = func(session_id=req.session_id)
-                if result.get('success'):
-                    return _chat_response(f"Phase '{p}' executed successfully.", llm_mode=llm_mode)
-                else:
-                    return _chat_response(f"Failed to execute phase '{p}': {result.get('error', 'Unknown error')}",
-                                          llm_mode=llm_mode, success=False)
-        return _chat_response("Could not determine which phase to run.", llm_mode=llm_mode, success=False)
+        if decision.phase not in phase_map:
+            return _chat_response("Could not determine which phase to run.", llm_mode=llm_mode, success=False)
 
-    # Agent hint
-    if req.agent_hint and req.session_id:
-        if req.agent_hint.lower() == 'requirements':
-            res = requirements_agent.gather_requirements(
-                session_id=req.session_id,
-                project_name='Chat Project',
-                module='FI',
-                stakeholder_input=req.message
-            )
-            summary = res.get('requirements', {}).get('executive_summary', 'No summary available.')
-            return _chat_response(f"Requirements gathered: {summary}",
-                                  llm_mode=llm_mode)
+        result = phase_map[decision.phase](session_id=req.session_id)
+        if result.get('success'):
+            return _chat_response(f"Phase '{decision.phase}' executed successfully.", llm_mode=llm_mode)
+        else:
+            return _chat_response(f"Failed to execute phase '{decision.phase}': {result.get('error', 'Unknown error')}",
+                                  llm_mode=llm_mode, success=False)
 
-    # Training materials - requires an explicit generation command, not just
-    # any message that happens to mention "training" (e.g. a question like
-    # "what does UAT training cover?" must NOT trigger document generation)
-    training_triggers = ('generate training', 'create training materials', 'generate user guide', 'create user manual', 'generate training guide', 'create training documentation')
-    if any(t in m_lower for t in training_triggers) and req.session_id is None:
+    if decision.intent == ChatIntent.GENERATE_TRAINING and req.session_id is None:
         session_id = agent_memory.create_project(project_name='AP Invoice Posting', module='FI')
         result = training_agent.create_training_materials(
             session_id=session_id,
@@ -209,7 +233,7 @@ def chat(req: ChatRequest, _: str = Depends(verify_api_key)):
         else:
             return _chat_response("Failed to generate training materials.", llm_mode=llm_mode, success=False)
 
-    # Info retrieval + LLM synthesis
+    # ASK_QUESTION (default) - info retrieval + LLM synthesis
     data = info_retriever(req.message, {'summary': ''}, prefer_web=req.prefer_web)
     final_answer = "No information found."
 
