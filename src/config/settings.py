@@ -59,7 +59,6 @@ class Settings(BaseSettings):
     
     # Agent-specific settings
     enable_google_search: bool = Field(default=True)
-    enable_code_execution: bool = Field(default=True)
     
     # Output directories
     output_dir: str = Field(default="output")
@@ -129,7 +128,7 @@ QA_TESTING_AGENT_CONFIG = AgentConfig(
     description="Generates comprehensive QA test cases and test scripts",
     temperature=0.3,
     max_iterations=5,
-    tools=["test_case_generator", "code_execution"]
+    tools=["test_case_generator"]
 )
 
 UAT_TESTING_AGENT_CONFIG = AgentConfig(
