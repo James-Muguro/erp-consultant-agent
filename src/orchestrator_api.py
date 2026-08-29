@@ -233,22 +233,26 @@ def chat(req: ChatRequest, _: str = Depends(verify_api_key)):
         else:
             return _chat_response("Failed to generate training materials.", llm_mode=llm_mode, success=False)
 
-    # ASK_QUESTION (default) - info retrieval + LLM synthesis
+    # ASK_QUESTION (default) - info retrieval + LLM synthesis, with a
+    # plain conversational fallback when there's nothing to retrieve
+    # (e.g. "thanks", small talk) rather than a robotic error string
     data = info_retriever(req.message, {'summary': ''}, prefer_web=req.prefer_web)
-    final_answer = "No information found."
+    generation_config = {
+        'temperature': 0.5,
+        'max_output_tokens': 2048,
+    }
 
     if data and (data.get('kb_results') or data.get('web_results') or data.get('sources')):
         prompt = get_synthesis_prompt(req.message, data)
-        generation_config = {
-            'temperature': 0.5,
-            'max_output_tokens': 2048,
-        }
-        try:
-            response = llm_instance.generate_content(prompt, generation_config=generation_config)
-            final_answer = extract_text(response)
-        except Exception as e:
-            logger.error(f"Error during final answer synthesis: {e}")
-            final_answer = "I found some information, but I had trouble summarizing it."
+    else:
+        prompt = f'Respond naturally and briefly, as a helpful ERP consulting assistant, to this message: "{req.message}"'
+
+    try:
+        response = llm_instance.generate_content(prompt, generation_config=generation_config)
+        final_answer = extract_text(response)
+    except Exception as e:
+        logger.error(f"Error during final answer synthesis: {e}")
+        final_answer = "I found some information, but I had trouble summarizing it."
 
     logger.info({"event": "Chat response ready", "session_id": req.session_id})
     return _chat_response(final_answer, llm_mode=llm_mode)
