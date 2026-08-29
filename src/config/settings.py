@@ -20,13 +20,17 @@ class Settings(BaseSettings):
     # Gemini API Configuration
     gemini_api_key: str = Field(..., description="Gemini API Key")
     
-    # OpenAI API Configuration (secondary fallback)
-    openai_api_key: Optional[str] = Field(None, description="OpenAI API Key for secondary fallback LLM")
-    openai_model: str = Field(default="gpt-4o", description="OpenAI model for the secondary fallback tier")
+    # Groq API Configuration (secondary fallback - free tier)
+    groq_api_key: Optional[str] = Field(None, description="Groq API Key for secondary (free) fallback LLM")
+    groq_model: str = Field(default="openai/gpt-oss-20b", description="Groq model for the secondary fallback tier")
     
-    # Anthropic API Configuration (tertiary fallback)
-    anthropic_api_key: Optional[str] = Field(None, description="Anthropic API Key for tertiary fallback LLM")
-    anthropic_model: str = Field(default="claude-sonnet-4-6", description="Anthropic model for the tertiary fallback tier")
+    # OpenAI API Configuration (tertiary fallback)
+    openai_api_key: Optional[str] = Field(None, description="OpenAI API Key for tertiary fallback LLM")
+    openai_model: str = Field(default="gpt-4o", description="OpenAI model for the tertiary fallback tier")
+    
+    # Anthropic API Configuration (quaternary fallback)
+    anthropic_api_key: Optional[str] = Field(None, description="Anthropic API Key for quaternary fallback LLM")
+    anthropic_model: str = Field(default="claude-sonnet-4-6", description="Anthropic model for the quaternary fallback tier")
     
     # SerpApi
     serpapi_api_key: str = Field(..., description="SerpApi API Key")
