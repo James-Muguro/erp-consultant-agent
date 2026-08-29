@@ -8,3 +8,8 @@ body { font-family: Arial, Helvetica, sans-serif; background:#f7f9fb; }
 .chat-entry.user { background:#e0f7ff; }
 .chat-entry.system { background:#fff2cc; }
 .chat-entry.assistant { background:#f1f3f5; }
+.chat-entry.assistant h1, .chat-entry.assistant h2, .chat-entry.assistant h3 { margin: 8px 0 4px; }
+.chat-entry.assistant ul, .chat-entry.assistant ol { margin: 4px 0; padding-left: 22px; }
+.chat-entry.assistant p { margin: 6px 0; }
+.chat-entry.assistant a { color: #0366d6; }
+.chat-entry.assistant code { background: #eee; padding: 1px 4px; border-radius: 3px; }
