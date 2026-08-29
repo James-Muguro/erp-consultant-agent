@@ -136,10 +136,12 @@ def _chat_response(answer: str, llm_mode: str, success: bool = True):
         'llm_mode': llm_mode,
     }
 
-def classify_intent(message: str, has_session: bool) -> ChatIntentDecision:
+def classify_intent(llm_instance, message: str, has_session: bool) -> ChatIntentDecision:
     """Classify the user's chat message into a known action. Falls back
     to ASK_QUESTION on any failure - an unclear or misclassified message
-    should never accidentally trigger a workflow action."""
+    should never accidentally trigger a workflow action. Takes the
+    already-resolved llm_instance rather than fetching its own, so a
+    single chat request only ever resolves the LLM client once."""
     prompt = f"""Classify this user message into exactly one intent.
 
 Message: "{message}"
@@ -154,7 +156,6 @@ Intents:
 Default to ask_question whenever the message is ambiguous, conversational, or informational rather than a direct command."""
 
     try:
-        llm_instance = llm_mod.get_llm()
         response = llm_instance.generate_content(
             prompt,
             generation_config={'response_schema': ChatIntentDecision, 'temperature': 0.0}
@@ -184,7 +185,7 @@ def chat(req: ChatRequest, _: str = Depends(verify_api_key)):
             summary = res.get('requirements', {}).get('executive_summary', 'No summary available.')
             return _chat_response(f"Requirements gathered: {summary}", llm_mode=llm_mode)
 
-    decision = classify_intent(req.message, has_session=bool(req.session_id))
+    decision = classify_intent(llm_instance, req.message, has_session=bool(req.session_id))
     logger.info({"event": "Intent classified", "intent": decision.intent.value})
 
     if decision.intent == ChatIntent.START_PROJECT:
