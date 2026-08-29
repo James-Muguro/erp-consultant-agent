@@ -212,8 +212,6 @@ def chat(req: ChatRequest, _: str = Depends(verify_api_key)):
     # Info retrieval + LLM synthesis
     data = info_retriever(req.message, {'summary': ''}, prefer_web=req.prefer_web)
     final_answer = "No information found."
-    llm_instance = llm_mod.get_llm()
-    llm_mode = "gemini" if getattr(llm_instance, "use_gemini", True) else "gpt-4"
 
     if data and (data.get('kb_results') or data.get('web_results') or data.get('sources')):
         prompt = get_synthesis_prompt(req.message, data)
