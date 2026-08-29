@@ -129,11 +129,12 @@ def project_status(session_id: str, _: str = Depends(verify_api_key)):
     return orchestrator.get_project_status(session_id)
 
 
-def _chat_response(answer: str, llm_mode: str, success: bool = True):
+def _chat_response(answer: str, llm_mode: str, success: bool = True, session_id: Optional[str] = None):
     return {
         'success': success,
         'answer': answer,
         'llm_mode': llm_mode,
+        'session_id': session_id,
     }
 
 def classify_intent(llm_instance, message: str, has_session: bool) -> ChatIntentDecision:
@@ -192,8 +193,8 @@ def chat(req: ChatRequest, _: str = Depends(verify_api_key)):
         project_name = decision.project_name or 'Chat Project'
         res = orchestrator.start_project(project_name, 'FI', initial_input=None)
         if res.get('success'):
-            return _chat_response(f"Project '{project_name}' started successfully with session ID: {res.get('session_id')}.",
-                                  llm_mode=llm_mode)
+            return _chat_response(f"Project '{project_name}' started. You can now ask me to gather requirements, run a phase, or ask any question about it.",
+                                  llm_mode=llm_mode, session_id=res.get('session_id'))
         else:
             return _chat_response(f"Failed to start project: {res.get('error', 'Unknown error')}",
                                   llm_mode=llm_mode, success=False)
@@ -215,10 +216,10 @@ def chat(req: ChatRequest, _: str = Depends(verify_api_key)):
 
         result = phase_map[decision.phase](session_id=req.session_id)
         if result.get('success'):
-            return _chat_response(f"Phase '{decision.phase}' executed successfully.", llm_mode=llm_mode)
+            return _chat_response(f"Phase '{decision.phase}' executed successfully.", llm_mode=llm_mode, session_id=req.session_id)
         else:
             return _chat_response(f"Failed to execute phase '{decision.phase}': {result.get('error', 'Unknown error')}",
-                                  llm_mode=llm_mode, success=False)
+                                  llm_mode=llm_mode, success=False, session_id=req.session_id)
 
     if decision.intent == ChatIntent.GENERATE_TRAINING and req.session_id is None:
         session_id = agent_memory.create_project(project_name='AP Invoice Posting', module='FI')
@@ -256,7 +257,7 @@ def chat(req: ChatRequest, _: str = Depends(verify_api_key)):
         final_answer = "I found some information, but I had trouble summarizing it."
 
     logger.info({"event": "Chat response ready", "session_id": req.session_id})
-    return _chat_response(final_answer, llm_mode=llm_mode)
+    return _chat_response(final_answer, llm_mode=llm_mode, session_id=req.session_id)
 
 
 @app.get("/")
