@@ -1,11 +1,15 @@
 """
 High-level LLM wrapper that returns a singleton LLM client.
-Fallback chain: Gemini (primary) -> OpenAI (secondary) -> Anthropic
-Claude (tertiary) -> dev stub (absolute last resort; should essentially
-never be reached in a correctly configured environment). Each real
-tier honors response_schema (structured output) when an agent
-requests it, so a fallback still produces schema-validated JSON, not
-degraded free text.
+Fallback chain: Gemini (primary, free) -> Groq (secondary, free) ->
+OpenAI (tertiary, paid) -> Anthropic Claude (quaternary, paid) -> dev
+stub (absolute last resort). OpenAI and Anthropic are kept configured
+but sit behind the free Groq tier, so the agent keeps running on free
+providers for as long as possible before needing a funded account.
+Schema-requesting agents get best-effort JSON-schema hinting on every
+tier (not decode-constrained strict mode) - if a fallback tier's JSON
+doesn't perfectly validate, each agent's own heuristic parser (built
+in Stage 1) is the safety net, so this degrades gracefully rather
+than hard-failing.
 """
 import json
 import logging
@@ -30,8 +34,31 @@ def _to_response(text: str):
     return type("LLMResponse", (), {"text": text})()
 
 
+def _openai_compatible_call(client, model, prompt, temperature, max_tokens, response_schema):
+    """Shared call shape for any OpenAI-compatible endpoint (OpenAI itself,
+    or Groq, which speaks the same protocol)."""
+    kwargs = dict(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    if response_schema is not None:
+        kwargs["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": response_schema.__name__,
+                "schema": response_schema.model_json_schema(),
+            },
+        }
+    resp = client.chat.completions.create(**kwargs)
+    text = resp.choices[0].message.content.strip()
+    return _to_response(text)
+
+
 class HybridLLMClient:
-    """Unified LLM client with a 3-tier real-provider fallback chain."""
+    """Unified LLM client with a 4-tier fallback chain: Gemini, Groq,
+    OpenAI, Anthropic, then a safe stub as an absolute last resort."""
 
     def __init__(self, model_key: str = "default", temperature: float = 0.7):
         self.temperature = temperature
@@ -47,44 +74,33 @@ class HybridLLMClient:
             self.gemini = None
             self.use_gemini = False
 
-        # Tier 2: OpenAI
+        # Tier 2: Groq (free tier, OpenAI-compatible endpoint)
+        self.groq_client = (
+            OpenAI(api_key=settings.groq_api_key, base_url="https://api.groq.com/openai/v1")
+            if settings.groq_api_key else None
+        )
+        if self.groq_client:
+            logger.info("HybridLLM: Groq fallback client initialized")
+
+        # Tier 3: OpenAI
         self.openai_client = OpenAI(api_key=settings.openai_api_key) if settings.openai_api_key else None
         if self.openai_client:
             logger.info("HybridLLM: OpenAI fallback client initialized")
 
-        # Tier 3: Anthropic Claude
+        # Tier 4: Anthropic Claude
         self.anthropic_client = None
         if ANTHROPIC_AVAILABLE and settings.anthropic_api_key:
             self.anthropic_client = Anthropic(api_key=settings.anthropic_api_key)
             logger.info("HybridLLM: Anthropic fallback client initialized")
 
-    def _try_openai(self, prompt, temperature, max_tokens, response_schema):
-        kwargs = dict(
-            model=settings.openai_model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        if response_schema is not None:
-            kwargs["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": response_schema.__name__,
-                    "schema": response_schema.model_json_schema(),
-                    "strict": True,
-                },
-            }
-        resp = self.openai_client.chat.completions.create(**kwargs)
-        text = resp.choices[0].message.content.strip()
-        return _to_response(text)
-
-    def _try_anthropic(self, prompt, temperature, max_tokens, response_schema):
+    def _try_anthropic(self, prompt, max_tokens, response_schema):
+        # Anthropic Python SDK v1.0+ removed temperature/top_p/top_k from
+        # Messages.create() entirely - no sampling control available here.
         if response_schema is not None:
             tool_name = "emit_" + response_schema.__name__
             resp = self.anthropic_client.messages.create(
                 model=settings.anthropic_model,
                 max_tokens=max_tokens,
-                temperature=temperature,
                 tools=[{
                     "name": tool_name,
                     "description": f"Emit data matching the {response_schema.__name__} schema.",
@@ -101,7 +117,6 @@ class HybridLLMClient:
             resp = self.anthropic_client.messages.create(
                 model=settings.anthropic_model,
                 max_tokens=max_tokens,
-                temperature=temperature,
                 messages=[{"role": "user", "content": prompt}],
             )
             text = "".join(block.text for block in resp.content if block.type == "text")
@@ -120,17 +135,23 @@ class HybridLLMClient:
             try:
                 return self.gemini.generate_content(prompt, generation_config=generation_config)
             except Exception as e:
-                logger.warning(f"HybridLLM: Gemini generation failed, trying OpenAI: {e}")
+                logger.warning(f"HybridLLM: Gemini generation failed, trying Groq: {e}")
+
+        if self.groq_client:
+            try:
+                return _openai_compatible_call(self.groq_client, settings.groq_model, prompt, temperature, max_tokens, response_schema)
+            except Exception as e:
+                logger.warning(f"HybridLLM: Groq generation failed, trying OpenAI: {e}")
 
         if self.openai_client:
             try:
-                return self._try_openai(prompt, temperature, max_tokens, response_schema)
+                return _openai_compatible_call(self.openai_client, settings.openai_model, prompt, temperature, max_tokens, response_schema)
             except Exception as e:
                 logger.warning(f"HybridLLM: OpenAI generation failed, trying Anthropic: {e}")
 
         if self.anthropic_client:
             try:
-                return self._try_anthropic(prompt, temperature, max_tokens, response_schema)
+                return self._try_anthropic(prompt, max_tokens, response_schema)
             except Exception as e:
                 logger.error(f"HybridLLM: Anthropic generation failed: {e}")
 
