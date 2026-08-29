@@ -1,15 +1,91 @@
-body { font-family: Arial, Helvetica, sans-serif; background:#f7f9fb; }
-.container { width: 90%; max-width: 800px; margin: 20px auto; }
-.session-banner { padding: 8px 12px; margin-bottom: 10px; background: #eef2f5; border-radius: 4px; font-size: 0.9em; color: #555; }
-.chat-box { border: 1px solid #ddd; background:white; height: 500px; overflow:auto; padding:10px; }
-.chat-input { display:flex; gap:10px; margin-top:10px; }
-.chat-input input { flex:1; padding:8px; }
-.chat-entry { padding:6px; margin-bottom:6px; border-radius:4px; }
-.chat-entry.user { background:#e0f7ff; }
-.chat-entry.system { background:#fff2cc; }
-.chat-entry.assistant { background:#f1f3f5; }
-.chat-entry.assistant h1, .chat-entry.assistant h2, .chat-entry.assistant h3 { margin: 8px 0 4px; }
-.chat-entry.assistant ul, .chat-entry.assistant ol { margin: 4px 0; padding-left: 22px; }
-.chat-entry.assistant p { margin: 6px 0; }
-.chat-entry.assistant a { color: #0366d6; }
-.chat-entry.assistant code { background: #eee; padding: 1px 4px; border-radius: 3px; }
+/* Base */
+body {
+  margin: 0;
+  font-family: Arial, Helvetica, sans-serif;
+  background: #f7f9fb;
+  color: #333;
+}
+
+/* Layout */
+.container {
+  width: 90%;
+  max-width: 800px;
+  margin: 20px auto;
+}
+
+/* Session */
+.session-banner {
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  background: #eef2f5;
+  border-radius: 4px;
+  color: #555;
+  font-size: 0.9em;
+}
+
+/* Chat */
+.chat-box {
+  height: 500px;
+  padding: 10px;
+  overflow-y: auto;
+  border: 1px solid #ddd;
+  background: #fff;
+}
+
+/* Input */
+.chat-input {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.chat-input input {
+  flex: 1;
+  padding: 8px;
+}
+
+/* Messages */
+.chat-entry {
+  padding: 6px;
+  margin-bottom: 6px;
+  border-radius: 4px;
+}
+
+.chat-entry.user {
+  background: #e0f7ff;
+}
+
+.chat-entry.system {
+  background: #fff2cc;
+}
+
+.chat-entry.assistant {
+  background: #f1f3f5;
+}
+
+/* Assistant Content */
+.chat-entry.assistant h1,
+.chat-entry.assistant h2,
+.chat-entry.assistant h3 {
+  margin: 8px 0 4px;
+}
+
+.chat-entry.assistant p {
+  margin: 6px 0;
+}
+
+.chat-entry.assistant ul,
+.chat-entry.assistant ol {
+  margin: 4px 0;
+  padding-left: 22px;
+}
+
+.chat-entry.assistant a {
+  color: #0366d6;
+}
+
+.chat-entry.assistant code {
+  padding: 1px 4px;
+  background: #eee;
+  border-radius: 3px;
+}
