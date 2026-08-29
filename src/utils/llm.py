@@ -139,7 +139,12 @@ class HybridLLMClient:
 
         if self.groq_client:
             try:
-                return _openai_compatible_call(self.groq_client, settings.groq_model, prompt, temperature, max_tokens, response_schema)
+                # Groq's free tier has a much tighter per-minute token
+                # budget than Gemini - cap the requested output size
+                # regardless of what settings.max_tokens (Gemini-sized)
+                # says, so a normal request doesn't get rejected outright.
+                groq_max_tokens = min(max_tokens, 2048)
+                return _openai_compatible_call(self.groq_client, settings.groq_model, prompt, temperature, groq_max_tokens, response_schema)
             except Exception as e:
                 logger.warning(f"HybridLLM: Groq generation failed, trying OpenAI: {e}")
 
