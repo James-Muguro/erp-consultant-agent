@@ -234,7 +234,13 @@ def chat(req: ChatRequest, _: str = Depends(verify_api_key)):
 def get_ui():
     try:
         with open('ui/index.html', 'r', encoding='utf-8') as f:
-            return HTMLResponse(content=f.read(), status_code=200)
+            html = f.read()
+        # Inject the API key so the browser-served JS can authenticate its
+        # own requests. This is safe because whoever can load this page is
+        # already served by the same trusted process holding the key.
+        injected = f'<script>window.API_KEY = "{settings.api_auth_key}";</script></head>'
+        html = html.replace('</head>', injected)
+        return HTMLResponse(content=html, status_code=200)
     except Exception:
         return HTMLResponse(content='<h3>ERP Orchestrator API</h3><p>Visit /docs for API.</p>', status_code=200)
 
