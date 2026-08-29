@@ -3,39 +3,69 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
     <title>ERP Consultant Agent</title>
-    <link href="{{ url_for('static', path='/style.css') }}" rel="stylesheet">
+
+    <link rel="stylesheet" href="/ui/style.css">
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.0/marked.min.js"></script>
 </head>
+
 <body>
     <div class="container">
+
         <div class="header">
             <h1>ERP Consultant Agent</h1>
         </div>
+
+        <div id="session-banner" class="session-banner">
+            No active project yet - describe what you'd like to work on.
+        </div>
+
         <div class="chat-window">
             <div id="conversation" class="conversation-container">
                 {% for message in conversation %}
                     <div class="message {{ message.role }}">
                         <div class="bubble">
                             <strong>{{ message.role.capitalize() }}:</strong>
-                            <p>{{ message.content }}</p>
+                            <div class="message-content">
+                                {{ message.content }}
+                            </div>
                         </div>
                     </div>
                 {% endfor %}
             </div>
         </div>
+
         <div class="input-area">
-            <form action="/prompt" method="post">
-                <input type="text" id="user_prompt" name="user_prompt" placeholder="Enter your prompt here..." autofocus>
-                <button type="submit">Send</button>
-            </form>
+            <div class="chat-input">
+                <input
+                    type="text"
+                    id="msg"
+                    name="user_prompt"
+                    placeholder="Ask a question, or describe what you need (e.g. a new implementation, requirements, test cases)..."
+                    autofocus
+                >
+
+                <button type="button" id="send">
+                    Send
+                </button>
+            </div>
         </div>
+
     </div>
+
+    <script src="/ui/app.js"></script>
+
     <script>
-        // Auto-scroll to the latest message
-        window.onload = function() {
-            var conversationContainer = document.getElementById("conversation");
+        // Auto-scroll to the latest message when the page loads
+        window.onload = function () {
+            var conversationContainer =
+                document.getElementById("conversation");
+
             if (conversationContainer) {
-                conversationContainer.scrollTop = conversationContainer.scrollHeight;
+                conversationContainer.scrollTop =
+                    conversationContainer.scrollHeight;
             }
         };
     </script>
