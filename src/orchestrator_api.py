@@ -187,8 +187,9 @@ def chat(req: ChatRequest, _: str = Depends(verify_api_key)):
                 module='FI',
                 stakeholder_input=req.message
             )
-            return _chat_response(f"Requirements gathered: {res.get('summary', 'No summary available.')}",
-                                  llm_mode="gemini")
+            summary = res.get('requirements', {}).get('executive_summary', 'No summary available.')
+            return _chat_response(f"Requirements gathered: {summary}",
+                                  llm_mode=llm_mode)
 
     # Training materials
     if ('user guide' in m_lower or 'invoice posting' in m_lower or 'training' in m_lower) and req.session_id is None:
