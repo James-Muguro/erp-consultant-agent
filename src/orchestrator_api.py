@@ -191,8 +191,11 @@ def chat(req: ChatRequest, _: str = Depends(verify_api_key)):
             return _chat_response(f"Requirements gathered: {summary}",
                                   llm_mode=llm_mode)
 
-    # Training materials
-    if ('user guide' in m_lower or 'invoice posting' in m_lower or 'training' in m_lower) and req.session_id is None:
+    # Training materials - requires an explicit generation command, not just
+    # any message that happens to mention "training" (e.g. a question like
+    # "what does UAT training cover?" must NOT trigger document generation)
+    training_triggers = ('generate training', 'create training materials', 'generate user guide', 'create user manual', 'generate training guide', 'create training documentation')
+    if any(t in m_lower for t in training_triggers) and req.session_id is None:
         session_id = agent_memory.create_project(project_name='AP Invoice Posting', module='FI')
         result = training_agent.create_training_materials(
             session_id=session_id,
@@ -202,9 +205,9 @@ def chat(req: ChatRequest, _: str = Depends(verify_api_key)):
         )
         if result.get('success'):
             return _chat_response("Training materials for 'AP Invoice Posting' have been generated.",
-                                  llm_mode="gemini")
+                                  llm_mode=llm_mode)
         else:
-            return _chat_response("Failed to generate training materials.", llm_mode="gemini", success=False)
+            return _chat_response("Failed to generate training materials.", llm_mode=llm_mode, success=False)
 
     # Info retrieval + LLM synthesis
     data = info_retriever(req.message, {'summary': ''}, prefer_web=req.prefer_web)
