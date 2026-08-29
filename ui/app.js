@@ -22,7 +22,7 @@ sendBtn.addEventListener('click', async () => {
   try {
     const res = await fetch('/api/chat', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': window.API_KEY },
       body: JSON.stringify({ message })
     });
 
@@ -56,7 +56,7 @@ projectForm.addEventListener('submit', async (e) => {
 
   const resp = await fetch('/api/projects/start', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-API-Key': window.API_KEY },
     body: JSON.stringify(payload)
   }).then(r => r.json());
 
