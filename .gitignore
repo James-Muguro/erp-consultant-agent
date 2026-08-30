@@ -71,3 +71,4 @@ temp/
 *.tmp
 *.bak
 *sample_test.py
+*nohup.out
