@@ -34,6 +34,37 @@ function escapeHtml(text) {
 
 
 /* -----------------------------
+   API key (prompted once, kept only in this tab)
+----------------------------- */
+
+const API_KEY_STORAGE_KEY = 'erp_agent_api_key';
+
+function getStoredApiKey() {
+  return sessionStorage.getItem(API_KEY_STORAGE_KEY);
+}
+
+function promptForApiKey() {
+  const key = window.prompt(
+    'Enter the API key for this ERP Consultant Agent instance:'
+  );
+
+  if (key) {
+    sessionStorage.setItem(API_KEY_STORAGE_KEY, key);
+  }
+
+  return key;
+}
+
+function getApiKey() {
+  return getStoredApiKey() || promptForApiKey();
+}
+
+function clearApiKey() {
+  sessionStorage.removeItem(API_KEY_STORAGE_KEY);
+}
+
+
+/* -----------------------------
    Messages
 ----------------------------- */
 
@@ -134,18 +165,35 @@ async function sendMessage() {
   msgInput.value = '';
   setLoading(true);
 
+  const apiKey = getApiKey();
+
+  if (!apiKey) {
+    appendMessage('assistant', '**Error:** An API key is required to use this assistant.');
+    setLoading(false);
+    return;
+  }
+
   try {
     const response = await fetch('/api/chat', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-API-Key': window.API_KEY
+        'X-API-Key': apiKey
       },
       body: JSON.stringify({
         message: message,
         session_id: currentSessionId
       })
     });
+
+    if (response.status === 401) {
+      clearApiKey();
+      appendMessage(
+        'assistant',
+        '**Error:** That API key was rejected. Please try sending your message again and enter a valid key.'
+      );
+      return;
+    }
 
     if (!response.ok) {
       const errorText = await response.text();
