@@ -117,3 +117,7 @@ class ERPKnowledgeBaseTool:
 
     def get_all_systems(self) -> List[str]:
         return self.kb.get_all_systems()
+
+
+# Shared ERP Knowledge Base tool instance
+erp_kb_tool = ERPKnowledgeBaseTool()
