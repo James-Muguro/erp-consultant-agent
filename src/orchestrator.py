@@ -455,6 +455,16 @@ class ERPOrchestratorAgent:
             )
             workflow_results['phases']['requirements'] = req_result
             
+            if not req_result['success']:
+                self.logger.warning("Requirements gathering failed, continuing with available data")
+
+            # 2. Process Mapping
+            self.logger.info("Phase 2/6: Process Mapping")
+            process_result = self.execute_process_mapping_phase(
+                session_id=session_id,
+                process_name=process_name
+            )
+            workflow_results['phases']['process_mapping'] = process_result
             if not process_result['success']:
                 self.logger.warning("Process mapping failed, continuing with available data")
             
