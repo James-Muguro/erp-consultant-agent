@@ -108,6 +108,7 @@ class AgentConfig:
         self.max_iterations = max_iterations
         self.tools = tools or []
 
+
 # Agent configurations
 REQUIREMENTS_AGENT_CONFIG = AgentConfig(
     name="Requirements Gathering Agent",
@@ -160,5 +161,3 @@ TRAINING_AGENT_CONFIG = AgentConfig(
 
 # Global settings instance
 settings = Settings()
-
-
