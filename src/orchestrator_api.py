@@ -20,6 +20,15 @@ from src.utils.logger import get_logger
 from src.utils.prompts import get_synthesis_prompt
 from src.models.chat_intent_schema import ChatIntent, ChatIntentDecision
 
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings.init_directories()
+    yield
+
+app = FastAPI(title="ERP Orchestrator API", lifespan=lifespan)
+
 logger = get_logger(__name__)
 
 app = FastAPI(title="ERP Orchestrator API")
