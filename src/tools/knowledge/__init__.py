@@ -4,7 +4,7 @@ ERP Knowledge Base Initialization
 Loads and registers all supported ERP systems into a central knowledge base.
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from src.tools.knowledge.base import ERPKnowledgeBase, ERPSystem, ERPModule
 from src.tools.knowledge.sap import SAP
@@ -90,4 +90,30 @@ def create_erp_knowledge_base() -> ERPKnowledgeBase:
     return kb
 
 
+# Central knowledge base instance — must exist before ERPKnowledgeBaseTool
 erp_kb = create_erp_knowledge_base()
+
+
+class ERPKnowledgeBaseTool:
+    """Tool wrapper for the ERP Knowledge Base."""
+
+    def __init__(self):
+        self.kb = erp_kb
+
+    def search_knowledge(self, query: str, erp_system: str = None) -> List[Dict[str, Any]]:
+        return self.kb.search_knowledge(query, erp_system)
+
+    def get_module_info(self, module_code: str, erp_system: str = None) -> Optional[Dict[str, Any]]:
+        return self.kb.get_module_info(module_code, erp_system)
+
+    def get_standard_process(self, process_name: str, erp_system: str = None) -> Optional[Dict[str, Any]]:
+        return self.kb.get_standard_process(process_name, erp_system)
+
+    def get_best_practices(self, module_code: str, erp_system: str = None) -> List[str]:
+        return self.kb.get_best_practices(module_code, erp_system)
+
+    def get_integration_points(self, module_code: str, erp_system: str = None) -> List[str]:
+        return self.kb.get_integration_points(module_code, erp_system)
+
+    def get_all_systems(self) -> List[str]:
+        return self.kb.get_all_systems()
