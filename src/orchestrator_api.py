@@ -272,11 +272,6 @@ def get_ui():
     try:
         with open('ui/index.html', 'r', encoding='utf-8') as f:
             html = f.read()
-        # Inject the API key so the browser-served JS can authenticate its
-        # own requests. This is safe because whoever can load this page is
-        # already served by the same trusted process holding the key.
-        injected = f'<script>window.API_KEY = "{settings.api_auth_key}";</script></head>'
-        html = html.replace('</head>', injected)
         return HTMLResponse(content=html, status_code=200)
     except Exception:
         return HTMLResponse(content='<h3>ERP Orchestrator API</h3><p>Visit /docs for API.</p>', status_code=200)
@@ -288,4 +283,3 @@ def start_server(host: str = '127.0.0.1', port: int = 8000):
 
 if __name__ == '__main__':
     start_server()
-
