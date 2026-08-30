@@ -433,13 +433,13 @@ class ERPOrchestratorAgent:
         }
         
         try:
-            # 1. Start Project and Requirements
+            # 1. Start Project (without auto-running requirements)
             self.logger.info("Phase 1/6: Requirements Gathering")
             project_result = self.start_project(
                 project_name=project_name,
                 module=module,
                 erp_system=erp_system,
-                initial_input=stakeholder_input
+                initial_input=None  # Do NOT auto-run requirements here
             )
             
             if not project_result['success']:
@@ -447,15 +447,13 @@ class ERPOrchestratorAgent:
             
             session_id = project_result['session_id']
             workflow_results['session_id'] = session_id
-            workflow_results['phases']['requirements'] = project_result.get('requirements_result', {})
             
-            # 2. Process Mapping
-            self.logger.info("Phase 2/6: Process Mapping")
-            process_result = self.execute_process_mapping_phase(
+            # Execute requirements phase explicitly once
+            req_result = self.execute_requirements_phase(
                 session_id=session_id,
-                process_name=process_name
+                stakeholder_input=stakeholder_input
             )
-            workflow_results['phases']['process_mapping'] = process_result
+            workflow_results['phases']['requirements'] = req_result
             
             if not process_result['success']:
                 self.logger.warning("Process mapping failed, continuing with available data")
