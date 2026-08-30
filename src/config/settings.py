@@ -86,9 +86,6 @@ class Settings(BaseSettings):
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        os.makedirs(self.output_dir, exist_ok=True)
-        os.makedirs(self.logs_dir, exist_ok=True)
-
 
 class AgentConfig:
     """Configuration for individual agents"""
@@ -105,6 +102,11 @@ class AgentConfig:
         self.temperature = temperature
         self.max_iterations = max_iterations
         self.tools = tools or []
+
+    def init_directories(self) -> None:
+        """Create output and log directories. Call once at application startup."""
+        os.makedirs(self.output_dir, exist_ok=True)
+        os.makedirs(self.logs_dir, exist_ok=True)
 
 
 # Agent configurations
