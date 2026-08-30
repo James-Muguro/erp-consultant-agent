@@ -198,6 +198,7 @@ def main():
     
     # Initialize logging
     setup_logging()
+    settings.init_directories()
     
     print_banner()
     
