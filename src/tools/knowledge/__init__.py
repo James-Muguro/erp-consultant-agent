@@ -1,17 +1,12 @@
 """
-Central ERP knowledge registry.
+ERP Knowledge Base Initialization
 
-All ERP-specific knowledge is registered here and exposed through
-one shared knowledge-base instance.
+Loads and registers all supported ERP systems into a central knowledge base.
 """
 
-from src.tools.knowledge.base import (
-    ERPModule,
-    ERPSystem,
-    ERPKnowledgeBase,
-    ERPKnowledgeBaseTool,
-)
+from typing import Any, Dict
 
+from src.tools.knowledge.base import ERPKnowledgeBase, ERPSystem, ERPModule
 from src.tools.knowledge.sap import SAP
 from src.tools.knowledge.dynamics_365 import DYNAMICS_365
 from src.tools.knowledge.oracle import ORACLE
@@ -21,31 +16,78 @@ from src.tools.knowledge.infor import INFOR
 from src.tools.knowledge.workday import WORKDAY
 
 
+def _convert_to_erp_system(obj: Any) -> ERPSystem:
+    """Normalize various knowledge module exports to an ERPSystem instance."""
+    
+    # Already an ERPSystem — pass through
+    if isinstance(obj, ERPSystem):
+        return obj
+    
+    # Dict-based exports (ORACLE, INFOR, WORKDAY)
+    if isinstance(obj, dict):
+        name = obj.get("name", "Unknown")
+        vendor = obj.get("vendor", name)
+        aliases = obj.get("aliases", [name])
+        
+        raw_modules = obj.get("modules", {})
+        modules: Dict[str, ERPModule] = {}
+        for key, mod in raw_modules.items():
+            if isinstance(mod, ERPModule):
+                modules[key] = mod
+            elif isinstance(mod, dict):
+                # ORACLE uses 'common_processes' instead of 'common_transactions'
+                transactions = mod.get(
+                    "common_transactions",
+                    mod.get("common_processes", [])
+                )
+                modules[key] = ERPModule(
+                    name=mod.get("name", key),
+                    description=mod.get("description", ""),
+                    sub_modules=mod.get("sub_modules", []),
+                    common_transactions=transactions,
+                    integration_points=mod.get("integration_points", []),
+                    best_practices=mod.get("best_practices", []),
+                )
+            else:
+                continue
+        return ERPSystem(name=name, vendor=vendor, aliases=aliases, modules=modules)
+    
+    # Custom knowledge-base classes (NetSuiteKnowledgeBase, OdooKnowledgeBase)
+    erp_name = getattr(obj, "ERP_NAME", None)
+    if erp_name:
+        raw_modules = getattr(obj, "modules", {})
+        modules: Dict[str, ERPModule] = {}
+        for key, mod in raw_modules.items():
+            if isinstance(mod, dict):
+                modules[key] = ERPModule(
+                    name=mod.get("name", key),
+                    description=mod.get("description", ""),
+                    sub_modules=mod.get("sub_modules", []),
+                    common_transactions=mod.get("common_transactions", []),
+                    integration_points=mod.get("integration_points", []),
+                    best_practices=mod.get("best_practices", []),
+                )
+        return ERPSystem(
+            name=erp_name,
+            vendor=erp_name,
+            aliases=[erp_name],
+            modules=modules,
+        )
+    
+    raise TypeError(f"Cannot convert {type(obj).__name__} to ERPSystem")
+
+
 def create_erp_knowledge_base() -> ERPKnowledgeBase:
-    """Create the shared ERP knowledge base and register all ERP systems."""
-
+    """Create and populate the central ERP knowledge base."""
     kb = ERPKnowledgeBase()
-
-    kb.register_erp(SAP)
-    kb.register_erp(DYNAMICS_365)
-    kb.register_erp(ORACLE)
-    kb.register_erp(NETSUITE)
-    kb.register_erp(ODOO)
-    kb.register_erp(INFOR)
-    kb.register_erp(WORKDAY)
-
+    kb.register_erp(_convert_to_erp_system(SAP))
+    kb.register_erp(_convert_to_erp_system(DYNAMICS_365))
+    kb.register_erp(_convert_to_erp_system(ORACLE))
+    kb.register_erp(_convert_to_erp_system(NETSUITE))
+    kb.register_erp(_convert_to_erp_system(ODOO))
+    kb.register_erp(_convert_to_erp_system(INFOR))
+    kb.register_erp(_convert_to_erp_system(WORKDAY))
     return kb
 
 
 erp_kb = create_erp_knowledge_base()
-erp_kb_tool = ERPKnowledgeBaseTool(erp_kb)
-
-
-__all__ = [
-    "ERPModule",
-    "ERPSystem",
-    "ERPKnowledgeBase",
-    "ERPKnowledgeBaseTool",
-    "erp_kb",
-    "erp_kb_tool",
-]
