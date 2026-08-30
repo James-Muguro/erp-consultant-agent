@@ -25,28 +25,32 @@ def retrieve(query: str, context: Dict[str, Any] = None, prefer_web: bool = Fals
     else:
         decision = {'decision': 'web', 'confidence': 0.9, 'reasoning': 'Force web search by caller'}
 
-    results = {
+    results: Dict[str, Any] = {
         'query': query,
         'decision': decision,
+        'kb_results': [],
+        'web_results': [],
         'sources': []
     }
 
     # Use KB if decision is kb or hybrid
     if decision['decision'] in ('kb', 'hybrid'):
-        # use ERPKnowledgeBase.search_knowledge for free-text search
         kb_hits = erp_kb.search_knowledge(query)
         if kb_hits:
+            results['kb_results'].extend(kb_hits)
             results['sources'].append({'type': 'kb', 'items': kb_hits})
 
-        # Memory search
         mem_hits = memory_bank.search_by_keywords(query.lower().split())
         if mem_hits:
-            results['sources'].append({'type': 'memory', 'items': [m.to_dict() for m in mem_hits]})
+            mem_dicts = [m.to_dict() for m in mem_hits]
+            results['kb_results'].extend(mem_dicts)
+            results['sources'].append({'type': 'memory', 'items': mem_dicts})
 
     # Use web if decision is web or hybrid
     if decision['decision'] in ('web', 'hybrid'):
         try:
             web_txt = google_search_tool.GoogleSearchTool()(query)
+            results['web_results'].append(web_txt)
             results['sources'].append({'type': 'web', 'items': web_txt})
         except Exception as e:
             logger.error("Web search failed", exc_info=True)
