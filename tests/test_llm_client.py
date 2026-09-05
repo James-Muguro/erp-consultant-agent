@@ -47,6 +47,23 @@ def test_gemini_failure_falls_back_to_openai_with_consistent_shape(client):
     assert result.text == "fallback output"
 
 
+def test_gemini_failure_falls_back_to_openai_with_consistent_shape(client):
+    client.use_gemini = True
+    client.gemini = Mock()
+    client.gemini.generate_content.side_effect = Exception("Gemini is down")
+    client.groq_client = None  # force past Groq so the OpenAI mock is actually reached
+
+    fake_completion = Mock()
+    fake_completion.choices = [Mock(message=Mock(content="fallback output "))]
+    client.openai_client = Mock()
+    client.openai_client.chat.completions.create.return_value = fake_completion
+
+    result = client.generate_content("some prompt")
+
+    assert hasattr(result, "text")
+    assert result.text == "fallback output"
+
+
 def test_total_failure_raises_instead_of_faking_success(client):
     """Total failure must raise, not return a fake .text response - a
     silent fake success previously leaked the literal string 'Error
@@ -57,7 +74,9 @@ def test_total_failure_raises_instead_of_faking_success(client):
     client.use_gemini = True
     client.gemini = Mock()
     client.gemini.generate_content.side_effect = Exception("Gemini is down")
-    client.openai_client = None  # no fallback configured
+    client.groq_client = None       # no fallback configured
+    client.openai_client = None     # no fallback configured
+    client.anthropic_client = None  # no fallback configured
 
     with pytest.raises(RuntimeError, match="LLM providers are currently unavailable"):
         client.generate_content("some prompt")
@@ -67,8 +86,10 @@ def test_openai_failure_also_raises(client):
     client.use_gemini = True
     client.gemini = Mock()
     client.gemini.generate_content.side_effect = Exception("Gemini is down")
+    client.groq_client = None  # force past Groq so the OpenAI mock is actually reached
     client.openai_client = Mock()
     client.openai_client.chat.completions.create.side_effect = Exception("OpenAI is down too")
+    client.anthropic_client = None  # ensure this failure is truly terminal
 
     with pytest.raises(RuntimeError, match="LLM providers are currently unavailable"):
         client.generate_content("some prompt")
