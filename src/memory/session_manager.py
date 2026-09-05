@@ -316,5 +316,106 @@ class InMemorySessionService:
         }
 
 
-# Global session service instance
-session_service = InMemorySessionService()
+class DbSessionService(InMemorySessionService):
+    """Session service backed by a real database instead of per-file JSON.
+
+    Reuses every method from InMemorySessionService unchanged (create/update/
+    add_to_conversation/log_decision/advance_phase/get_phase_output all just
+    mutate a SessionState object then call self._save_session) - only the
+    storage primitives are overridden, so the full existing behavior and
+    interface are preserved exactly. Each session is still stored as the
+    same to_dict()/from_dict() JSON shape as before; it just lives in a
+    database row instead of a file on disk. This also fixes two real
+    pre-existing limitations of the file-based service: list_sessions() and
+    delete_session() only ever worked for sessions already loaded into this
+    process's in-memory cache - here both go straight to the database, so
+    they see every session regardless of which process wrote it.
+    """
+
+    def __init__(self):
+        # Skip InMemorySessionService.__init__'s file-directory setup - we
+        # don't need a sessions/ directory - but keep the same cache dict,
+        # logger, and lock, since inherited methods rely on them.
+        self.sessions: Dict[str, SessionState] = {}
+        self.logger = AgentLogger("SessionManager")
+        self._save_lock = threading.Lock()
+
+        from src.db.base import init_db, SessionLocal
+        init_db()
+        self._db_session_factory = SessionLocal
+
+    def _save_session(self, session: SessionState):
+        from src.db.models import SessionRecord
+
+        with self._save_lock:
+            db = self._db_session_factory()
+            try:
+                data = session.to_dict()
+                record = db.get(SessionRecord, session.session_id)
+                if record is None:
+                    record = SessionRecord(session_id=session.session_id)
+                    db.add(record)
+                record.project_name = session.project_name
+                record.module = session.module
+                record.erp_system = session.erp_system
+                record.current_phase = session.current_phase
+                record.created_at = session.created_at
+                record.updated_at = session.updated_at
+                record.data = data
+                db.commit()
+            finally:
+                db.close()
+
+    def _load_session(self, session_id: str) -> Optional[SessionState]:
+        from src.db.models import SessionRecord
+
+        db = self._db_session_factory()
+        try:
+            record = db.get(SessionRecord, session_id)
+            if record is None:
+                return None
+            try:
+                session = SessionState.from_dict(record.data)
+            except Exception as e:
+                self.logger.error(f"Failed to deserialize session {session_id}: {e}")
+                return None
+            self.sessions[session_id] = session
+            return session
+        finally:
+            db.close()
+
+    def list_sessions(self) -> List[str]:
+        """List all session IDs known to the database (not just the ones
+        cached in this process's memory)."""
+        from src.db.models import SessionRecord
+        from sqlalchemy import select
+
+        db = self._db_session_factory()
+        try:
+            rows = db.execute(select(SessionRecord.session_id)).all()
+            return [row[0] for row in rows]
+        finally:
+            db.close()
+
+    def delete_session(self, session_id: str) -> bool:
+        from src.db.models import SessionRecord
+
+        self.sessions.pop(session_id, None)
+
+        db = self._db_session_factory()
+        try:
+            record = db.get(SessionRecord, session_id)
+            if record is None:
+                return False
+            db.delete(record)
+            db.commit()
+            self.logger.info("Session deleted", session_id=session_id)
+            return True
+        finally:
+            db.close()
+
+
+# Global session service instance - database-backed (see DbSessionService
+# above). InMemorySessionService's file-based storage is kept in this module
+# only for reference/rollback; it is no longer instantiated anywhere.
+session_service = DbSessionService()
