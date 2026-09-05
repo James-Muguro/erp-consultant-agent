@@ -47,29 +47,31 @@ def test_gemini_failure_falls_back_to_openai_with_consistent_shape(client):
     assert result.text == "fallback output"
 
 
-def test_total_failure_returns_safe_consistent_object_not_a_crash(client):
+def test_total_failure_raises_instead_of_faking_success(client):
+    """Total failure must raise, not return a fake .text response - a
+    silent fake success previously leaked the literal string 'Error
+    generating response: LLM unavailable' straight through to end users
+    as if it were real model output. Every caller (all agents, plus the
+    chat endpoint) already has a try/except ready to turn this into a
+    proper structured error or a friendly fallback message."""
     client.use_gemini = True
     client.gemini = Mock()
     client.gemini.generate_content.side_effect = Exception("Gemini is down")
     client.openai_client = None  # no fallback configured
 
-    result = client.generate_content("some prompt")
-
-    assert hasattr(result, "text")
-    assert result.text == "Error generating response: LLM unavailable"
+    with pytest.raises(RuntimeError, match="LLM providers are currently unavailable"):
+        client.generate_content("some prompt")
 
 
-def test_openai_failure_also_returns_safe_consistent_object(client):
+def test_openai_failure_also_raises(client):
     client.use_gemini = True
     client.gemini = Mock()
     client.gemini.generate_content.side_effect = Exception("Gemini is down")
     client.openai_client = Mock()
     client.openai_client.chat.completions.create.side_effect = Exception("OpenAI is down too")
 
-    result = client.generate_content("some prompt")
-
-    assert hasattr(result, "text")
-    assert result.text == "Error generating response: LLM unavailable"
+    with pytest.raises(RuntimeError, match="LLM providers are currently unavailable"):
+        client.generate_content("some prompt")
 
 
 def test_response_schema_is_passed_through_to_gemini(client):
