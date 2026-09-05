@@ -1,16 +1,26 @@
 """
 FastAPI wrapper for ERP Orchestrator with hybrid LLM support (Gemini + GPT-4 fallback)
 """
-from fastapi import FastAPI, HTTPException, Depends
-from fastapi.responses import HTMLResponse, FileResponse
+import time
+import uuid as uuid_lib
+import sys
+
+from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from typing import Optional, List, Dict
 from pathlib import Path
 import os
 import uvicorn
+import structlog
+
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from src.orchestrator import orchestrator
 from src.config.settings import settings
@@ -25,7 +35,8 @@ from src.auth.dependencies import get_current_user, get_db
 from src.auth.schemas import SignupRequest, LoginRequest, TokenResponse, UserOut
 from src.auth.security import create_access_token
 from src.auth import service as auth_service
-from src.db.models import User
+from src.db.base import engine as db_engine
+from src.db.models import User, Feedback
 
 from contextlib import asynccontextmanager
 
@@ -38,12 +49,85 @@ app = FastAPI(title="ERP Orchestrator API", lifespan=lifespan)
 
 logger = get_logger(__name__)
 
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Auth endpoints get their own (stricter) limits since brute-forcing
+# passwords is the main threat there. Effectively disabled under pytest -
+# TestClient shares one fake IP across every test, so a real per-minute
+# limit would fail unrelated tests depending on run order, not because of
+# a real vulnerability. Real requests never carry PYTEST_CURRENT_TEST.
+_TESTING = "pytest" in sys.modules
+AUTH_RATE_LIMIT = "10000/minute" if _TESTING else "5/minute"
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins_list,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    """Every request gets a correlation ID: generated if the caller didn't
+    send one, echoed back on X-Request-ID, and bound into every structlog
+    line emitted while handling this request (via contextvars, already wired
+    into the logger's processor chain - see src/utils/logger.py) so a
+    support request referencing an ID can be grepped straight out of logs."""
+    request_id = request.headers.get("X-Request-ID", str(uuid_lib.uuid4()))
+    request.state.request_id = request_id
+    structlog.contextvars.clear_contextvars()
+    structlog.contextvars.bind_contextvars(request_id=request_id)
+
+    start = time.time()
+    response = await call_next(request)
+    duration_ms = round((time.time() - start) * 1000, 2)
+
+    response.headers["X-Request-ID"] = request_id
+    logger.info("Request completed", path=request.url.path, method=request.method,
+                status_code=response.status_code, duration_ms=duration_ms)
+    return response
+
+
+def _error_envelope(request: Request, status_code: int, message: str) -> Dict:
+    return {
+        "error": {
+            "code": status_code,
+            "message": message,
+            "request_id": getattr(request.state, "request_id", None),
+        }
+    }
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Consistent JSON error shape for every HTTPException raised anywhere
+    in the app, instead of each endpoint's raise producing a differently
+    shaped body. detail is still whatever the endpoint set - only the
+    envelope around it is standardized."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=_error_envelope(request, exc.status_code, str(exc.detail)),
+        headers=exc.headers,
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Last-resort handler for anything that isn't an HTTPException - an
+    unexpected bug, a third-party library error, etc. Logs the real
+    exception (with traceback) server-side, keyed by request_id, but the
+    client only ever sees a generic message - never a stack trace, a file
+    path, or an internal error string."""
+    logger.error("Unhandled exception", error=str(exc), exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content=_error_envelope(request, 500, "Internal server error. If this persists, "
+                                              "please contact support with the request ID above."),
+    )
+
 
 app.mount("/ui", StaticFiles(directory="ui"), name="ui")
 
@@ -53,6 +137,16 @@ class ProjectStart(BaseModel):
     module: str
     erp_system: Optional[str] = "SAP S/4HANA"
     initial_input: Optional[str] = None
+
+
+class ProjectRename(BaseModel):
+    project_name: str
+
+
+class FeedbackRequest(BaseModel):
+    session_id: Optional[str] = None
+    rating: Optional[int] = None
+    comment: Optional[str] = None
 
 
 class ChatRequest(BaseModel):
@@ -96,7 +190,8 @@ def _get_owned_session(session_id: str, current_user: User):
 # ---------------------------------------------------------------------------
 
 @app.post("/api/auth/signup", response_model=TokenResponse)
-def signup(req: SignupRequest, db: Session = Depends(get_db)):
+@limiter.limit(AUTH_RATE_LIMIT)
+def signup(request: Request, req: SignupRequest, db: Session = Depends(get_db)):
     try:
         user = auth_service.create_user(db, req.email, req.password)
     except auth_service.EmailAlreadyRegistered:
@@ -107,7 +202,8 @@ def signup(req: SignupRequest, db: Session = Depends(get_db)):
 
 
 @app.post("/api/auth/login", response_model=TokenResponse)
-def login(req: LoginRequest, db: Session = Depends(get_db)):
+@limiter.limit(AUTH_RATE_LIMIT)
+def login(request: Request, req: LoginRequest, db: Session = Depends(get_db)):
     user = auth_service.authenticate_user(db, req.email, req.password)
     if not user:
         raise HTTPException(status_code=401, detail="Incorrect email or password")
@@ -127,6 +223,8 @@ def me(current_user: User = Depends(get_current_user)):
 
 @app.get("/health")
 def health():
+    """Liveness check: is the process up and able to respond at all. Does
+    not touch the database or any external service - see /ready for that."""
     serpapi_installed = True
     try:
         import serpapi  # type: ignore
@@ -145,14 +243,34 @@ def health():
     }
 
 
+@app.get("/ready")
+def ready():
+    """Readiness check: can this instance actually serve traffic right now -
+    specifically, is the database reachable. Distinct from /health because a
+    process can be alive (health=ok) while its database connection is down,
+    e.g. during a Postgres failover - a load balancer or orchestrator should
+    stop routing traffic in that case, which /health alone can't signal."""
+    try:
+        with db_engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception as e:
+        logger.error("Readiness check failed", error=str(e))
+        raise HTTPException(status_code=503, detail="Database is not reachable")
+
+    return {"status": "ready"}
+
+
 # ---------------------------------------------------------------------------
 # Projects
 # ---------------------------------------------------------------------------
 
 @app.get("/api/projects")
-def list_projects(current_user: User = Depends(get_current_user)):
-    """List the current user's projects, most recently updated first."""
-    session_ids = agent_memory.session_service.list_sessions_for_user(current_user.id)
+def list_projects(include_archived: bool = False, current_user: User = Depends(get_current_user)):
+    """List the current user's projects, most recently updated first.
+    Archived projects are hidden unless include_archived=true."""
+    session_ids = agent_memory.session_service.list_sessions_for_user(
+        current_user.id, include_archived=include_archived
+    )
     summaries = [agent_memory.session_service.get_session_summary(sid) for sid in session_ids]
     return {"projects": [s for s in summaries if s]}
 
@@ -169,6 +287,45 @@ def start_project(req: ProjectStart, current_user: User = Depends(get_current_us
     if not result.get('success'):
         raise HTTPException(status_code=500, detail=result.get('error', 'Unknown error'))
     return result
+
+
+@app.patch("/api/projects/{session_id}")
+def rename_project(session_id: str, req: ProjectRename, current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
+    session = agent_memory.session_service.rename_session(session_id, req.project_name)
+    return {"session_id": session_id, "project_name": session.project_name}
+
+
+@app.delete("/api/projects/{session_id}")
+def archive_project(session_id: str, current_user: User = Depends(get_current_user)):
+    """Archives (soft-deletes) a conversation - hides it from the default
+    list without destroying the underlying data. There is currently no
+    unarchive/restore endpoint; add one if that turns out to be needed."""
+    _get_owned_session(session_id, current_user)
+    archived = agent_memory.session_service.archive_session(session_id)
+    if not archived:
+        raise HTTPException(status_code=409, detail="Project is already archived")
+    return {"session_id": session_id, "archived": True}
+
+
+@app.post("/api/feedback")
+def submit_feedback(req: FeedbackRequest, current_user: User = Depends(get_current_user),
+                     db: Session = Depends(get_db)):
+    if req.session_id:
+        _get_owned_session(req.session_id, current_user)
+    if req.rating is not None and not (1 <= req.rating <= 5):
+        raise HTTPException(status_code=422, detail="rating must be between 1 and 5")
+
+    feedback = Feedback(
+        id=uuid_lib.uuid4().hex,
+        user_id=current_user.id,
+        session_id=req.session_id,
+        rating=req.rating,
+        comment=req.comment,
+    )
+    db.add(feedback)
+    db.commit()
+    return {"success": True, "feedback_id": feedback.id}
 
 
 @app.post("/api/projects/{session_id}/phase/{phase_name}/execute")
