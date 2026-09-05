@@ -15,7 +15,7 @@ key from sessions to users without an awkward later migration.
 """
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, String, Text, DateTime
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.types import JSON
 
@@ -30,11 +30,13 @@ def _json_type():
         return JSONB
     return JSON
 
-
 class SessionRecord(Base):
     __tablename__ = "sessions"
 
     session_id = Column(String, primary_key=True)
+    # Nullable for backward compatibility with sessions created before Stage 2
+    # (auth) existed. Every session created from this point on always sets it.
+    user_id = Column(String, ForeignKey("users.id"), nullable=True, index=True)
     project_name = Column(String, index=True, nullable=False)
     module = Column(String, nullable=False)
     erp_system = Column(String, nullable=False)
@@ -48,7 +50,6 @@ class SessionRecord(Base):
 
 
 class User(Base):
-    """Stub for Stage 2 - not yet used anywhere."""
     __tablename__ = "users"
 
     id = Column(String, primary_key=True)
