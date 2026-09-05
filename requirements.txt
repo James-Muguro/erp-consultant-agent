@@ -24,6 +24,7 @@ pydantic-settings>=2.10.0,<3.0
 # Persistence (SQLite by default, Postgres in production via DATABASE_URL)
 sqlalchemy>=2.0.0,<3.0
 psycopg2-binary>=2.9.9,<3.0
+alembic>=1.13.0,<2.0
 
 # Authentication
 bcrypt>=4.2.0,<5.0
@@ -55,3 +56,5 @@ tabulate>=0.9.0,<1.0
 # Optional: For advanced features
 # mcp
 # langchain
+# API security / hardening
+slowapi>=0.1.9,<1.0
