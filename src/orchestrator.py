@@ -236,7 +236,9 @@ class ERPOrchestratorAgent:
             session_id=session_id,
             process_name=process_name,
             requirements=requirements,
-            current_state=current_state
+            current_state=current_state,
+            module=session.module,
+            erp_system=session.erp_system
         )
         
         if result['success']:
