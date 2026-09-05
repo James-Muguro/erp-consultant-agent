@@ -107,6 +107,100 @@ def test_list_projects_scoped_to_user():
     assert names == {'A Project 1', 'A Project 2'}
 
 
+def test_readiness_check():
+    client = TestClient(app)
+    r = client.get('/ready')
+    assert r.status_code == 200
+    assert r.json()['status'] == 'ready'
+
+
+def test_error_envelope_shape():
+    """Every HTTPException should come back as {"error": {code, message, request_id}}."""
+    client = TestClient(app)
+    r = client.get('/api/auth/me')
+    assert r.status_code == 401
+    body = r.json()
+    assert 'error' in body
+    assert body['error']['code'] == 401
+    assert 'message' in body['error']
+    assert 'request_id' in body['error']
+    # The same ID should also be echoed on the response header
+    assert r.headers.get('X-Request-ID') == body['error']['request_id']
+
+
+def test_rename_project():
+    client = TestClient(app)
+    headers = _auth_headers(client)
+    r = client.post('/api/projects/start', json={'project_name': 'Old Name', 'module': 'FI'}, headers=headers)
+    session_id = r.json()['session_id']
+
+    r = client.patch(f'/api/projects/{session_id}', json={'project_name': 'New Name'}, headers=headers)
+    assert r.status_code == 200
+    assert r.json()['project_name'] == 'New Name'
+
+    r = client.get(f'/api/projects/{session_id}/status', headers=headers)
+    assert r.json()['project_name'] == 'New Name'
+
+
+def test_rename_project_requires_ownership():
+    client = TestClient(app)
+    headers_a = _auth_headers(client)
+    headers_b = _auth_headers(client)
+    r = client.post('/api/projects/start', json={'project_name': 'A Project', 'module': 'FI'}, headers=headers_a)
+    session_id = r.json()['session_id']
+
+    r = client.patch(f'/api/projects/{session_id}', json={'project_name': 'Hijacked'}, headers=headers_b)
+    assert r.status_code == 404
+
+
+def test_archive_project_hides_from_default_list():
+    client = TestClient(app)
+    headers = _auth_headers(client)
+    r = client.post('/api/projects/start', json={'project_name': 'To Archive', 'module': 'FI'}, headers=headers)
+    session_id = r.json()['session_id']
+
+    r = client.delete(f'/api/projects/{session_id}', headers=headers)
+    assert r.status_code == 200
+    assert r.json()['archived'] is True
+
+    # Archiving again is a conflict, not silently OK
+    r = client.delete(f'/api/projects/{session_id}', headers=headers)
+    assert r.status_code == 409
+
+    # Hidden from the default list...
+    r = client.get('/api/projects', headers=headers)
+    ids = {p['session_id'] for p in r.json()['projects']}
+    assert session_id not in ids
+
+    # ...but still visible with include_archived, and still readable directly
+    r = client.get('/api/projects?include_archived=true', headers=headers)
+    ids = {p['session_id'] for p in r.json()['projects']}
+    assert session_id in ids
+
+    r = client.get(f'/api/projects/{session_id}/status', headers=headers)
+    assert r.status_code == 200
+
+
+def test_feedback_submission():
+    client = TestClient(app)
+    headers = _auth_headers(client)
+    r = client.post('/api/projects/start', json={'project_name': 'Feedback Project', 'module': 'FI'}, headers=headers)
+    session_id = r.json()['session_id']
+
+    r = client.post('/api/feedback', json={'session_id': session_id, 'rating': 5, 'comment': 'Great!'}, headers=headers)
+    assert r.status_code == 200
+    assert r.json()['success'] is True
+
+    # Invalid rating is rejected
+    r = client.post('/api/feedback', json={'session_id': session_id, 'rating': 7}, headers=headers)
+    assert r.status_code == 422
+
+    # Feedback on someone else's session is rejected
+    other_headers = _auth_headers(client)
+    r = client.post('/api/feedback', json={'session_id': session_id, 'rating': 3}, headers=other_headers)
+    assert r.status_code == 404
+
+
 @patch('src.orchestrator_api.info_retriever')
 @patch('src.utils.llm.get_llm')
 def test_chat_end_to_end(mock_get_llm, mock_info_retriever):
