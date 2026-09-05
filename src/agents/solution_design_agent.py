@@ -63,9 +63,9 @@ class SolutionDesignAgent:
         try:
             # Get module information
             module = requirements.get('module', 'FI')
-            module_info = erp_kb.get_module_info(module)
-            best_practices = erp_kb.get_best_practices(module)
-            integration_points = erp_kb.get_integration_points(module)
+            module_info = erp_kb.get_module_info(module, erp_system)
+            best_practices = erp_kb.get_best_practices(module, erp_system)
+            integration_points = erp_kb.get_integration_points(module, erp_system)
             
             # Get relevant design patterns from memory
             design_patterns = agent_memory.recall({
