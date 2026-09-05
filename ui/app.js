@@ -34,33 +34,65 @@ function escapeHtml(text) {
 
 
 /* -----------------------------
-   API key (prompted once, kept only in this tab)
+   Auth (JWT bearer token, kept only in this tab)
 ----------------------------- */
 
-const API_KEY_STORAGE_KEY = 'erp_agent_api_key';
+const TOKEN_STORAGE_KEY = 'erp_agent_access_token';
 
-function getStoredApiKey() {
-  return sessionStorage.getItem(API_KEY_STORAGE_KEY);
+function getStoredToken() {
+  return sessionStorage.getItem(TOKEN_STORAGE_KEY);
 }
 
-function promptForApiKey() {
-  const key = window.prompt(
-    'Enter the API key for this ERP Consultant Agent instance:'
-  );
+function storeToken(token) {
+  sessionStorage.setItem(TOKEN_STORAGE_KEY, token);
+}
 
-  if (key) {
-    sessionStorage.setItem(API_KEY_STORAGE_KEY, key);
+function clearToken() {
+  sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+}
+
+async function loginOrSignup(email, password) {
+  // Try login first; if the account doesn't exist yet, sign up instead.
+  // This is a deliberately minimal shim - the real account UI comes with
+  // the Stage 4/5 frontend rebuild.
+  let response = await fetch('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password })
+  });
+
+  if (response.status === 401) {
+    response = await fetch('/api/auth/signup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
+    });
   }
 
-  return key;
+  if (!response.ok) {
+    return null;
+  }
+
+  const data = await response.json();
+  return data.access_token || null;
 }
 
-function getApiKey() {
-  return getStoredApiKey() || promptForApiKey();
+async function promptForToken() {
+  const email = window.prompt('Email:');
+  if (!email) return null;
+
+  const password = window.prompt('Password (8+ characters; first time here signs you up):');
+  if (!password) return null;
+
+  const token = await loginOrSignup(email, password);
+  if (token) {
+    storeToken(token);
+  }
+  return token;
 }
 
-function clearApiKey() {
-  sessionStorage.removeItem(API_KEY_STORAGE_KEY);
+async function getToken() {
+  return getStoredToken() || await promptForToken();
 }
 
 
@@ -165,10 +197,10 @@ async function sendMessage() {
   msgInput.value = '';
   setLoading(true);
 
-  const apiKey = getApiKey();
+  const token = await getToken();
 
-  if (!apiKey) {
-    appendMessage('assistant', '**Error:** An API key is required to use this assistant.');
+  if (!token) {
+    appendMessage('assistant', '**Error:** Login is required to use this assistant.');
     setLoading(false);
     return;
   }
@@ -178,7 +210,7 @@ async function sendMessage() {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-API-Key': apiKey
+        'Authorization': `Bearer ${token}`
       },
       body: JSON.stringify({
         message: message,
@@ -187,10 +219,10 @@ async function sendMessage() {
     });
 
     if (response.status === 401) {
-      clearApiKey();
+      clearToken();
       appendMessage(
         'assistant',
-        '**Error:** That API key was rejected. Please try sending your message again and enter a valid key.'
+        '**Error:** Your session expired or the password was incorrect. Please try sending your message again to log back in.'
       );
       return;
     }
