@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     # Memory Configuration
     memory_enabled: bool = Field(default=True)
     max_memory_items: int = Field(default=100, gt=0)
+    max_conversation_history_items: int = Field(
+        default=200, gt=0,
+        description="Maximum conversation turns kept per session before oldest entries are trimmed"
+    )
     
     # Application Settings
     project_name: str = Field(default="ERP Consultant Agent")
