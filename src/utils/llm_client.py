@@ -24,9 +24,8 @@ class LLMClient:
     """Thin wrapper around the Gemini API only. Raises on any failure -
     it does not fall back to another provider itself."""
 
-    def __init__(self, model_key: str = "default", temperature: float = 0.7):
+    def __init__(self, temperature: float = 0.7):
         self.temperature = temperature
-        self.model_key = model_key
 
         if not (GEMINI_AVAILABLE and settings.gemini_api_key):
             raise RuntimeError("Gemini is not available: missing package or API key")
