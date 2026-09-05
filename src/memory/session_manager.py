@@ -20,6 +20,10 @@ class SessionState:
     project_name: str
     module: str
     erp_system: str
+    # Owning user's id. Optional for backward compatibility with sessions
+    # created before per-user auth existed (Stage 2) - every session created
+    # from that point on always sets this.
+    user_id: Optional[str] = None
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -47,6 +51,7 @@ class SessionState:
             'project_name': self.project_name,
             'module': self.module,
             'erp_system': self.erp_system,
+            'user_id': self.user_id,
             'created_at': self.created_at.isoformat(),
             'updated_at': self.updated_at.isoformat(),
             'metadata': self.metadata,
@@ -86,7 +91,8 @@ class InMemorySessionService:
         project_name: str,
         module: str,
         erp_system: str = "SAP S/4HANA",
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
+        user_id: Optional[str] = None
     ) -> SessionState:
         """Create a new session"""
         if session_id in self.sessions:
@@ -98,6 +104,7 @@ class InMemorySessionService:
             project_name=project_name,
             module=module,
             erp_system=erp_system,
+            user_id=user_id,
             metadata=metadata or {}
         )
         
@@ -358,6 +365,7 @@ class DbSessionService(InMemorySessionService):
                 record.project_name = session.project_name
                 record.module = session.module
                 record.erp_system = session.erp_system
+                record.user_id = session.user_id
                 record.current_phase = session.current_phase
                 record.created_at = session.created_at
                 record.updated_at = session.updated_at
@@ -393,6 +401,24 @@ class DbSessionService(InMemorySessionService):
         db = self._db_session_factory()
         try:
             rows = db.execute(select(SessionRecord.session_id)).all()
+            return [row[0] for row in rows]
+        finally:
+            db.close()
+
+    def list_sessions_for_user(self, user_id: str) -> List[str]:
+        """List session IDs owned by a specific user, most recently
+        updated first. Used by the API's conversation-list endpoint -
+        list_sessions() above stays unscoped for CLI/admin use."""
+        from src.db.models import SessionRecord
+        from sqlalchemy import select
+
+        db = self._db_session_factory()
+        try:
+            rows = db.execute(
+                select(SessionRecord.session_id)
+                .where(SessionRecord.user_id == user_id)
+                .order_by(SessionRecord.updated_at.desc())
+            ).all()
             return [row[0] for row in rows]
         finally:
             db.close()
