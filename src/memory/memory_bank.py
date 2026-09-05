@@ -103,6 +103,8 @@ class MemoryBank:
         for tag in tags or []:
             self.tag_index[tag].append(entry_id)
         
+        self._enforce_memory_cap()
+        
         self.logger.log_memory_operation(
             "memory_stored",
             {
@@ -325,6 +327,31 @@ class MemoryBank:
             )[:5]
         }
     
+    def _enforce_memory_cap(self):
+        """Evict the least valuable memories once max_memory_items is
+        exceeded, so the memory bank doesn't grow without bound.
+        'Least valuable' uses the same (importance, access_count)
+        ordering already used to rank memories elsewhere in this class -
+        lowest importance and least-accessed entries go first."""
+        max_items = settings.max_memory_items
+        overflow = len(self.memories) - max_items
+
+        if overflow <= 0:
+            return
+
+        eviction_candidates = sorted(
+            self.memories.values(),
+            key=lambda m: (m.importance, m.access_count)
+        )
+
+        for entry in eviction_candidates[:overflow]:
+            self.delete_memory(entry.entry_id)
+
+        self.logger.log_memory_operation(
+            "memory_cap_enforced",
+            {'evicted_count': overflow, 'max_memory_items': max_items}
+        )
+
     def _save_memory(self, entry: MemoryEntry):
         """Save memory to disk"""
         memory_file = self.memory_dir / f"{entry.entry_id}.json"
