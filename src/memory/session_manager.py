@@ -165,7 +165,11 @@ class InMemorySessionService:
             'content': content,
             'agent_name': agent_name
         })
-        
+
+        max_items = settings.max_conversation_history_items
+        if len(session.conversation_history) > max_items:
+            session.conversation_history = session.conversation_history[-max_items:]
+
         session.updated_at = datetime.now()
         self._save_session(session)
     
