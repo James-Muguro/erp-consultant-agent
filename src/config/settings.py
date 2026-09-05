@@ -68,6 +68,11 @@ class Settings(BaseSettings):
     output_dir: str = Field(default="output")
     logs_dir: str = Field(default="logs")
     
+    # Database - defaults to a local SQLite file so the app runs with zero
+    # external setup; set to a Postgres DSN in production
+    # (postgresql+psycopg2://user:pass@host:5432/dbname).
+    database_url: str = Field(default="sqlite:///output/erp_agent.db")
+    
     # API security
     api_auth_key: str = Field(..., description="Required API key for accessing orchestrator_api.py endpoints")
     allowed_origins: str = Field(
