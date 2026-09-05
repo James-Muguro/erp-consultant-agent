@@ -60,8 +60,8 @@ class RequirementsAgent:
         
         try:
             # Get relevant knowledge from ERP KB
-            module_info = erp_kb.get_module_info(module)
-            best_practices = erp_kb.get_best_practices(module)
+            module_info = erp_kb.get_module_info(module, erp_system)
+            best_practices = erp_kb.get_best_practices(module, erp_system)
             
             # Get templates from memory
             template = agent_memory.get_template('requirements')
