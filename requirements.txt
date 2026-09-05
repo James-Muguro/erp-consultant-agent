@@ -21,6 +21,10 @@ pandas>=2.3.3,<3.0
 pydantic>=2.11.0,<3.0
 pydantic-settings>=2.10.0,<3.0
 
+# Persistence (SQLite by default, Postgres in production via DATABASE_URL)
+sqlalchemy>=2.0.0,<3.0
+psycopg2-binary>=2.9.9,<3.0
+
 # Documentation Generation
 markdown>=3.8,<4.0
 jinja2>=3.1.6,<4.0
