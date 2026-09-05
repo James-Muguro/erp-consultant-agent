@@ -22,7 +22,18 @@ from src.tools.knowledge.workday import WORKDAY
 
 
 def _convert_to_erp_system(obj: Any) -> ERPSystem:
-    """Normalize ERP-specific knowledge exports to ERPSystem."""
+    """Normalize ERP-specific knowledge exports to ERPSystem.
+
+    Module keys are normalized to uppercase here because
+    ERPKnowledgeBase.get_module_info() uppercases the module code it's
+    given before looking it up. SAP and Dynamics 365 are authored as
+    ERPSystem instances directly with uppercase keys already, so they
+    pass through the first branch untouched. Oracle, NetSuite, Odoo,
+    Infor, and Workday are authored with lowercase/snake_case keys
+    ("financials", "order_management") in their source dicts/classes,
+    so without this normalization those five ERPs' module lookups
+    silently never matched anything.
+    """
 
     if isinstance(obj, ERPSystem):
         return obj
@@ -36,8 +47,10 @@ def _convert_to_erp_system(obj: Any) -> ERPSystem:
         modules: Dict[str, ERPModule] = {}
 
         for key, mod in raw_modules.items():
+            normalized_key = key.upper()
+
             if isinstance(mod, ERPModule):
-                modules[key] = mod
+                modules[normalized_key] = mod
 
             elif isinstance(mod, dict):
                 transactions = mod.get(
@@ -45,7 +58,7 @@ def _convert_to_erp_system(obj: Any) -> ERPSystem:
                     mod.get("common_processes", []),
                 )
 
-                modules[key] = ERPModule(
+                modules[normalized_key] = ERPModule(
                     name=mod.get("name", key),
                     description=mod.get("description", ""),
                     sub_modules=mod.get("sub_modules", []),
@@ -69,7 +82,7 @@ def _convert_to_erp_system(obj: Any) -> ERPSystem:
 
         for key, mod in raw_modules.items():
             if isinstance(mod, dict):
-                modules[key] = ERPModule(
+                modules[key.upper()] = ERPModule(
                     name=mod.get("name", key),
                     description=mod.get("description", ""),
                     sub_modules=mod.get("sub_modules", []),
