@@ -1,0 +1,17 @@
+Database migrations (Alembic)
+
+- Dev/test (SQLite, the default): no action needed - tables are still
+  auto-created on first use for a zero-setup experience.
+- Production (Postgres): schema is managed here, not by create_all(). Run:
+    alembic upgrade head
+  after deploying any release that changed src/db/models.py.
+- Adopting Alembic on a database that already has tables from before this
+  existed (i.e. created by the old create_all()-only path): stamp it at the
+  baseline revision first, then upgrade normally:
+    alembic stamp fa0f491b5cac   # matches the schema at Stage 1/2
+    alembic upgrade head
+- After changing src/db/models.py, generate a new migration with:
+    alembic revision --autogenerate -m "describe the change"
+  then read the generated file before committing it - autogenerate is a
+  good first draft, not a guarantee (it won't catch every kind of change,
+  e.g. renamed columns look like a drop+add unless you edit it by hand).
