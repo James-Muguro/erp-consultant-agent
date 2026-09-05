@@ -1,12 +1,12 @@
 """
 FastAPI wrapper for ERP Orchestrator with hybrid LLM support (Gemini + GPT-4 fallback)
 """
-from fastapi import FastAPI, HTTPException, Security, Depends
-from fastapi.security import APIKeyHeader
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 from typing import Optional, List, Dict
 from pathlib import Path
 import os
@@ -21,6 +21,11 @@ from src.tools.info_retriever import info_retriever
 from src.utils.logger import get_logger
 from src.utils.prompts import get_synthesis_prompt
 from src.models.chat_intent_schema import ChatIntent, ChatIntentDecision
+from src.auth.dependencies import get_current_user, get_db
+from src.auth.schemas import SignupRequest, LoginRequest, TokenResponse, UserOut
+from src.auth.security import create_access_token
+from src.auth import service as auth_service
+from src.db.models import User
 
 from contextlib import asynccontextmanager
 
@@ -42,13 +47,6 @@ app.add_middleware(
 
 app.mount("/ui", StaticFiles(directory="ui"), name="ui")
 
-api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
-
-
-def verify_api_key(api_key: str = Security(api_key_header)):
-    if api_key != settings.api_auth_key:
-        raise HTTPException(status_code=401, detail="Invalid or missing API key")
-    return api_key
 
 class ProjectStart(BaseModel):
     project_name: str
@@ -80,6 +78,53 @@ def extract_text(response) -> str:
     return str(response)
 
 
+def _get_owned_session(session_id: str, current_user: User):
+    """Fetch a session and verify it belongs to current_user. Sessions
+    created before per-user auth existed (user_id is None) are treated as
+    not owned by anyone and are therefore inaccessible via the API - not
+    silently reassigned to whichever user happens to ask first. Returns
+    404 (never 403) for both "doesn't exist" and "not yours", so the API
+    never confirms a session ID exists to someone who doesn't own it."""
+    session = agent_memory.session_service.get_session(session_id)
+    if not session or session.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session
+
+
+# ---------------------------------------------------------------------------
+# Auth
+# ---------------------------------------------------------------------------
+
+@app.post("/api/auth/signup", response_model=TokenResponse)
+def signup(req: SignupRequest, db: Session = Depends(get_db)):
+    try:
+        user = auth_service.create_user(db, req.email, req.password)
+    except auth_service.EmailAlreadyRegistered:
+        raise HTTPException(status_code=409, detail="Email already registered")
+
+    token = create_access_token(user.id)
+    return TokenResponse(access_token=token, expires_in_minutes=settings.access_token_expire_minutes)
+
+
+@app.post("/api/auth/login", response_model=TokenResponse)
+def login(req: LoginRequest, db: Session = Depends(get_db)):
+    user = auth_service.authenticate_user(db, req.email, req.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Incorrect email or password")
+
+    token = create_access_token(user.id)
+    return TokenResponse(access_token=token, expires_in_minutes=settings.access_token_expire_minutes)
+
+
+@app.get("/api/auth/me", response_model=UserOut)
+def me(current_user: User = Depends(get_current_user)):
+    return current_user
+
+
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
+
 @app.get("/health")
 def health():
     serpapi_installed = True
@@ -100,13 +145,26 @@ def health():
     }
 
 
+# ---------------------------------------------------------------------------
+# Projects
+# ---------------------------------------------------------------------------
+
+@app.get("/api/projects")
+def list_projects(current_user: User = Depends(get_current_user)):
+    """List the current user's projects, most recently updated first."""
+    session_ids = agent_memory.session_service.list_sessions_for_user(current_user.id)
+    summaries = [agent_memory.session_service.get_session_summary(sid) for sid in session_ids]
+    return {"projects": [s for s in summaries if s]}
+
+
 @app.post("/api/projects/start")
-def start_project(req: ProjectStart, _: str = Depends(verify_api_key)):
+def start_project(req: ProjectStart, current_user: User = Depends(get_current_user)):
     result = orchestrator.start_project(
         project_name=req.project_name,
         module=req.module,
         erp_system=req.erp_system,
-        initial_input=req.initial_input
+        initial_input=req.initial_input,
+        user_id=current_user.id
     )
     if not result.get('success'):
         raise HTTPException(status_code=500, detail=result.get('error', 'Unknown error'))
@@ -114,7 +172,9 @@ def start_project(req: ProjectStart, _: str = Depends(verify_api_key)):
 
 
 @app.post("/api/projects/{session_id}/phase/{phase_name}/execute")
-def execute_phase(session_id: str, phase_name: str, _: str = Depends(verify_api_key)):
+def execute_phase(session_id: str, phase_name: str, current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
+
     phase_map = {
         'requirements': orchestrator.execute_requirements_phase,
         'process_mapping': orchestrator.execute_process_mapping_phase,
@@ -134,7 +194,8 @@ def execute_phase(session_id: str, phase_name: str, _: str = Depends(verify_api_
 
 
 @app.get("/api/projects/{session_id}/status")
-def project_status(session_id: str, _: str = Depends(verify_api_key)):
+def project_status(session_id: str, current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
     return orchestrator.get_project_status(session_id)
 
 
@@ -168,10 +229,8 @@ def _collect_session_documents(session_id: str) -> List[Dict[str, str]]:
 
 
 @app.get("/api/projects/{session_id}/documents")
-def list_documents(session_id: str, _: str = Depends(verify_api_key)):
-    session = agent_memory.session_service.get_session(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+def list_documents(session_id: str, current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
 
     docs = _collect_session_documents(session_id)
     return {
@@ -184,10 +243,8 @@ def list_documents(session_id: str, _: str = Depends(verify_api_key)):
 
 
 @app.get("/api/projects/{session_id}/documents/{filename}")
-def download_document(session_id: str, filename: str, _: str = Depends(verify_api_key)):
-    session = agent_memory.session_service.get_session(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+def download_document(session_id: str, filename: str, current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
 
     # Whitelist match only: the requested filename must exactly match the
     # basename of a document already known to belong to this session. The
@@ -206,6 +263,10 @@ def download_document(session_id: str, filename: str, _: str = Depends(verify_ap
 
     return FileResponse(path=str(file_path), filename=file_path.name, media_type="text/markdown")
 
+
+# ---------------------------------------------------------------------------
+# Chat
+# ---------------------------------------------------------------------------
 
 def _chat_response(answer: str, llm_mode: str, success: bool = True, session_id: Optional[str] = None):
     return {
@@ -245,8 +306,13 @@ Default to ask_question whenever the message is ambiguous, conversational, or in
         return ChatIntentDecision(intent=ChatIntent.ASK_QUESTION)
 
 @app.post("/api/chat")
-def chat(req: ChatRequest, _: str = Depends(verify_api_key)):
+def chat(req: ChatRequest, current_user: User = Depends(get_current_user)):
     logger.info({"event": "Chat request received", "message": req.message, "session_id": req.session_id})
+
+    # A session_id in the request must belong to this user - checked once,
+    # up front, so every branch below can trust req.session_id is theirs.
+    if req.session_id:
+        _get_owned_session(req.session_id, current_user)
 
     llm_instance = llm_mod.get_llm()
     llm_mode = "gemini" if getattr(llm_instance, "use_gemini", True) else "gpt-4"
@@ -275,7 +341,8 @@ def chat(req: ChatRequest, _: str = Depends(verify_api_key)):
         project_name = decision.project_name or 'Chat Project'
         module = decision.module or 'FI'
         erp_system = decision.erp_system or 'SAP S/4HANA'
-        res = orchestrator.start_project(project_name, module, erp_system=erp_system, initial_input=None)
+        res = orchestrator.start_project(project_name, module, erp_system=erp_system, initial_input=None,
+                                          user_id=current_user.id)
         if res.get('success'):
             return _chat_response(f"Project '{project_name}' started ({module} / {erp_system}). You can now ask me to gather requirements, run a phase, or ask any question about it.",
                                   llm_mode=llm_mode, session_id=res.get('session_id'))
@@ -306,7 +373,8 @@ def chat(req: ChatRequest, _: str = Depends(verify_api_key)):
                                   llm_mode=llm_mode, success=False, session_id=req.session_id)
 
     if decision.intent == ChatIntent.GENERATE_TRAINING and req.session_id is None:
-        session_id = agent_memory.create_project(project_name='AP Invoice Posting', module='FI')
+        session_id = agent_memory.create_project(project_name='AP Invoice Posting', module='FI',
+                                                  user_id=current_user.id)
         result = training_agent.create_training_materials(
             session_id=session_id,
             process_name='AP Invoice Posting',
