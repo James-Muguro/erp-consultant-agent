@@ -36,7 +36,9 @@ class ProcessMappingAgent:
         session_id: str,
         process_name: str,
         requirements: Dict[str, Any],
-        current_state: Optional[str] = None
+        current_state: Optional[str] = None,
+        module: Optional[str] = None,
+        erp_system: str = "SAP S/4HANA"
     ) -> Dict[str, Any]:
         """
         Create detailed business process map
@@ -46,6 +48,9 @@ class ProcessMappingAgent:
             process_name: Name of the process to map
             requirements: Requirements from previous phase
             current_state: Description of current AS-IS process
+            module: Target ERP module code. Falls back to requirements['module']
+                if not given, then to 'FI' if neither is available.
+            erp_system: Target ERP system, used to scope knowledge-base lookups
             
         Returns:
             Dictionary containing process map and documentation
@@ -65,8 +70,8 @@ class ProcessMappingAgent:
             standard_flow = erp_kb.get_process_flow(process_name)
             
             # Get module information
-            module = requirements.get('module', 'FI')
-            module_info = erp_kb.get_module_info(module)
+            module = module or requirements.get('module', 'FI')
+            module_info = erp_kb.get_module_info(module, erp_system)
             
             # Get relevant memories
             past_processes = agent_memory.recall({
