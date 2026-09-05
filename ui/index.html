@@ -22,15 +22,7 @@
             No active project yet - describe what you'd like to work on.
         </div>
 
-        <div id="chat" class="chat-box">
-            {% for message in conversation %}
-                <div
-                    class="chat-entry {{ message.role }}"
-                    data-role="{{ message.role }}"
-                    data-content="{{ message.content | e }}"
-                ></div>
-            {% endfor %}
-        </div>
+<div id="chat" class="chat-box"></div>
 
         <div class="chat-input">
             <input
