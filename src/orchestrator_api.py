@@ -3,11 +3,13 @@ FastAPI wrapper for ERP Orchestrator with hybrid LLM support (Gemini + GPT-4 fal
 """
 from fastapi import FastAPI, HTTPException, Security, Depends
 from fastapi.security import APIKeyHeader
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List, Dict
+from pathlib import Path
+import os
 import uvicorn
 
 from src.orchestrator import orchestrator
@@ -136,6 +138,75 @@ def project_status(session_id: str, _: str = Depends(verify_api_key)):
     return orchestrator.get_project_status(session_id)
 
 
+_PHASES_WITH_DOCUMENTS = [
+    'requirements_gathering', 'process_mapping', 'solution_design',
+    'qa_testing', 'uat_testing', 'training'
+]
+
+
+def _collect_session_documents(session_id: str) -> List[Dict[str, str]]:
+    """Collect every generated document for a session, across all phases
+    whose output included one. Most phases store a single 'document_path';
+    training stores multiple named documents under 'documents'. Process
+    mapping produces no downloadable document at all."""
+    documents = []
+
+    for phase in _PHASES_WITH_DOCUMENTS:
+        output = agent_memory.get_phase_output(session_id, phase)
+        if not output or not isinstance(output, dict):
+            continue
+
+        doc_path = output.get('document_path')
+        if doc_path:
+            documents.append({'phase': phase, 'label': phase, 'path': doc_path})
+
+        for label, path in (output.get('documents') or {}).items():
+            if path:
+                documents.append({'phase': phase, 'label': label, 'path': path})
+
+    return documents
+
+
+@app.get("/api/projects/{session_id}/documents")
+def list_documents(session_id: str, _: str = Depends(verify_api_key)):
+    session = agent_memory.session_service.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    docs = _collect_session_documents(session_id)
+    return {
+        'session_id': session_id,
+        'documents': [
+            {'phase': d['phase'], 'label': d['label'], 'filename': os.path.basename(d['path'])}
+            for d in docs
+        ]
+    }
+
+
+@app.get("/api/projects/{session_id}/documents/{filename}")
+def download_document(session_id: str, filename: str, _: str = Depends(verify_api_key)):
+    session = agent_memory.session_service.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Whitelist match only: the requested filename must exactly match the
+    # basename of a document already known to belong to this session. The
+    # client-supplied filename is never resolved against the filesystem
+    # directly - only a server-known path is ever opened - so a crafted
+    # filename like "../../etc/passwd" simply won't match anything and
+    # fails with 404, regardless of what's requested.
+    docs = _collect_session_documents(session_id)
+    match = next((d for d in docs if os.path.basename(d['path']) == filename), None)
+    if not match:
+        raise HTTPException(status_code=404, detail="Document not found for this session")
+
+    file_path = Path(match['path'])
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Document file is missing on disk")
+
+    return FileResponse(path=str(file_path), filename=file_path.name, media_type="text/markdown")
+
+
 def _chat_response(answer: str, llm_mode: str, success: bool = True, session_id: Optional[str] = None):
     return {
         'success': success,
@@ -156,7 +227,7 @@ Message: "{message}"
 User currently has an active project session: {has_session}
 
 Intents:
-- start_project: user explicitly wants to begin a new ERP project (e.g. "start a new project called X", "let's begin implementation for Y")
+- start_project: user explicitly wants to begin a new ERP project (e.g. "start a new project called X", "let's begin implementation for Y"). If they mention a specific ERP system (SAP, Oracle, Dynamics 365, NetSuite, Odoo, Infor, Workday) or module (e.g. FI, MM, SD, HCM, financials), extract them into module/erp_system. Leave them unset if not mentioned.
 - run_phase: user explicitly wants to execute a specific workflow phase on their CURRENT project. Only valid if a session already exists. Phase must be one of: requirements, process_mapping, solution_design, qa_testing, uat_testing, training
 - generate_training: user explicitly wants training materials or a user guide generated as a document
 - ask_question: anything else - general questions, discussion, or requests for information, even if they mention topics like "training" or "requirements" without asking to generate or run something
@@ -184,11 +255,15 @@ def chat(req: ChatRequest, _: str = Depends(verify_api_key)):
     # caller, not something that needs classifying
     if req.agent_hint and req.session_id:
         if req.agent_hint.lower() == 'requirements':
+            session = agent_memory.session_service.get_session(req.session_id)
+            if not session:
+                return _chat_response("Session not found.", llm_mode=llm_mode, success=False)
             res = requirements_agent.gather_requirements(
                 session_id=req.session_id,
-                project_name='Chat Project',
-                module='FI',
-                stakeholder_input=req.message
+                project_name=session.project_name,
+                module=session.module,
+                stakeholder_input=req.message,
+                erp_system=session.erp_system
             )
             summary = res.get('requirements', {}).get('executive_summary', 'No summary available.')
             return _chat_response(f"Requirements gathered: {summary}", llm_mode=llm_mode)
@@ -198,9 +273,11 @@ def chat(req: ChatRequest, _: str = Depends(verify_api_key)):
 
     if decision.intent == ChatIntent.START_PROJECT:
         project_name = decision.project_name or 'Chat Project'
-        res = orchestrator.start_project(project_name, 'FI', initial_input=None)
+        module = decision.module or 'FI'
+        erp_system = decision.erp_system or 'SAP S/4HANA'
+        res = orchestrator.start_project(project_name, module, erp_system=erp_system, initial_input=None)
         if res.get('success'):
-            return _chat_response(f"Project '{project_name}' started. You can now ask me to gather requirements, run a phase, or ask any question about it.",
+            return _chat_response(f"Project '{project_name}' started ({module} / {erp_system}). You can now ask me to gather requirements, run a phase, or ask any question about it.",
                                   llm_mode=llm_mode, session_id=res.get('session_id'))
         else:
             return _chat_response(f"Failed to start project: {res.get('error', 'Unknown error')}",
