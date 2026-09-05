@@ -70,29 +70,45 @@ async function loginOrSignup(email, password) {
   }
 
   if (!response.ok) {
-    return null;
+    let detail = 'Login or signup failed.';
+    try {
+      const errBody = await response.json();
+      if (Array.isArray(errBody.detail)) {
+        // FastAPI/Pydantic 422 validation errors come back as a list
+        detail = errBody.detail.map(e => e.msg).join('; ');
+      } else if (typeof errBody.detail === 'string') {
+        detail = errBody.detail;
+      }
+    } catch (_) {
+      // response body wasn't JSON; keep the generic message
+    }
+    return { error: detail };
   }
 
   const data = await response.json();
-  return data.access_token || null;
+  return { token: data.access_token };
 }
 
 async function promptForToken() {
   const email = window.prompt('Email:');
-  if (!email) return null;
+  if (!email) return { error: null }; // user cancelled - not a real error
 
   const password = window.prompt('Password (8+ characters; first time here signs you up):');
-  if (!password) return null;
+  if (!password) return { error: null }; // user cancelled
 
-  const token = await loginOrSignup(email, password);
-  if (token) {
-    storeToken(token);
+  const result = await loginOrSignup(email, password);
+  if (result.token) {
+    storeToken(result.token);
   }
-  return token;
+  return result;
 }
 
 async function getToken() {
-  return getStoredToken() || await promptForToken();
+  const stored = getStoredToken();
+  if (stored) {
+    return { token: stored };
+  }
+  return await promptForToken();
 }
 
 
@@ -197,14 +213,19 @@ async function sendMessage() {
   msgInput.value = '';
   setLoading(true);
 
-  const token = await getToken();
+  const authResult = await getToken();
 
-  if (!token) {
-    appendMessage('assistant', '**Error:** Login is required to use this assistant.');
+  if (!authResult.token) {
+    const message = authResult.error
+      ? `**Error:** ${authResult.error}`
+      : '**Error:** Login is required to use this assistant.';
+    appendMessage('assistant', message);
     setLoading(false);
     return;
   }
 
+  const token = authResult.token;
+  
   try {
     const response = await fetch('/api/chat', {
       method: 'POST',
