@@ -89,7 +89,8 @@ class ERPOrchestratorAgent:
         project_name: str,
         module: str,
         erp_system: str = "SAP S/4HANA",
-        initial_input: Optional[str] = None
+        initial_input: Optional[str] = None,
+        user_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Start a new ERP consulting project
@@ -99,6 +100,7 @@ class ERPOrchestratorAgent:
             module: ERP module (e.g., 'FI', 'MM', 'SD')
             erp_system: Target ERP system
             initial_input: Initial stakeholder input
+            user_id: Owning user's id (None for CLI/no-auth callers)
             
         Returns:
             Project summary with session ID
@@ -119,7 +121,8 @@ class ERPOrchestratorAgent:
             session_id = agent_memory.create_project(
                 project_name=project_name,
                 module=module,
-                erp_system=erp_system
+                erp_system=erp_system,
+                user_id=user_id
             )
             
             self.logger.info(
