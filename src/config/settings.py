@@ -72,12 +72,26 @@ class Settings(BaseSettings):
     # external setup; set to a Postgres DSN in production
     # (postgresql+psycopg2://user:pass@host:5432/dbname).
     database_url: str = Field(default="sqlite:///output/erp_agent.db")
-    
+
     # API security
-    api_auth_key: str = Field(..., description="Required API key for accessing orchestrator_api.py endpoints")
+    api_auth_key: Optional[str] = Field(
+        default=None,
+        description="Deprecated: static shared API key. Superseded by per-user JWT auth "
+                    "(see jwt_secret_key). Kept only so old .env files don't fail to load; "
+                    "no endpoint checks it anymore."
+    )
     allowed_origins: str = Field(
         default="http://localhost:3000,http://localhost:8000",
         description="Comma-separated list of allowed CORS origins"
+    )
+
+    # JWT auth (per-user accounts)
+    jwt_secret_key: str = Field(..., description="Secret key used to sign access tokens - required, no default")
+    jwt_algorithm: str = Field(default="HS256")
+    access_token_expire_minutes: int = Field(
+        default=1440, gt=0,
+        description="Access token lifetime in minutes (default 24h). No refresh-token flow yet - "
+                    "a user simply logs in again once expired."
     )
     
     @property
