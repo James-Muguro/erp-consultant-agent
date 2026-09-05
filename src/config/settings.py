@@ -2,7 +2,7 @@
 Configuration settings for ERP Consultant Agent
 """
 import os
-from typing import Optional, Dict, List
+from typing import Optional, List
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 
@@ -37,15 +37,6 @@ class Settings(BaseSettings):
     
     # LLM / Model Configuration
     gemini_model: str = Field(default="gemini-2.0-flash-exp", description="Default Gemini model to use")
-    MODEL_MAP: Dict[str, str] = Field(
-        default_factory=lambda: {
-            "default": "gemini-2.0-flash-exp",
-            "qa": "gemini-2.0-qa",
-            "uat": "gemini-2.0-uat",
-            "training": "gemini-2.0-training"
-        },
-        description="Mapping of logical model keys to Gemini model names"
-    )
     
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     max_tokens: int = Field(default=8192, gt=0)
