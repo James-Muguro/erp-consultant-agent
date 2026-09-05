@@ -24,6 +24,14 @@ class ChatIntentDecision(BaseModel):
     project_name: Optional[str] = Field(
         default=None, description="Only for start_project - the project name if the user gave one"
     )
+    module: Optional[str] = Field(
+        default=None,
+        description="Only for start_project - the ERP module code if the user specified one (e.g. FI, MM, SD, HCM, financials, order_management)"
+    )
+    erp_system: Optional[str] = Field(
+        default=None,
+        description="Only for start_project - the ERP system if the user named one (e.g. SAP S/4HANA, Oracle Fusion Cloud Applications, Microsoft Dynamics 365, NetSuite, Odoo, Infor, Workday)"
+    )
     phase: Optional[str] = Field(
         default=None,
         description="Only for run_phase - one of: requirements, process_mapping, solution_design, qa_testing, uat_testing, training"
