@@ -2,7 +2,7 @@
 Session management for maintaining state across agent interactions
 """
 from typing import Any, Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 import json
 import os
@@ -347,8 +347,15 @@ class DbSessionService(InMemorySessionService):
         self.logger = AgentLogger("SessionManager")
         self._save_lock = threading.Lock()
 
-        from src.db.base import init_db, SessionLocal
-        init_db()
+        from src.db.base import init_db, SessionLocal, engine
+        if engine.dialect.name == "sqlite":
+            # SQLite (the zero-setup dev/test default) still auto-creates
+            # tables on first use for convenience. Postgres deployments are
+            # expected to run `alembic upgrade head` explicitly - schema
+            # changes there go through real migrations, not create_all(),
+            # since create_all() only ever adds missing tables and silently
+            # leaves existing ones un-migrated (see migrations/README).
+            init_db()
         self._db_session_factory = SessionLocal
 
     def _save_session(self, session: SessionState):
@@ -405,7 +412,7 @@ class DbSessionService(InMemorySessionService):
         finally:
             db.close()
 
-    def list_sessions_for_user(self, user_id: str) -> List[str]:
+    def list_sessions_for_user(self, user_id: str, include_archived: bool = False) -> List[str]:
         """List session IDs owned by a specific user, most recently
         updated first. Used by the API's conversation-list endpoint -
         list_sessions() above stays unscoped for CLI/admin use."""
@@ -414,12 +421,53 @@ class DbSessionService(InMemorySessionService):
 
         db = self._db_session_factory()
         try:
-            rows = db.execute(
-                select(SessionRecord.session_id)
-                .where(SessionRecord.user_id == user_id)
-                .order_by(SessionRecord.updated_at.desc())
-            ).all()
+            query = select(SessionRecord.session_id).where(SessionRecord.user_id == user_id)
+            if not include_archived:
+                query = query.where(SessionRecord.archived_at.is_(None))
+            rows = db.execute(query.order_by(SessionRecord.updated_at.desc())).all()
             return [row[0] for row in rows]
+        finally:
+            db.close()
+
+    def rename_session(self, session_id: str, new_project_name: str) -> Optional[SessionState]:
+        """Rename a session's project_name, in both the indexed column and
+        the JSON blob (SessionState is the source of truth for project_name;
+        this goes through the normal get -> mutate -> save path so both stay
+        consistent, exactly like any other field update)."""
+        session = self.get_session(session_id)
+        if not session:
+            return None
+        session.project_name = new_project_name
+        session.updated_at = datetime.now()
+        self._save_session(session)
+        return session
+
+    def archive_session(self, session_id: str) -> bool:
+        """Soft-delete: hide from listings without destroying data. Returns
+        False if the session doesn't exist or is already archived."""
+        from src.db.models import SessionRecord
+
+        db = self._db_session_factory()
+        try:
+            record = db.get(SessionRecord, session_id)
+            if record is None or record.archived_at is not None:
+                return False
+            record.archived_at = datetime.now(timezone.utc)
+            db.commit()
+            return True
+        finally:
+            db.close()
+
+    def is_archived(self, session_id: str) -> Optional[bool]:
+        """Returns None if the session doesn't exist at all."""
+        from src.db.models import SessionRecord
+
+        db = self._db_session_factory()
+        try:
+            record = db.get(SessionRecord, session_id)
+            if record is None:
+                return None
+            return record.archived_at is not None
         finally:
             db.close()
 

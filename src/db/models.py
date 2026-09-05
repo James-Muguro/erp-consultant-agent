@@ -15,7 +15,7 @@ key from sessions to users without an awkward later migration.
 """
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Boolean, Integer
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.types import JSON
 
@@ -46,6 +46,9 @@ class SessionRecord(Base):
     updated_at = Column(DateTime(timezone=True), nullable=False,
                          default=lambda: datetime.now(timezone.utc),
                          onupdate=lambda: datetime.now(timezone.utc), index=True)
+    # Soft delete: archived conversations are hidden from the default project
+    # list but not destroyed. NULL = active. Set on DELETE /api/projects/{id}.
+    archived_at = Column(DateTime(timezone=True), nullable=True, index=True)
     data = Column(_json_type()(), nullable=False)
 
 
@@ -55,5 +58,20 @@ class User(Base):
     id = Column(String, primary_key=True)
     email = Column(String, unique=True, nullable=False, index=True)
     hashed_password = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False,
+                         default=lambda: datetime.now(timezone.utc))
+
+
+class Feedback(Base):
+    """User feedback on a single chat/phase interaction. Deliberately simple
+    - a free-text comment plus an optional 1-5 rating - since there's no UI
+    yet to drive anything richer (see Phase 4 in the roadmap)."""
+    __tablename__ = "feedback"
+
+    id = Column(String, primary_key=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=True, index=True)
+    rating = Column(Integer, nullable=True)  # 1-5, optional
+    comment = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False,
                          default=lambda: datetime.now(timezone.utc))
