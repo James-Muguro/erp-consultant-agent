@@ -1,10 +1,12 @@
 """
 High-level LLM wrapper that returns a singleton LLM client.
 Fallback chain: Gemini (primary, free) -> Groq (secondary, free) ->
-OpenAI (tertiary, paid) -> Anthropic Claude (quaternary, paid) -> dev
-stub (absolute last resort). OpenAI and Anthropic are kept configured
-but sit behind the free Groq tier, so the agent keeps running on free
-providers for as long as possible before needing a funded account.
+OpenAI (tertiary, paid) -> Anthropic Claude (quaternary, paid). If every
+configured tier fails, generate_content raises RuntimeError rather than
+returning a fake successful-looking response - callers (every agent,
+plus the chat endpoint) already catch exceptions from this call and
+turn them into a proper structured error or a friendly fallback
+message, so a real failure is never silently presented as real output.
 Schema-requesting agents get best-effort JSON-schema hinting on every
 tier (not decode-constrained strict mode) - if a fallback tier's JSON
 doesn't perfectly validate, each agent's own heuristic parser (built
@@ -60,13 +62,12 @@ class HybridLLMClient:
     """Unified LLM client with a 4-tier fallback chain: Gemini, Groq,
     OpenAI, Anthropic, then a safe stub as an absolute last resort."""
 
-    def __init__(self, model_key: str = "default", temperature: float = 0.7):
+    def __init__(self, temperature: float = 0.7):
         self.temperature = temperature
-        self.model_key = model_key
 
         # Tier 1: Gemini
         try:
-            self.gemini = GeminiLLMClient(model_key=model_key, temperature=temperature)
+            self.gemini = GeminiLLMClient(temperature=temperature)
             self.use_gemini = True
             logger.info("HybridLLM: Gemini client initialized")
         except Exception as e:
@@ -161,23 +162,25 @@ class HybridLLMClient:
                 logger.error(f"HybridLLM: Anthropic generation failed: {e}")
 
         logger.error("HybridLLM: No LLM backend succeeded")
-        return _to_response("Error generating response: LLM unavailable")
+        raise RuntimeError(
+            "All configured LLM providers are currently unavailable "
+            "(Gemini, Groq, OpenAI, and Anthropic all failed or are not configured)."
+        )
 
 
-def get_llm(model_key: str = "default", temperature: float = 0.7) -> HybridLLMClient:
+def get_llm(temperature: float = 0.7) -> HybridLLMClient:
     """Return the singleton hybrid LLM client."""
     global _LLM_INSTANCE
     if _LLM_INSTANCE is None:
-        _LLM_INSTANCE = HybridLLMClient(model_key=model_key, temperature=temperature)
+        _LLM_INSTANCE = HybridLLMClient(temperature=temperature)
         logger.info("Initialized singleton Hybrid LLM instance")
     return _LLM_INSTANCE
 
 
-def reload_llm(model_key: Optional[str] = None, temperature: Optional[float] = None) -> HybridLLMClient:
-    """Force-reload the singleton LLM instance with optional new settings."""
+def reload_llm(temperature: Optional[float] = None) -> HybridLLMClient:
+    """Force-reload the singleton LLM instance with an optional new temperature."""
     global _LLM_INSTANCE
     _LLM_INSTANCE = HybridLLMClient(
-        model_key=model_key or "default",
         temperature=temperature or 0.7
     )
     logger.info("Reloaded singleton Hybrid LLM instance")
