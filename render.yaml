@@ -5,6 +5,10 @@ services:
     plan: free
     dockerfilePath: ./Dockerfile
     dockerContext: .
+    # /ready (not /health) - checks DB connectivity, so Render won't route
+    # traffic to a new instance until it can actually reach the database.
+    # See src/orchestrator_api.py for the distinction between the two.
+    healthCheckPath: /ready
     envVars:
       - key: JWT_SECRET_KEY
         sync: false
