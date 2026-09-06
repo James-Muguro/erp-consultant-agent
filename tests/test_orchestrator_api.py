@@ -1,4 +1,5 @@
 import uuid
+import json
 
 from fastapi.testclient import TestClient
 from unittest.mock import patch, MagicMock
@@ -199,6 +200,107 @@ def test_feedback_submission():
     other_headers = _auth_headers(client)
     r = client.post('/api/feedback', json={'session_id': session_id, 'rating': 3}, headers=other_headers)
     assert r.status_code == 404
+
+
+def _parse_sse(raw_text: str):
+    """Parse raw SSE text into a list of (event_type, data_dict) tuples."""
+    events = []
+    for block in raw_text.strip().split('\n\n'):
+        if not block.strip():
+            continue
+        event_type = None
+        data = None
+        for line in block.splitlines():
+            if line.startswith('event:'):
+                event_type = line[len('event:'):].strip()
+            elif line.startswith('data:'):
+                data = json.loads(line[len('data:'):].strip())
+        if event_type:
+            events.append((event_type, data))
+    return events
+
+
+def test_chat_stream_requires_auth():
+    client = TestClient(app)
+    r = client.post('/api/chat/stream', json={'message': 'hello'})
+    assert r.status_code == 401
+
+
+def test_chat_stream_rejects_other_users_session():
+    client = TestClient(app)
+    headers_a = _auth_headers(client)
+    headers_b = _auth_headers(client)
+    r = client.post('/api/projects/start', json={'project_name': 'Streaming Owner Test', 'module': 'FI'}, headers=headers_a)
+    session_id = r.json()['session_id']
+
+    r = client.post('/api/chat/stream', json={'message': 'hi', 'session_id': session_id}, headers=headers_b)
+    assert r.status_code == 404
+
+
+@patch('src.orchestrator_api.info_retriever')
+@patch('src.utils.llm.get_llm')
+def test_chat_stream_ask_question_events(mock_get_llm, mock_info_retriever):
+    client = TestClient(app)
+    headers = _auth_headers(client)
+
+    mock_info_retriever.return_value = {
+        'decision': {'decision': 'web', 'confidence': 0.9, 'reasoning': 'Query is a question.'},
+        'kb_results': [],
+        'web_results': [{'title': 'Test Result', 'snippet': 'A snippet.'}]
+    }
+
+    mock_llm = MagicMock()
+    mock_llm.generate_content.return_value.text = "Streamed synthesized answer."
+    # No generate_content_stream attribute on this mock -> exercises the
+    # non-streaming-provider fallback path (single text_delta chunk).
+    del mock_llm.generate_content_stream
+    mock_get_llm.return_value = mock_llm
+
+    with client.stream('POST', '/api/chat/stream', json={'message': 'What is a bill of lading?'}, headers=headers) as r:
+        assert r.status_code == 200
+        assert 'text/event-stream' in r.headers['content-type']
+        raw = ''.join(r.iter_text())
+
+    events = _parse_sse(raw)
+    event_types = [e[0] for e in events]
+
+    assert event_types[0] == 'message_start'
+    assert 'agent_started' in event_types
+    assert 'tool_started' in event_types
+    assert 'tool_completed' in event_types
+    assert 'text_delta' in event_types
+    assert event_types[-2] == 'workflow_completed'
+    assert event_types[-1] == 'message_complete'
+
+    final = events[-1][1]
+    assert final['answer'] == "Streamed synthesized answer."
+
+    text_deltas = [d['text'] for t, d in events if t == 'text_delta']
+    assert ''.join(text_deltas) == "Streamed synthesized answer."
+
+
+@patch('src.utils.llm.get_llm')
+def test_chat_stream_start_project_events(mock_get_llm):
+    client = TestClient(app)
+    headers = _auth_headers(client)
+
+    mock_llm = MagicMock()
+    mock_llm.generate_content.return_value.text = json.dumps({
+        "intent": "start_project", "project_name": "Streamed Project", "module": "MM"
+    })
+    mock_get_llm.return_value = mock_llm
+
+    with client.stream('POST', '/api/chat/stream', json={'message': "start a new project called Streamed Project for MM"}, headers=headers) as r:
+        assert r.status_code == 200
+        raw = ''.join(r.iter_text())
+
+    events = _parse_sse(raw)
+    event_types = [e[0] for e in events]
+    assert 'message_start' in event_types
+    assert 'workflow_completed' in event_types
+    assert event_types[-1] == 'message_complete'
+    final = events[-1][1]
+    assert final['session_id'] is not None
 
 
 @patch('src.orchestrator_api.info_retriever')
