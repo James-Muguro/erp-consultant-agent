@@ -55,3 +55,25 @@ class LLMClient:
         )
         text = response.text or ""
         return type("LLMResponse", (), {"text": text})()
+
+    def generate_content_stream(self, prompt: str, generation_config: Optional[dict] = None):
+        """Yields text chunks as they arrive from Gemini. Plain-text only -
+        no response_schema support here, since structured/schema output
+        isn't a meaningful thing to stream token-by-token and nothing in
+        this codebase needs it to be (only the chat endpoint's free-text
+        answer synthesis uses streaming)."""
+        generation_config = generation_config or {}
+        temperature = generation_config.get("temperature", self.temperature)
+        max_tokens = generation_config.get("max_output_tokens", settings.max_tokens)
+
+        stream = self.gemini_client.models.generate_content_stream(
+            model=settings.gemini_model,
+            contents=prompt,
+            config=genai_types.GenerateContentConfig(
+                temperature=temperature,
+                max_output_tokens=max_tokens,
+            )
+        )
+        for chunk in stream:
+            if chunk.text:
+                yield chunk.text

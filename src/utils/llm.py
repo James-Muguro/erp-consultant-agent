@@ -32,6 +32,14 @@ logger = logging.getLogger(__name__)
 _LLM_INSTANCE: Optional["HybridLLMClient"] = None
 
 
+class _TierFailedBeforeFirstChunk(Exception):
+    """Internal sentinel: a streaming tier failed before yielding anything,
+    so it's safe to move on to the next tier. Wraps the original error."""
+    def __init__(self, cause):
+        super().__init__(str(cause))
+        self.__cause__ = cause
+
+
 def _to_response(text: str):
     return type("LLMResponse", (), {"text": text})()
 
@@ -56,6 +64,20 @@ def _openai_compatible_call(client, model, prompt, temperature, max_tokens, resp
     resp = client.chat.completions.create(**kwargs)
     text = resp.choices[0].message.content.strip()
     return _to_response(text)
+
+
+def _openai_compatible_stream(client, model, prompt, temperature, max_tokens):
+    stream = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=temperature,
+        max_tokens=max_tokens,
+        stream=True,
+    )
+    for chunk in stream:
+        delta = chunk.choices[0].delta.content if chunk.choices else None
+        if delta:
+            yield delta
 
 
 class HybridLLMClient:
@@ -162,6 +184,77 @@ class HybridLLMClient:
                 logger.error(f"HybridLLM: Anthropic generation failed: {e}")
 
         logger.error("HybridLLM: No LLM backend succeeded")
+        raise RuntimeError(
+            "All configured LLM providers are currently unavailable "
+            "(Gemini, Groq, OpenAI, and Anthropic all failed or are not configured)."
+        )
+
+    def _try_anthropic_stream(self, prompt, max_tokens):
+        with self.anthropic_client.messages.stream(
+            model=settings.anthropic_model,
+            max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}],
+        ) as stream:
+            for text in stream.text_stream:
+                yield text
+
+    def generate_content_stream(self, prompt: str, generation_config: Optional[dict] = None):
+        """Plain-text streaming generator, one tier at a time, same fallback
+        order as generate_content. Important limitation: once a tier has
+        started yielding chunks to the caller, a mid-stream failure on that
+        tier cannot fall back to the next one - the caller has already seen
+        (and likely displayed) partial output, and silently discarding it
+        for a second attempt would show text disappearing and reappearing.
+        So a mid-stream failure re-raises after logging; only a failure
+        that happens before any chunk is yielded moves on to the next tier.
+        No response_schema support - see generate_content_stream on the
+        Gemini client for why."""
+        generation_config = generation_config or {}
+        temperature = generation_config.get("temperature", self.temperature)
+        max_tokens = generation_config.get("max_output_tokens", settings.max_tokens)
+
+        def _run(chunk_source):
+            yielded_any = False
+            try:
+                for chunk in chunk_source:
+                    yielded_any = True
+                    yield chunk
+            except Exception as e:
+                if yielded_any:
+                    logger.error(f"HybridLLM: stream failed mid-response: {e}")
+                    raise
+                raise _TierFailedBeforeFirstChunk(e)
+
+        if self.use_gemini and self.gemini:
+            try:
+                yield from _run(self.gemini.generate_content_stream(prompt, generation_config))
+                return
+            except _TierFailedBeforeFirstChunk as e:
+                logger.warning(f"HybridLLM: Gemini stream failed to start, trying Groq: {e.__cause__}")
+
+        if self.groq_client:
+            try:
+                groq_max_tokens = min(max_tokens, 2048)
+                yield from _run(_openai_compatible_stream(self.groq_client, settings.groq_model, prompt, temperature, groq_max_tokens))
+                return
+            except _TierFailedBeforeFirstChunk as e:
+                logger.warning(f"HybridLLM: Groq stream failed to start, trying OpenAI: {e.__cause__}")
+
+        if self.openai_client:
+            try:
+                yield from _run(_openai_compatible_stream(self.openai_client, settings.openai_model, prompt, temperature, max_tokens))
+                return
+            except _TierFailedBeforeFirstChunk as e:
+                logger.warning(f"HybridLLM: OpenAI stream failed to start, trying Anthropic: {e.__cause__}")
+
+        if self.anthropic_client:
+            try:
+                yield from _run(self._try_anthropic_stream(prompt, max_tokens))
+                return
+            except _TierFailedBeforeFirstChunk as e:
+                logger.error(f"HybridLLM: Anthropic stream failed to start: {e.__cause__}")
+
+        logger.error("HybridLLM: No LLM backend succeeded (streaming)")
         raise RuntimeError(
             "All configured LLM providers are currently unavailable "
             "(Gemini, Groq, OpenAI, and Anthropic all failed or are not configured)."
