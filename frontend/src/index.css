@@ -1,0 +1,99 @@
+@import "tailwindcss";
+
+@theme {
+  /* Color: a working ledger, not a marketing gradient. Cool paper, one
+     accent (pine green - the color of classic green-bar accounting
+     ledger paper), flat surfaces instead of shadow-and-radius soup. */
+  --color-paper: #F2F3F0;
+  --color-surface: #FFFFFF;
+  --color-ink: #1B221F;
+  --color-ink-muted: #5B6B63;
+  --color-ink-faint: #8B968F;
+  --color-accent: #1F5F4A;
+  --color-accent-soft: #E3ECE7;
+  --color-accent-strong: #163F32;
+  --color-border: #DBDED7;
+  --color-border-strong: #C3C8BE;
+  --color-danger: #9B3B2E;
+  --color-danger-soft: #F3E4E1;
+
+  --font-display: "Fraunces", ui-serif, Georgia, serif;
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+@layer base {
+  html, body, #root {
+    height: 100%;
+  }
+  body {
+    background-color: var(--color-paper);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+  }
+  ::selection {
+    background-color: var(--color-accent-soft);
+  }
+  *:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Minimal typography for markdown-rendered assistant messages - avoids
+   pulling in a full typography plugin for a handful of chat-bubble tags. */
+.prose-chat p { margin: 0 0 0.6em; }
+.prose-chat p:last-child { margin-bottom: 0; }
+.prose-chat ul, .prose-chat ol { margin: 0 0 0.6em; padding-left: 1.25em; }
+.prose-chat ul { list-style: disc; }
+.prose-chat ol { list-style: decimal; }
+.prose-chat li { margin: 0.15em 0; }
+.prose-chat h1, .prose-chat h2, .prose-chat h3 {
+  font-weight: 600;
+  margin: 0.8em 0 0.4em;
+}
+.prose-chat h1:first-child, .prose-chat h2:first-child, .prose-chat h3:first-child {
+  margin-top: 0;
+}
+.prose-chat h1 { font-size: 1.15em; }
+.prose-chat h2 { font-size: 1.08em; }
+.prose-chat h3 { font-size: 1em; }
+.prose-chat code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: var(--color-accent-soft);
+  padding: 0.1em 0.35em;
+  border-radius: 0.25em;
+}
+.prose-chat pre {
+  background: var(--color-ink);
+  color: var(--color-paper);
+  padding: 0.75em 1em;
+  border-radius: 0.4em;
+  overflow-x: auto;
+  margin: 0 0 0.6em;
+}
+.prose-chat pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+.prose-chat table {
+  border-collapse: collapse;
+  margin: 0 0 0.6em;
+  font-size: 0.95em;
+}
+.prose-chat th, .prose-chat td {
+  border: 1px solid var(--color-border);
+  padding: 0.35em 0.6em;
+  text-align: left;
+}
+.prose-chat a { color: var(--color-accent-strong); text-decoration: underline; }
