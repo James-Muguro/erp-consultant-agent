@@ -4,9 +4,10 @@ FastAPI wrapper for ERP Orchestrator with hybrid LLM support (Gemini + GPT-4 fal
 import time
 import uuid as uuid_lib
 import sys
+import json
 
 from fastapi import FastAPI, HTTPException, Depends, Request
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -567,6 +568,192 @@ def chat(req: ChatRequest, current_user: User = Depends(get_current_user)):
 
     logger.info({"event": "Chat response ready", "session_id": req.session_id})
     return _chat_response(final_answer, llm_mode=llm_mode, session_id=req.session_id)
+
+
+def _sse(event: str, data: dict) -> str:
+    """Format one Server-Sent Event. Every event carries a JSON `data` line -
+    even short ones - so the frontend has one consistent parse path
+    regardless of event type."""
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Optional[str]):
+    """Generator of SSE-formatted events for one chat turn. Mirrors chat()'s
+    branching exactly (same intents, same agent calls) but emits progress
+    events around each step instead of returning a single JSON blob at the
+    end - this is what actually addresses the spec's "don't show an empty
+    screen while the backend works" requirement for multi-second/multi-phase
+    operations. Internal reasoning (prompts, raw LLM chain-of-thought) is
+    never emitted - only short, user-safe status strings, exactly like the
+    "agent activity" UI the roadmap describes.
+
+    Ownership of req.session_id is verified by the caller (the endpoint
+    function) before this generator is even constructed, so every branch
+    here can trust it - same pattern as chat() itself.
+    """
+    def ev(event_type, **data):
+        if request_id:
+            data['request_id'] = request_id
+        return _sse(event_type, data)
+
+    try:
+        yield ev('message_start', session_id=req.session_id)
+
+        llm_instance = llm_mod.get_llm()
+        llm_mode = "gemini" if getattr(llm_instance, "use_gemini", True) else "gpt-4"
+
+        if req.agent_hint and req.session_id and req.agent_hint.lower() == 'requirements':
+            yield ev('agent_started', agent='requirements', message='Gathering requirements')
+            session = agent_memory.session_service.get_session(req.session_id)
+            if not session:
+                yield ev('error', message='Session not found.')
+                return
+            res = requirements_agent.gather_requirements(
+                session_id=req.session_id, project_name=session.project_name,
+                module=session.module, stakeholder_input=req.message, erp_system=session.erp_system
+            )
+            summary = res.get('requirements', {}).get('executive_summary', 'No summary available.')
+            answer = f"Requirements gathered: {summary}"
+            yield ev('agent_progress', agent='requirements', message='Requirements captured')
+            yield ev('text_delta', text=answer)
+            yield ev('workflow_completed')
+            yield ev('message_complete', answer=answer, llm_mode=llm_mode, session_id=req.session_id)
+            return
+
+        yield ev('agent_started', agent='router', message='Understanding your request')
+        decision = classify_intent(llm_instance, req.message, has_session=bool(req.session_id))
+        logger.info({"event": "Intent classified", "intent": decision.intent.value})
+
+        if decision.intent == ChatIntent.START_PROJECT:
+            project_name = decision.project_name or 'Chat Project'
+            module = decision.module or 'FI'
+            erp_system = decision.erp_system or 'SAP S/4HANA'
+            yield ev('agent_started', agent='orchestrator', message=f"Starting project '{project_name}'")
+            res = orchestrator.start_project(project_name, module, erp_system=erp_system,
+                                              initial_input=None, user_id=current_user.id)
+            if res.get('success'):
+                answer = (f"Project '{project_name}' started ({module} / {erp_system}). "
+                          f"You can now ask me to gather requirements, run a phase, or ask any question about it.")
+                yield ev('text_delta', text=answer)
+                yield ev('workflow_completed')
+                yield ev('message_complete', answer=answer, llm_mode=llm_mode, session_id=res.get('session_id'))
+            else:
+                yield ev('error', message=f"Failed to start project: {res.get('error', 'Unknown error')}")
+            return
+
+        if decision.intent == ChatIntent.RUN_PHASE:
+            if not req.session_id:
+                yield ev('error', message='session_id is required to run a phase.')
+                return
+
+            phase_map = {
+                'requirements': orchestrator.execute_requirements_phase,
+                'process_mapping': orchestrator.execute_process_mapping_phase,
+                'solution_design': orchestrator.execute_solution_design_phase,
+                'qa_testing': orchestrator.execute_qa_testing_phase,
+                'uat_testing': orchestrator.execute_uat_testing_phase,
+                'training': orchestrator.execute_training_phase
+            }
+            if decision.phase not in phase_map:
+                yield ev('error', message='Could not determine which phase to run.')
+                return
+
+            yield ev('agent_started', agent=decision.phase, message=f"Running {decision.phase.replace('_', ' ')} phase")
+            result = phase_map[decision.phase](session_id=req.session_id)
+            if result.get('success'):
+                doc_path = result.get('document_path')
+                if doc_path:
+                    yield ev('document_created', phase=decision.phase, filename=os.path.basename(doc_path))
+                answer = f"Phase '{decision.phase}' executed successfully."
+                yield ev('text_delta', text=answer)
+                yield ev('workflow_completed')
+                yield ev('message_complete', answer=answer, llm_mode=llm_mode, session_id=req.session_id)
+            else:
+                yield ev('error', message=f"Failed to execute phase '{decision.phase}': {result.get('error', 'Unknown error')}")
+            return
+
+        if decision.intent == ChatIntent.GENERATE_TRAINING and req.session_id is None:
+            yield ev('agent_started', agent='training', message='Generating training materials')
+            session_id = agent_memory.create_project(project_name='AP Invoice Posting', module='FI',
+                                                      user_id=current_user.id)
+            result = training_agent.create_training_materials(
+                session_id=session_id, process_name='AP Invoice Posting',
+                user_roles=['AP Clerk', 'Accounts Payable Supervisor', 'Finance Manager'],
+                solution_design={}
+            )
+            if result.get('success'):
+                for label, path in (result.get('documents') or {}).items():
+                    if path:
+                        yield ev('document_created', phase='training', label=label, filename=os.path.basename(path))
+                answer = "Training materials for 'AP Invoice Posting' have been generated."
+                yield ev('text_delta', text=answer)
+                yield ev('workflow_completed')
+                yield ev('message_complete', answer=answer, llm_mode=llm_mode, session_id=session_id)
+            else:
+                yield ev('error', message='Failed to generate training materials.')
+            return
+
+        # ASK_QUESTION (default) - this is the one branch where token-level
+        # streaming actually happens, since it's the only path whose LLM
+        # call produces free-form prose rather than a short fixed
+        # confirmation string.
+        yield ev('tool_started', tool='info_retriever', message='Searching knowledge base and web')
+        data = info_retriever(req.message, {'summary': ''}, prefer_web=req.prefer_web)
+        yield ev('tool_completed', tool='info_retriever')
+
+        generation_config = {'temperature': 0.5, 'max_output_tokens': 2048}
+        if data and (data.get('kb_results') or data.get('web_results') or data.get('sources')):
+            prompt = get_synthesis_prompt(req.message, data)
+        else:
+            prompt = f'Respond naturally and briefly, as a helpful ERP consulting assistant, to this message: "{req.message}"'
+
+        yield ev('agent_started', agent='synthesis', message='Preparing your answer')
+        full_answer_parts = []
+        try:
+            if hasattr(llm_instance, 'generate_content_stream'):
+                for chunk in llm_instance.generate_content_stream(prompt, generation_config=generation_config):
+                    full_answer_parts.append(chunk)
+                    yield ev('text_delta', text=chunk)
+            else:
+                response = llm_instance.generate_content(prompt, generation_config=generation_config)
+                text = extract_text(response)
+                full_answer_parts.append(text)
+                yield ev('text_delta', text=text)
+        except Exception as e:
+            logger.error(f"Error during streamed answer synthesis: {e}")
+            if not full_answer_parts:
+                fallback = "I found some information, but I had trouble summarizing it."
+                full_answer_parts.append(fallback)
+                yield ev('text_delta', text=fallback)
+            # else: a partial answer already reached the client - see the
+            # docstring on generate_content_stream for why this can't
+            # transparently retry on another tier mid-stream.
+
+        final_answer = "".join(full_answer_parts)
+        logger.info({"event": "Chat response ready", "session_id": req.session_id})
+        yield ev('workflow_completed')
+        yield ev('message_complete', answer=final_answer, llm_mode=llm_mode, session_id=req.session_id)
+
+    except Exception as e:
+        logger.error("Unhandled error in chat stream", error=str(e), exc_info=True)
+        yield ev('error', message='Internal server error while processing your message.')
+
+
+@app.post("/api/chat/stream")
+def chat_stream(req: ChatRequest, request: Request, current_user: User = Depends(get_current_user)):
+    """Server-Sent Events version of /api/chat. Same intents and same agent
+    calls as /api/chat (which stays exactly as it was, for any client that
+    prefers a single JSON response) - this just exposes the same work as a
+    progressive event stream, per the roadmap's streaming-chat phase."""
+    if req.session_id:
+        _get_owned_session(req.session_id, current_user)
+
+    request_id = getattr(request.state, "request_id", None)
+    return StreamingResponse(
+        _stream_chat_events(req, current_user, request_id),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/")
