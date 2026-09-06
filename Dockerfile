@@ -42,4 +42,14 @@ EXPOSE 8000
 
 # Render sets $PORT at runtime; default to 8000 for local `docker run`.
 ENV PORT=8000
-CMD ["sh", "-c", "uvicorn src.orchestrator_api:app --host 0.0.0.0 --port ${PORT}"]
+
+# Migrations run as part of the container's own startup rather than as a
+# Render "Pre-Deploy Command" - that feature is paid-plan only (Render docs:
+# https://render.com/docs/deploys), and render.yaml here uses `plan: free`.
+# This is safe for a single instance (the free plan's reality) but not
+# strictly safe for concurrent instances - two containers starting at once
+# could both attempt the upgrade simultaneously. If this ever moves to a
+# paid, multi-instance plan, switch to Render's preDeployCommand (which runs
+# once, before new instances receive traffic) and drop `alembic upgrade
+# head` from this CMD - see migrations/README for the exact command.
+CMD ["sh", "-c", "alembic upgrade head && uvicorn src.orchestrator_api:app --host 0.0.0.0 --port ${PORT}"]
