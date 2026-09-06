@@ -2,9 +2,18 @@ Database migrations (Alembic)
 
 - Dev/test (SQLite, the default): no action needed - tables are still
   auto-created on first use for a zero-setup experience.
-- Production (Postgres): schema is managed here, not by create_all(). Run:
-    alembic upgrade head
-  after deploying any release that changed src/db/models.py.
+- Production (Postgres): schema is managed here, not by create_all().
+  On Render, the Docker image's own startup command runs `alembic upgrade
+  head` automatically before starting the server (see Dockerfile's CMD) -
+  this exists specifically because Render's "Pre-Deploy Command" feature,
+  which would otherwise be the cleaner place for this, is paid-plan only
+  (render.yaml here is on the free plan). If this service ever moves to a
+  paid, multi-instance plan, switch to a preDeployCommand of
+  `alembic upgrade head` in render.yaml and drop it from the Dockerfile's
+  CMD instead - running it from every instance's own startup is fine for a
+  single instance but not guaranteed-safe if multiple instances start
+  concurrently.
+  Running it manually elsewhere: `alembic upgrade head`.
 - Adopting Alembic on a database that already has tables from before this
   existed (i.e. created by the old create_all()-only path): stamp it at the
   baseline revision first, then upgrade normally:
