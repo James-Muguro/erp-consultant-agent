@@ -130,7 +130,9 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     )
 
 
-app.mount("/ui", StaticFiles(directory="ui"), name="ui")
+app.mount("/ui", StaticFiles(directory="ui"), name="ui_legacy")
+if os.path.isdir("frontend/dist/assets"):
+    app.mount("/assets", StaticFiles(directory="frontend/dist/assets"), name="frontend_assets")
 
 
 class ProjectStart(BaseModel):
@@ -758,12 +760,21 @@ def chat_stream(req: ChatRequest, request: Request, current_user: User = Depends
 
 @app.get("/")
 def get_ui():
+    """Serves the built React frontend (frontend/dist, from `npm run build`
+    - see frontend/README.md). The old vanilla-JS demo UI is preserved,
+    unchanged, at /ui rather than deleted - see Phase 24 in the roadmap."""
     try:
-        with open('ui/index.html', 'r', encoding='utf-8') as f:
+        with open('frontend/dist/index.html', 'r', encoding='utf-8') as f:
             html = f.read()
         return HTMLResponse(content=html, status_code=200)
-    except Exception:
-        return HTMLResponse(content='<h3>ERP Orchestrator API</h3><p>Visit /docs for API.</p>', status_code=200)
+    except FileNotFoundError:
+        return HTMLResponse(
+            content='<h3>ERP Orchestrator API</h3>'
+                    '<p>Frontend not built yet - run <code>npm run build</code> in frontend/. '
+                    'The previous demo UI is still available at <a href="/ui">/ui</a>. '
+                    'API docs: <a href="/docs">/docs</a>.</p>',
+            status_code=200,
+        )
 
 
 def start_server(host: str = '127.0.0.1', port: int = 8000):
