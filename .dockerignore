@@ -1,0 +1,25 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+htmlcov/
+.pytest_cache/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Local dev artifacts
+output/
+logs/
+*.db
+
+# Version control / editor
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Patch/archive files left over from staged development
+*.patch
+*.tar.gz
