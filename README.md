@@ -1,61 +1,98 @@
 # ERP Consultant AI Agent
 
-An intelligent multi-agent system designed to support ERP Functional Consultants throughout the entire project lifecycle — from requirement gathering to user training. The system automates repetitive documentation tasks, manual requirement gathering, and training material creation, allowing consultants to focus on high-value advisory work.
+ERP Consultant AI is a multi-agent AI system built to support ERP Functional Consultants across the project lifecycle, from requirements gathering and process mapping through solution design, testing, and user training.
 
-**Target users:** ERP Functional Consultants implementing systems such as SAP S/4HANA, Oracle ERP, Microsoft Dynamics, or similar platforms.
+The project combines specialized AI agents with an orchestrator, project sessions, ERP knowledge resources, document generation, and a web interface for interacting with the system.
 
-**Why multi-agent:** ERP consulting workflows involve distinct phases (requirements, process mapping, solution design, testing, training) with different expertise and output formats. A multi-agent architecture allows specialized agents to handle each phase while an orchestrator coordinates the overall workflow and maintains context across stages.
+## Live Application
+
+Try the deployed application:
+
+https://erpconsultant-ai.onrender.com/
+
+The application provides a web-based interface where users interact with the ERP Consultant AI agent, create projects, continue project sessions, execute consulting workflow phases, and access generated deliverables.
+
+## Target Users
+
+ERP Functional Consultants working on implementations and transformation projects involving platforms such as:
+
+* SAP S/4HANA
+* Oracle ERP
+* Microsoft Dynamics 365
+* NetSuite
+* Other enterprise ERP platforms
+
+## Why a Multi-Agent Architecture?
+
+ERP consulting involves several distinct activities. Requirements gathering, process mapping, solution design, testing, and training require different types of analysis and produce different deliverables.
+
+ERP Consultant AI assigns these responsibilities to specialized agents while a central orchestrator coordinates the overall workflow and maintains project context across phases.
 
 ---
 
 ## Problem Statement
 
-ERP Functional Consultants spend 60–70% of their time on repetitive documentation tasks, manual requirement gathering, and creating training materials. This reduces billable hours and delays project delivery timelines.
+ERP Functional Consultants spend significant time on repetitive documentation, requirement gathering, testing preparation, and training material creation.
 
-Specific pain points:
+Common challenges include:
 
-- **Time-intensive documentation:** Requirements, solution designs, test cases, and training manuals require significant manual effort
-- **Inconsistent deliverables:** Different consultants produce varying quality and structure in documentation
-- **Context switching:** Moving between requirement gathering, process mapping, testing, and training dilutes focus
-- **Knowledge retention:** Best practices and project-specific decisions are not systematically captured for reuse
+* Time-intensive documentation for requirements, solution designs, test cases, and training materials
+* Inconsistent structure and quality across project deliverables
+* Frequent context switching between different consulting activities
+* Difficulty retaining project decisions and reusable consulting knowledge
+* Manual effort involved in preparing testing and training materials
+
+These activities reduce the time consultants have available for analysis, stakeholder engagement, and higher-value advisory work.
 
 ---
 
 ## Solution
 
-An **ERP Consulting Multi-Agent System** that automates key consulting deliverables through specialized agents coordinated by an orchestrator:
+ERP Consultant AI provides a multi-agent consulting system designed to support key ERP project activities.
 
-- ✅ Requirement gathering and documentation
-- ✅ Business process mapping
-- ✅ Solution design documentation
-- ✅ QA test case generation
-- ✅ UAT testing scenarios
-- ✅ Training materials and user manuals
+Core capabilities include:
 
-**Expected Impact:**
+* Requirement gathering and documentation
+* Business process mapping
+* Solution design documentation
+* QA test case generation
+* UAT scenario generation
+* Training material and user manual generation
+* ERP-related question answering and research
+* Project session management
+* Generated document management
 
-- ⏱️ Save 15–20 hours per week on documentation *(indicative estimate, not independently benchmarked)*
-- 📊 Standardized, high-quality deliverables through structured output schemas
-- 🚀 Faster project delivery cycles via parallel agent execution where applicable
-- ✅ Consistent testing coverage across modules and scenarios
+### Expected Impact
+
+The project is designed to help consultants:
+
+* Reduce repetitive documentation work
+* Standardize consulting deliverables
+* Accelerate project preparation
+* Improve testing coverage
+* Maintain project context across consulting phases
+* Spend more time on analysis and stakeholder engagement
+
+Any time-saving figures associated with the project are indicative estimates and have not been independently benchmarked.
 
 ---
 
 ## Architecture
 
-The system uses a multi-agent architecture with a central orchestrator coordinating specialized agents:
+The system uses a central orchestrator with specialized agents responsible for individual consulting activities.
 
 ```mermaid
 graph TD
-    Orchestrator["Orchestrator Agent (Supervisor)"]
-    
+
+    Orchestrator["Orchestrator Agent"]
+
     Orchestrator --> Req["Requirements Gathering Agent"]
     Orchestrator --> Process["Process Mapping Agent"]
     Orchestrator --> Solution["Solution Design Agent"]
     Orchestrator --> QA["QA Testing Agent"]
     Orchestrator --> UAT["UAT Testing Agent"]
     Orchestrator --> Training["Training & Documentation Agent"]
-    
+
     Orchestrator --> Memory["Memory & Session Management"]
     Orchestrator --> Tools["Tools & Capabilities"]
     Orchestrator --> Observability["Observability & Tracing"]
@@ -63,35 +100,44 @@ graph TD
 
 ### Agent Responsibilities
 
-| Agent | Responsibility |
-|-------|----------------|
-| **Orchestrator Agent** | Coordinates workflow phases, routes tasks to specialized agents, manages sequential and parallel execution, maintains state across workflow phases |
-| **Requirements Gathering Agent** | Captures stakeholder input, documents requirements in structured format, validates completeness |
-| **Process Mapping Agent** | Maps business processes, identifies integration points, documents current and future state workflows |
-| **Solution Design Agent** | Produces solution design documentation, captures configurations, integrations, and customization decisions |
-| **QA Testing Agent** | Generates QA test cases based on solution design, ensures coverage across configurations and integrations |
-| **UAT Testing Agent** | Creates UAT testing scenarios aligned with business requirements and user workflows |
-| **Training & Documentation Agent** | Produces training materials, user manuals, and process documentation for end users |
+| Agent                          | Responsibility                                                                                     |
+| ------------------------------ | -------------------------------------------------------------------------------------------------- |
+| Orchestrator Agent             | Coordinates workflow phases, routes tasks, manages execution, and maintains project state          |
+| Requirements Gathering Agent   | Captures stakeholder input and produces structured requirements                                    |
+| Process Mapping Agent          | Maps business processes and identifies current-state, future-state, and integration considerations |
+| Solution Design Agent          | Produces solution design documentation covering configurations, integrations, and design decisions |
+| QA Testing Agent               | Generates QA test cases based on requirements and solution design                                  |
+| UAT Testing Agent              | Creates business-focused UAT scenarios aligned with requirements and user workflows                |
+| Training & Documentation Agent | Produces training materials, user guides, and process documentation                                |
 
 ### Supporting Components
 
-| Component | Role |
-|-----------|------|
-| **Memory & Session Management** | InMemorySessionService + Memory Bank for project continuity, long-term memory for best practices, context compaction for large documents |
-| **Tools & Capabilities** | Google Search integration, custom ERP knowledge base, document generation, process visualization, test case generation |
-| **Observability** | Structured logging, agent tracing, performance metrics for monitoring and debugging |
+| Component                   | Role                                                                                                            |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Memory & Session Management | Maintains project sessions, context, and reusable knowledge                                                     |
+| Tools & Capabilities        | Provides ERP knowledge retrieval, web research, document generation, process visualization, and test generation |
+| Observability               | Provides structured logging, tracing, and performance monitoring                                                |
+| API Layer                   | Provides authentication, project management, chat, feedback, health, and document endpoints                     |
+| Web Interface               | Provides the user-facing interface for interacting with the ERP Consultant AI system                            |
 
 ---
 
 ## Technical Stack
 
-| Technology | Role in System |
-|------------|----------------|
-| **Google Gemini API** | AI framework powering agent reasoning and structured output generation |
-| **Python 3.10+** | Implementation language for all agents, tools, and orchestration logic |
-| **InMemorySessionService + Memory Bank** | Session management for project continuity, long-term memory for best practices and historical decisions |
-| **Structured logging and tracing** | Observability layer for agent tracing, performance monitoring, and debugging |
-| **pytest with evaluation metrics** | Unit and integration testing, automated evaluation of agent outputs |
+| Technology                           | Role                                              |
+| ------------------------------------ | ------------------------------------------------- |
+| Python 3.10+                         | Application, agents, tools, and orchestration     |
+| FastAPI                              | Web API and application server                    |
+| Google Gemini API                    | Primary LLM for reasoning and structured output   |
+| SQLAlchemy                           | Database access and persistence                   |
+| PostgreSQL                           | Persistent application data                       |
+| Pydantic                             | Structured data validation and LLM output schemas |
+| InMemorySessionService + Memory Bank | Project sessions and consulting context           |
+| SerpAPI                              | Web research and external information retrieval   |
+| Structlog                            | Structured application logging                    |
+| Pytest                               | Unit, integration, and evaluation testing         |
+| HTML, CSS, JavaScript                | User-facing web interface                         |
+| Render                               | Application hosting and deployment                |
 
 ---
 
@@ -99,86 +145,138 @@ graph TD
 
 ### Multi-Agent Orchestration
 
-- Orchestrator with intelligent task routing to specialized agents
-- Sequential and parallel agent execution based on workflow phase
-- State management across workflow phases to maintain context
+* Central orchestrator for ERP consulting workflows
+* Specialized agents for each consulting phase
+* Sequential workflow execution
+* Project state maintained across phases
+* Structured outputs for downstream processing
 
-### Tools & Capabilities
+### ERP Consulting Capabilities
 
-- Google Search integration for external research
-- Custom ERP knowledge base for domain-specific queries
-- Document generation for requirements, designs, and training materials
-- Process visualization for workflow documentation
-- Test case generation for QA and UAT scenarios
+* Requirements gathering
+* Business process mapping
+* Solution design
+* QA testing
+* UAT testing
+* Training material generation
+* ERP knowledge retrieval
+* Web research
 
-### Memory & Context Management
+### Project Management
 
-- Session management for project continuity across multiple interactions
-- Long-term memory bank for storing best practices and reusable patterns
-- Context compaction for handling large documents without losing key information
+* User accounts
+* Project creation
+* Project sessions
+* Project status tracking
+* Phase progress tracking
+* Project archiving
+* Generated document management
+* User feedback
+
+### Memory & Context
+
+* Session-based project continuity
+* Project-specific context
+* Long-term memory for reusable knowledge
+* Context management for large consulting workflows
+
+### Web Application
+
+The deployed application provides a browser-based interface for interacting with the agent.
+
+Live application:
+
+https://erpconsultant-ai.onrender.com/
+
+The interface is served directly by the FastAPI application and communicates with the application's API endpoints.
 
 ### Observability
 
-- Structured logging for all agent actions and decisions
-- Agent tracing for debugging and performance analysis
-- Performance metrics for monitoring workflow execution times and quality
+* Structured application logging
+* Request correlation IDs
+* Error handling and standardized API responses
+* Health and readiness endpoints
+* Agent execution tracing
+* Performance monitoring
 
 ---
 
 ## Quick Start
 
-### 1. Clone Repository
+### 1. Clone the Repository
 
 ```bash
 git clone https://github.com/James-Muguro/erp-consultant-agent.git
+
 cd erp-consultant-agent
 ```
 
-### 2. Set Up Environment
+### 2. Create the Python Environment
 
 ```bash
-# Create virtual environment
 python -m venv .venv
+```
 
-# Activate (Linux/macOS)
+Activate it on Linux/macOS:
+
+```bash
 source .venv/bin/activate
+```
 
-# Activate (Windows)
+Activate it on Windows:
+
+```bash
 .venv\Scripts\activate
+```
 
-# Install dependencies
+Install dependencies:
+
+```bash
 pip install -r requirements.txt
 ```
 
-### 3. Configure API Keys
+### 3. Configure Environment Variables
+
+Copy the environment template:
 
 ```bash
-# Copy environment template
 cp .env.example .env
 ```
 
-Edit `.env` and set these **three required values** (the app will not start without all three):
+Configure the required environment variables in `.env`.
+
+Example:
 
 ```env
-GEMINI_API_KEY="your_gemini_api_key"       # https://aistudio.google.com/apikey
-SERPAPI_API_KEY="your_serpapi_key"          # https://serpapi.com/
-API_AUTH_KEY="a_random_secret_you_generate"
+GEMINI_API_KEY="your_gemini_api_key"
+SERPAPI_API_KEY="your_serpapi_api_key"
+API_AUTH_KEY="your_generated_secret"
 ```
 
-Generate a strong `API_AUTH_KEY` (this protects the API server, not a third-party key):
+Generate a strong secret:
 
 ```bash
 python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-### 4. Run the Agent
+### 4. Run the Application
+
+Run the CLI:
 
 ```bash
-# CLI entry point
 python src/main.py
+```
 
-# API server with demo UI
+Run the web application:
+
+```bash
 python -m src.orchestrator_api
+```
+
+The web application will be available locally at:
+
+```text
+http://127.0.0.1:8000
 ```
 
 ---
@@ -212,13 +310,16 @@ from src.agents.testing_agents import qa_testing_agent
 
 result = qa_testing_agent.generate_test_cases(
     session_id=session_id,
-    solution_design={"configurations": [], "integrations": []},
+    solution_design={
+        "configurations": [],
+        "integrations": []
+    },
     module="MM",
     scope="comprehensive"
 )
 ```
 
-### Example 3: Run the Full Workflow via the Orchestrator
+### Example 3: Start a Project Through the Orchestrator
 
 ```python
 from src.orchestrator import orchestrator
@@ -234,35 +335,58 @@ result = orchestrator.start_project(
 
 ## Testing
 
+Run the complete test suite:
+
 ```bash
-# Run all tests
 pytest
+```
 
-# Run with coverage
+Run with coverage:
+
+```bash
 pytest --cov=src tests/
+```
 
-# Run specific test suite
+Run a specific test suite:
+
+```bash
 pytest tests/test_requirements_agent.py
 ```
 
-The test suite includes:
+The test suite covers:
 
-- Unit tests for individual agents
-- Integration tests for orchestrator workflows
-- Evaluation metrics for output quality
+* Individual agent behavior
+* Orchestrator workflows
+* Authentication
+* Multi-user session isolation
+* API functionality
+* Structured output validation
+* Evaluation metrics
+* Production API behavior
 
 ---
 
 ## Evaluation
 
-The system includes automated evaluation metrics to assess output quality:
+The project includes automated evaluation metrics for assessing agent output quality.
 
-- **Requirements completeness score:** Measures coverage of key requirement categories
-- **Test case coverage analysis:** Evaluates breadth and depth of generated test scenarios
-- **Documentation quality metrics:** Assesses structure, clarity, and completeness
-- **Agent performance benchmarks:** Tracks execution time and resource usage
+Current evaluation areas include:
 
-**Evaluation framework:** 170-point evaluation system with a 70% pass threshold (see `tests/evaluation_metrics.py`).
+* Requirements completeness
+* Test case coverage
+* Documentation quality
+* Agent performance
+* Workflow execution
+
+The project includes a 170-point evaluation framework with a 70% pass threshold.
+
+See:
+
+```text
+tests/evaluation_metrics.py
+```
+
+for the evaluation implementation.
 
 ---
 
@@ -270,21 +394,39 @@ The system includes automated evaluation metrics to assess output quality:
 
 ```text
 erp-consultant-agent/
+
 ├── src/
-│   ├── orchestrator.py              # Main workflow coordinator
-│   ├── main.py                      # CLI interface
-│   ├── orchestrator_api.py          # API server with demo UI
-│   ├── agents/                      # 6 specialized agents
+│   ├── orchestrator.py
+│   ├── main.py
+│   ├── orchestrator_api.py
+│   │
+│   ├── agents/
 │   │   ├── requirements_agent.py
 │   │   ├── process_mapping_agent.py
 │   │   ├── solution_design_agent.py
-│   │   ├── testing_agents.py        # QA and UAT agents
+│   │   ├── testing_agents.py
 │   │   └── training_agent.py
-│   ├── models/                      # Pydantic schemas for structured LLM output
-│   ├── tools/                       # Custom tools (ERP KB, Doc Gen, Test Gen)
-│   ├── memory/                      # Session and memory management
-│   ├── utils/                       # Logging, prompts, context management
-│   └── config/                      # Configuration and settings
+│   │
+│   ├── models/
+│   │   └── ...
+│   │
+│   ├── tools/
+│   │   └── ...
+│   │
+│   ├── memory/
+│   │   └── ...
+│   │
+│   ├── auth/
+│   │   └── ...
+│   │
+│   ├── db/
+│   │   └── ...
+│   │
+│   ├── utils/
+│   │   └── ...
+│   │
+│   └── config/
+│       └── ...
 │
 ├── tests/
 │   ├── test_requirements_agent.py
@@ -293,12 +435,18 @@ erp-consultant-agent/
 │   └── run_tests.py
 │
 ├── docs/
-│   ├── architecture.md              # Technical architecture
-│   ├── user_guide.md                # User documentation
-│   └── SUBMISSION.md                # Original project writeup
+│   ├── architecture.md
+│   ├── user_guide.md
+│   └── SUBMISSION.md
 │
-├── demo.py                          # Interactive demo
-└── requirements.txt                 # Dependencies
+├── ui/
+│   ├── index.html
+│   ├── app.js
+│   └── style.css
+│
+├── demo.py
+├── requirements.txt
+└── README.md
 ```
 
 ---
@@ -307,60 +455,88 @@ erp-consultant-agent/
 
 ### Multi-Agent Architecture
 
-**Decision:** Use specialized agents for each consulting phase rather than a single monolithic agent.
+Specialized agents handle individual ERP consulting activities rather than placing the entire workflow inside one monolithic agent.
 
-**Rationale:** ERP consulting workflows involve distinct phases with different expertise requirements and output formats. Specialized agents allow focused reasoning and structured outputs tailored to each phase.
+This separation allows each agent to focus on its specific responsibility and produce outputs suited to the next stage of the workflow.
 
 ### Structured LLM Output
 
-**Decision:** Use Pydantic schemas to enforce structured output from all agents.
+Pydantic schemas provide validation for structured agent outputs.
 
-**Rationale:** Structured outputs enable downstream processing, validation, and integration with other systems. Unstructured text from LLMs is difficult to parse and validate programmatically.
+This improves consistency and allows downstream components to process agent results programmatically.
 
 ### Session and Memory Management
 
-**Decision:** Implement InMemorySessionService + Memory Bank for project continuity.
+Project sessions preserve context across multiple interactions and workflow phases.
 
-**Rationale:** ERP consulting projects span multiple interactions and phases. Session management maintains context across interactions, while long-term memory captures reusable patterns and best practices.
-
-### Observability
-
-**Decision:** Implement structured logging, agent tracing, and performance metrics.
-
-**Rationale:** Multi-agent systems are complex to debug without visibility into agent decisions, execution order, and performance. Observability enables debugging and optimization.
+The memory layer also supports reusable consulting knowledge and context management.
 
 ### API Authentication
 
-**Decision:** Require `API_AUTH_KEY` for API server access.
+The application includes user authentication and protected API endpoints.
 
-**Rationale:** Protects the API server from unauthorized access. The key is self-generated (not a third-party service) and used to authenticate API requests.
+Users authenticate before accessing protected project and consulting functionality. The application also uses an API authentication secret for server-level protection where configured.
+
+### Observability
+
+Structured logging, request IDs, health checks, readiness checks, and error handling provide visibility into application behavior and simplify troubleshooting.
+
+---
+
+## Deployment
+
+The application is currently deployed using Render.
+
+Live application:
+
+https://erpconsultant-ai.onrender.com/
+
+The deployed service runs the FastAPI application and serves the user interface from the same application.
+
+Production deployment requires the appropriate environment variables and external services configured in the hosting environment.
 
 ---
 
 ## Project Highlights
 
-- **5,000+ lines** of code across agents, tools, memory, and orchestration
-- **6 specialized agents** working in orchestration, each producing schema-validated structured output
-- **170-point evaluation system** with a 70% pass threshold (see `tests/evaluation_metrics.py`)
-- **Estimated 46–89 second** workflow execution per phase *(indicative only, not independently benchmarked)*
-- **Estimated 50–70% time savings** vs. a fully manual process *(indicative only, not measured against a real baseline)*
-- Unit and integration test coverage across all 6 agents, with a gated live-API test suite
-- Real API authentication, atomic session persistence, and structured-output validation
+* Multi-agent architecture for ERP consulting workflows
+* 6 specialized consulting agents
+* Structured LLM outputs using Pydantic schemas
+* Requirements, process mapping, solution design, QA, UAT, and training workflows
+* Web-based user interface
+* User authentication
+* Multi-user project isolation
+* Persistent feedback
+* Generated consulting documents
+* Structured logging and request tracing
+* Health and readiness endpoints
+* Automated unit and integration testing
+* 170-point evaluation framework
 
 ---
 
 ## Limitations and Current Status
 
-**Limitations:**
+### Current Limitations
 
-- Estimated metrics (workflow execution time, time savings) are indicative and not independently benchmarked or measured against a real baseline
-- Live-API test suite requires valid API credentials and is gated accordingly
-- Memory is in-memory (not persisted across process restarts unless explicitly implemented)
+* Some evaluation metrics are indicative and are not independently benchmarked
+* Live API tests require valid external API credentials
+* Some memory functionality remains process-dependent
+* Free hosting environments have resource and cold-start limitations
+* AI-generated consulting outputs require professional review before use in production ERP projects
 
-**Status:** Actively maintained, undergoing incremental production hardening. See commit history for progress.
+### Status
+
+The project is actively undergoing production hardening and frontend development.
+
+The deployed application is available for testing at:
+
+https://erpconsultant-ai.onrender.com/
 
 ---
 
 ## License
 
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License.
+
+See the `LICENSE` file for the full license terms.
