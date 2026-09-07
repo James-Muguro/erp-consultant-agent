@@ -122,9 +122,11 @@ export function Sidebar({
                     }`}
                   >
                     <span className="block truncate pr-12 font-medium">{project.project_name}</span>
-                    <span className="block truncate pr-12 text-xs text-ink-faint">
-                      {project.module} · {project.current_phase.replace(/_/g, " ")}
-                    </span>
+                    {!project.is_casual && (
+                      <span className="block truncate pr-12 text-xs text-ink-faint">
+                        {project.module} · {project.current_phase.replace(/_/g, " ")}
+                      </span>
+                    )}
                   </button>
                 )}
                 {!isEditing && (
