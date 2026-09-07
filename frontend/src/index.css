@@ -90,6 +90,9 @@
   border-collapse: collapse;
   margin: 0 0 0.6em;
   font-size: 0.95em;
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
 }
 .prose-chat th, .prose-chat td {
   border: 1px solid var(--color-border);
@@ -97,3 +100,16 @@
   text-align: left;
 }
 .prose-chat a { color: var(--color-accent-strong); text-decoration: underline; }
+.prose-chat blockquote {
+  border-left: 3px solid var(--color-border-strong);
+  padding-left: 0.75em;
+  margin: 0 0 0.6em;
+  color: var(--color-ink-muted);
+}
+.prose-chat hr {
+  border: none;
+  border-top: 1px solid var(--color-border);
+  margin: 0.8em 0;
+}
+.prose-chat strong { font-weight: 600; }
+.prose-chat em { font-style: italic; }
