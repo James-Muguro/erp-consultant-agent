@@ -174,6 +174,17 @@ def extract_text(response) -> str:
         return response
     return str(response)
 
+def _derive_chat_title(message: str) -> str:
+    """Best-effort short title for an auto-created chat session, derived
+    from the user's first message. Never raises - falls back to a fixed
+    label if the message is empty or entirely whitespace."""
+    words = message.strip().split()
+    if not words:
+        return "New chat"
+    title = " ".join(words[:6])
+    if len(title) > 60:
+        title = title[:57].rstrip() + "..."
+    return title[0].upper() + title[1:]
 
 def _get_owned_session(session_id: str, current_user: User):
     """Fetch a session and verify it belongs to current_user. Sessions
@@ -550,6 +561,16 @@ def chat(req: ChatRequest, current_user: User = Depends(get_current_user)):
     # ASK_QUESTION (default) - info retrieval + LLM synthesis, with a
     # plain conversational fallback when there's nothing to retrieve
     # (e.g. "thanks", small talk) rather than a robotic error string
+    session_id = req.session_id
+    if session_id is None:
+        # A casual question with no active project still deserves to be
+        # saved and shown in the sidebar, same as every other intent
+        # branch already does (see START_PROJECT, GENERATE_TRAINING
+        # above) - otherwise plain Q&A chats vanish on refresh and never
+        # appear in "your conversations".
+        title = _derive_chat_title(req.message)
+        session_id = agent_memory.create_project(project_name=title, module='FI', user_id=current_user.id)
+
     data = info_retriever(req.message, {'summary': ''}, prefer_web=req.prefer_web)
     generation_config = {
         'temperature': 0.5,
@@ -568,8 +589,8 @@ def chat(req: ChatRequest, current_user: User = Depends(get_current_user)):
         logger.error(f"Error during final answer synthesis: {e}")
         final_answer = "I found some information, but I had trouble summarizing it."
 
-    logger.info({"event": "Chat response ready", "session_id": req.session_id})
-    return _chat_response(final_answer, llm_mode=llm_mode, session_id=req.session_id)
+    logger.info({"event": "Chat response ready", "session_id": session_id})
+    return _chat_response(final_answer, llm_mode=llm_mode, session_id=session_id)
 
 
 def _sse(event: str, data: dict) -> str:
@@ -699,6 +720,16 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
         # streaming actually happens, since it's the only path whose LLM
         # call produces free-form prose rather than a short fixed
         # confirmation string.
+        session_id = req.session_id
+        if session_id is None:
+            # A casual question with no active project still deserves to be
+            # saved and shown in the sidebar, same as every other intent
+            # branch already does (see START_PROJECT, GENERATE_TRAINING
+            # above) - otherwise plain Q&A chats vanish on refresh and never
+            # appear in "your conversations".
+            title = _derive_chat_title(req.message)
+            session_id = agent_memory.create_project(project_name=title, module='FI', user_id=current_user.id)
+
         yield ev('tool_started', tool='info_retriever', message='Searching knowledge base and web')
         data = info_retriever(req.message, {'summary': ''}, prefer_web=req.prefer_web)
         yield ev('tool_completed', tool='info_retriever')
@@ -732,9 +763,9 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
             # transparently retry on another tier mid-stream.
 
         final_answer = "".join(full_answer_parts)
-        logger.info({"event": "Chat response ready", "session_id": req.session_id})
+        logger.info({"event": "Chat response ready", "session_id": session_id})
         yield ev('workflow_completed')
-        yield ev('message_complete', answer=final_answer, llm_mode=llm_mode, session_id=req.session_id)
+        yield ev('message_complete', answer=final_answer, llm_mode=llm_mode, session_id=session_id)
 
     except Exception as e:
         logger.error("Unhandled error in chat stream", error=str(e), exc_info=True)
