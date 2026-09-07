@@ -105,6 +105,12 @@ export const api = {
     );
   },
 
+  async getMessages(sessionId: string) {
+    return request<{ session_id: string; messages: { role: string; content: string; timestamp: string }[] }>(
+      `/api/projects/${sessionId}/messages`,
+    );
+  },
+
   async projectStatus(sessionId: string) {
     return request<ProjectStatus>(`/api/projects/${sessionId}/status`);
   },
