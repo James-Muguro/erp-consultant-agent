@@ -24,6 +24,9 @@ class SessionState:
     # created before per-user auth existed (Stage 2) - every session created
     # from that point on always sets this.
     user_id: Optional[str] = None
+    # True for sessions auto-created from a plain question rather than an
+    # explicit "start a project" action - see src/db/models.py for why.
+    is_casual: bool = False
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -52,6 +55,7 @@ class SessionState:
             'module': self.module,
             'erp_system': self.erp_system,
             'user_id': self.user_id,
+            'is_casual': self.is_casual,
             'created_at': self.created_at.isoformat(),
             'updated_at': self.updated_at.isoformat(),
             'metadata': self.metadata,
@@ -92,7 +96,8 @@ class InMemorySessionService:
         module: str,
         erp_system: str = "SAP S/4HANA",
         metadata: Optional[Dict[str, Any]] = None,
-        user_id: Optional[str] = None
+        user_id: Optional[str] = None,
+        is_casual: bool = False,
     ) -> SessionState:
         """Create a new session"""
         if session_id in self.sessions:
@@ -105,6 +110,7 @@ class InMemorySessionService:
             module=module,
             erp_system=erp_system,
             user_id=user_id,
+            is_casual=is_casual,
             metadata=metadata or {}
         )
         
@@ -313,6 +319,7 @@ class InMemorySessionService:
             'project_name': session.project_name,
             'module': session.module,
             'erp_system': session.erp_system,
+            'is_casual': session.is_casual,
             'current_phase': session.current_phase,
             'completed_phases': session.completed_phases,
             'phases_completed': len(session.completed_phases),
@@ -373,6 +380,7 @@ class DbSessionService(InMemorySessionService):
                 record.module = session.module
                 record.erp_system = session.erp_system
                 record.user_id = session.user_id
+                record.is_casual = session.is_casual
                 record.current_phase = session.current_phase
                 record.created_at = session.created_at
                 record.updated_at = session.updated_at
