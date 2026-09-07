@@ -49,6 +49,12 @@ class SessionRecord(Base):
     # Soft delete: archived conversations are hidden from the default project
     # list but not destroyed. NULL = active. Set on DELETE /api/projects/{id}.
     archived_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    # True for sessions auto-created from a plain question (no explicit
+    # "start a project" intent) - lets the sidebar hide module/phase
+    # metadata that was never meaningfully chosen for these. Sessions
+    # created before this column existed default to False (real projects),
+    # matching their actual origin at the time.
+    is_casual = Column(Boolean, nullable=False, default=False, server_default="false")
     data = Column(_json_type()(), nullable=False)
 
 
