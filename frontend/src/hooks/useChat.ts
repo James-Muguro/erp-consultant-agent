@@ -19,6 +19,12 @@ export function useChat(sessionId: string | null, onSessionCreated: (id: string)
   const [streamError, setStreamError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
+  const loadHistory = useCallback((history: ChatMessage[]) => {
+    setMessages(history);
+    setActivity([]);
+    setStreamError(null);
+  }, []);
+
   const reset = useCallback(() => {
     setMessages([]);
     setActivity([]);
@@ -154,5 +160,5 @@ export function useChat(sessionId: string | null, onSessionCreated: (id: string)
     abortRef.current?.abort();
   }, []);
 
-  return { messages, activity, sending, streamError, send, stop, reset };
+  return { messages, activity, sending, streamError, send, stop, reset, loadHistory };
 }
