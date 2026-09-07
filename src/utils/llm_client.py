@@ -54,7 +54,15 @@ class LLMClient:
             config=genai_types.GenerateContentConfig(**config_kwargs)
         )
         text = response.text or ""
-        return type("LLMResponse", (), {"text": text})()
+        usage = None
+        meta = getattr(response, "usage_metadata", None)
+        if meta is not None:
+            usage = {
+                "prompt_tokens": meta.prompt_token_count,
+                "completion_tokens": meta.candidates_token_count,
+                "total_tokens": meta.total_token_count,
+            }
+        return type("LLMResponse", (), {"text": text, "usage": usage})()
 
     def generate_content_stream(self, prompt: str, generation_config: Optional[dict] = None):
         """Yields text chunks as they arrive from Gemini. Plain-text only -

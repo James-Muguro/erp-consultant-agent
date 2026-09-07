@@ -14,13 +14,13 @@ in Stage 1) is the safety net, so this degrades gracefully rather
 than hard-failing.
 """
 import json
-import logging
 from typing import Optional
 
 from src.utils.llm_client import LLMClient as GeminiLLMClient
 from openai import OpenAI
 from src.config.settings import settings
 from src.utils.resilience import call_with_retries, DEFAULT_RETRY_BASE_DELAY
+from src.utils.logger import get_logger
 import time
 
 try:
@@ -29,7 +29,7 @@ try:
 except ImportError:
     ANTHROPIC_AVAILABLE = False
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _LLM_INSTANCE: Optional["HybridLLMClient"] = None
 
@@ -42,8 +42,8 @@ class _TierFailedBeforeFirstChunk(Exception):
         self.__cause__ = cause
 
 
-def _to_response(text: str):
-    return type("LLMResponse", (), {"text": text})()
+def _to_response(text: str, usage: Optional[dict] = None):
+    return type("LLMResponse", (), {"text": text, "usage": usage})()
 
 
 def _openai_compatible_call(client, model, prompt, temperature, max_tokens, response_schema):
@@ -65,7 +65,14 @@ def _openai_compatible_call(client, model, prompt, temperature, max_tokens, resp
         }
     resp = client.chat.completions.create(**kwargs)
     text = resp.choices[0].message.content.strip()
-    return _to_response(text)
+    usage = None
+    if getattr(resp, "usage", None):
+        usage = {
+            "prompt_tokens": resp.usage.prompt_tokens,
+            "completion_tokens": resp.usage.completion_tokens,
+            "total_tokens": resp.usage.total_tokens,
+        }
+    return _to_response(text, usage)
 
 
 def _openai_compatible_stream(client, model, prompt, temperature, max_tokens):
@@ -80,6 +87,17 @@ def _openai_compatible_stream(client, model, prompt, temperature, max_tokens):
         delta = chunk.choices[0].delta.content if chunk.choices else None
         if delta:
             yield delta
+
+
+def _anthropic_usage(resp) -> Optional[dict]:
+    usage = getattr(resp, "usage", None)
+    if not usage:
+        return None
+    return {
+        "prompt_tokens": usage.input_tokens,
+        "completion_tokens": usage.output_tokens,
+        "total_tokens": usage.input_tokens + usage.output_tokens,
+    }
 
 
 class HybridLLMClient:
@@ -134,9 +152,10 @@ class HybridLLMClient:
                 tool_choice={"type": "tool", "name": tool_name},
                 messages=[{"role": "user", "content": prompt}],
             )
+            usage = _anthropic_usage(resp)
             for block in resp.content:
                 if block.type == "tool_use":
-                    return _to_response(json.dumps(block.input))
+                    return _to_response(json.dumps(block.input), usage)
             raise RuntimeError("Anthropic did not return a tool_use block")
         else:
             resp = self.anthropic_client.messages.create(
@@ -145,7 +164,29 @@ class HybridLLMClient:
                 messages=[{"role": "user", "content": prompt}],
             )
             text = "".join(block.text for block in resp.content if block.type == "text")
-            return _to_response(text)
+            return _to_response(text, _anthropic_usage(resp))
+
+    def _log_llm_call(self, provider: str, start_time: float, response) -> None:
+        """Single structured log line per successful LLM call: which
+        provider actually answered, how long it took, and token usage when
+        the provider's SDK exposes it (all four do, in slightly different
+        shapes - normalized to prompt/completion/total in _to_response,
+        _anthropic_usage, and the Gemini client). This is deliberately a
+        log line, not a new metrics store or exporter - the project's
+        actual observability channel today is Render's log viewer, so that
+        is what this feeds. A dedicated metrics backend (OpenTelemetry,
+        etc.) is a bigger, separate decision left for if/when this needs
+        querying beyond what grep-ing logs can answer."""
+        duration_ms = round((time.time() - start_time) * 1000, 1)
+        usage = getattr(response, "usage", None) or {}
+        logger.info(
+            "LLM call completed",
+            provider=provider,
+            duration_ms=duration_ms,
+            prompt_tokens=usage.get("prompt_tokens"),
+            completion_tokens=usage.get("completion_tokens"),
+            total_tokens=usage.get("total_tokens"),
+        )
 
     def generate_content(self, prompt: str, generation_config: Optional[dict] = None):
         """Try each configured provider in order. Always returns an
@@ -165,39 +206,51 @@ class HybridLLMClient:
         retry_kwargs = dict(max_attempts=settings.llm_retry_attempts, timeout=settings.llm_call_timeout_seconds)
 
         if self.use_gemini and self.gemini:
+            start = time.time()
             try:
-                return call_with_retries(
+                resp = call_with_retries(
                     self.gemini.generate_content, prompt, generation_config=generation_config, **retry_kwargs
                 )
+                self._log_llm_call("gemini", start, resp)
+                return resp
             except Exception as e:
                 logger.warning(f"HybridLLM: Gemini generation failed after retries, trying Groq: {e}")
 
         if self.groq_client:
+            start = time.time()
             try:
                 # Groq's free tier has a much tighter per-minute token
                 # budget than Gemini - cap the requested output size
                 # regardless of what settings.max_tokens (Gemini-sized)
                 # says, so a normal request doesn't get rejected outright.
                 groq_max_tokens = min(max_tokens, 2048)
-                return call_with_retries(
+                resp = call_with_retries(
                     _openai_compatible_call, self.groq_client, settings.groq_model, prompt,
                     temperature, groq_max_tokens, response_schema, **retry_kwargs
                 )
+                self._log_llm_call("groq", start, resp)
+                return resp
             except Exception as e:
                 logger.warning(f"HybridLLM: Groq generation failed after retries, trying OpenAI: {e}")
 
         if self.openai_client:
+            start = time.time()
             try:
-                return call_with_retries(
+                resp = call_with_retries(
                     _openai_compatible_call, self.openai_client, settings.openai_model, prompt,
                     temperature, max_tokens, response_schema, **retry_kwargs
                 )
+                self._log_llm_call("openai", start, resp)
+                return resp
             except Exception as e:
                 logger.warning(f"HybridLLM: OpenAI generation failed after retries, trying Anthropic: {e}")
 
         if self.anthropic_client:
+            start = time.time()
             try:
-                return call_with_retries(self._try_anthropic, prompt, max_tokens, response_schema, **retry_kwargs)
+                resp = call_with_retries(self._try_anthropic, prompt, max_tokens, response_schema, **retry_kwargs)
+                self._log_llm_call("anthropic", start, resp)
+                return resp
             except Exception as e:
                 logger.error(f"HybridLLM: Anthropic generation failed after retries: {e}")
 
