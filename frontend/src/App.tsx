@@ -43,8 +43,8 @@ function ChatApp() {
     chat.reset();
   }
 
-  async function createProject(name: string, module: string, erpSystem: string) {
-    const { session_id } = await api.startProject(name, module, erpSystem);
+  async function createProject(name: string, erpSystem: string) {
+    const { session_id } = await api.startProject(name, "General", erpSystem || undefined);
     await refreshProjects();
     setActiveSessionId(session_id);
     chat.reset();

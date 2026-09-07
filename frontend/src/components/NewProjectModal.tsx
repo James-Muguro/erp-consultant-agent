@@ -1,18 +1,15 @@
 import { useState, type FormEvent } from "react";
 import { X } from "lucide-react";
 
-const MODULES = ["FI", "MM", "SD", "HCM", "PP", "QM"];
-
 export function NewProjectModal({
   onClose,
   onCreate,
 }: {
   onClose: () => void;
-  onCreate: (name: string, module: string, erpSystem: string) => Promise<void>;
+  onCreate: (name: string, erpSystem: string) => Promise<void>;
 }) {
   const [name, setName] = useState("");
-  const [module, setModule] = useState("FI");
-  const [erpSystem, setErpSystem] = useState("SAP S/4HANA");
+  const [erpSystem, setErpSystem] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
   async function handleSubmit(e: FormEvent) {
@@ -20,7 +17,7 @@ export function NewProjectModal({
     if (!name.trim()) return;
     setSubmitting(true);
     try {
-      await onCreate(name.trim(), module, erpSystem);
+      await onCreate(name.trim(), erpSystem.trim());
     } finally {
       setSubmitting(false);
     }
@@ -48,29 +45,14 @@ export function NewProjectModal({
               className="w-full rounded-md border border-border bg-paper px-3 py-2 text-sm text-ink outline-none focus:border-accent"
             />
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="mb-1 block text-sm text-ink-muted">Module</label>
-              <select
-                value={module}
-                onChange={(e) => setModule(e.target.value)}
-                className="w-full rounded-md border border-border bg-paper px-3 py-2 text-sm text-ink outline-none focus:border-accent"
-              >
-                {MODULES.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="mb-1 block text-sm text-ink-muted">ERP system</label>
-              <input
-                value={erpSystem}
-                onChange={(e) => setErpSystem(e.target.value)}
-                className="w-full rounded-md border border-border bg-paper px-3 py-2 text-sm text-ink outline-none focus:border-accent"
-              />
-            </div>
+          <div>
+            <label className="mb-1 block text-sm text-ink-muted">ERP system</label>
+            <input
+              value={erpSystem}
+              onChange={(e) => setErpSystem(e.target.value)}
+              placeholder="e.g. SAP S/4HANA, Oracle Fusion, NetSuite"
+              className="w-full rounded-md border border-border bg-paper px-3 py-2 text-sm text-ink outline-none focus:border-accent"
+            />
           </div>
 
           <button
