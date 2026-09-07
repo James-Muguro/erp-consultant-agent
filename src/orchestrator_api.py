@@ -412,6 +412,10 @@ def list_documents(session_id: str, current_user: User = Depends(get_current_use
         ]
     }
 
+@app.get("/api/projects/{session_id}/messages")
+def get_messages(session_id: str, current_user: User = Depends(get_current_user)):
+    session = _get_owned_session(session_id, current_user)
+    return {"session_id": session_id, "messages": session.conversation_history}
 
 @app.get("/api/projects/{session_id}/documents/{filename}")
 def download_document(session_id: str, filename: str, current_user: User = Depends(get_current_user)):
@@ -589,6 +593,9 @@ def chat(req: ChatRequest, current_user: User = Depends(get_current_user)):
         logger.error(f"Error during final answer synthesis: {e}")
         final_answer = "I found some information, but I had trouble summarizing it."
 
+    agent_memory.session_service.add_to_conversation(session_id, role="user", content=req.message)
+    agent_memory.session_service.add_to_conversation(session_id, role="assistant", content=final_answer)
+
     logger.info({"event": "Chat response ready", "session_id": session_id})
     return _chat_response(final_answer, llm_mode=llm_mode, session_id=session_id)
 
@@ -763,6 +770,9 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
             # transparently retry on another tier mid-stream.
 
         final_answer = "".join(full_answer_parts)
+        agent_memory.session_service.add_to_conversation(session_id, role="user", content=req.message)
+        agent_memory.session_service.add_to_conversation(session_id, role="assistant", content=final_answer)
+
         logger.info({"event": "Chat response ready", "session_id": session_id})
         yield ev('workflow_completed')
         yield ev('message_complete', answer=final_answer, llm_mode=llm_mode, session_id=session_id)
