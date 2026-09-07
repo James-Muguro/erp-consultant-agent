@@ -103,14 +103,6 @@ class TrainingAgent:
                 self.logger.error(f"Schema validation failed, falling back to heuristic parsing: {e}")
                 structured_materials = self._parse_training_materials(training_text)
             
-            # Add to conversation memory
-            agent_memory.session_service.add_to_conversation(
-                session_id,
-                'assistant',
-                training_text,
-                self.config.name
-            )
-            
             # Get project info
             session = agent_memory.session_service.get_session(session_id)
             module = session.module if session else "ERP"

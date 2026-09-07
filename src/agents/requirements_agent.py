@@ -87,14 +87,6 @@ class RequirementsAgent:
                 context
             )
             
-            # Add conversation to memory
-            agent_memory.session_service.add_to_conversation(
-                session_id,
-                'user',
-                stakeholder_input,
-                self.config.name
-            )
-            
             # Generate requirements using Gemini, constrained to our schema
             self.logger.info("Calling Gemini API for requirements generation")
             response = self.model.generate_content(
@@ -112,14 +104,6 @@ class RequirementsAgent:
             except ValidationError as e:
                 self.logger.error(f"Schema validation failed, falling back to heuristic parsing: {e}")
                 structured_requirements = self._parse_requirements(requirements_text)
-            
-            # Add conversation to memory
-            agent_memory.session_service.add_to_conversation(
-                session_id,
-                'assistant',
-                requirements_text,
-                self.config.name
-            )
             
             # Generate formatted document
             doc_path = doc_generator.generate_requirements_document(

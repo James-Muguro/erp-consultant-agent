@@ -103,14 +103,6 @@ class QATestingAgent:
                 self.logger.error(f"Schema validation failed, falling back to heuristic parsing: {e}")
                 structured_test_cases = self._parse_test_cases(test_cases_text, module)
             
-            # Add to conversation memory
-            agent_memory.session_service.add_to_conversation(
-                session_id,
-                'assistant',
-                test_cases_text,
-                self.config.name
-            )
-            
             # Get project info
             session = agent_memory.session_service.get_session(session_id)
             project_name = session.project_name if session else "ERP Project"
@@ -370,14 +362,6 @@ class UATTestingAgent:
             except ValidationError as e:
                 self.logger.error(f"Schema validation failed, falling back to generic scenarios: {e}")
                 structured_scenarios = self._parse_uat_scenarios(uat_text, user_roles)
-            
-            # Add to conversation memory
-            agent_memory.session_service.add_to_conversation(
-                session_id,
-                'assistant',
-                uat_text,
-                self.config.name
-            )
             
             # Get project info
             session = agent_memory.session_service.get_session(session_id)

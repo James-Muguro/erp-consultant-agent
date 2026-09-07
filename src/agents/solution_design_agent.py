@@ -115,14 +115,6 @@ class SolutionDesignAgent:
                 self.logger.error(f"Schema validation failed, falling back to heuristic parsing: {e}")
                 structured_design = self._parse_design(design_text)
             
-            # Add to conversation memory
-            agent_memory.session_service.add_to_conversation(
-                session_id,
-                'assistant',
-                design_text,
-                self.config.name
-            )
-            
             # Get project info for document generation
             session = agent_memory.session_service.get_session(session_id)
             project_name = session.project_name if session else "ERP Project"

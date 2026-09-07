@@ -666,6 +666,8 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
                           f"You can now ask me to gather requirements, run a phase, or ask any question about it.")
                 yield ev('text_delta', text=answer)
                 yield ev('workflow_completed')
+                agent_memory.session_service.add_to_conversation(res.get('session_id'), role="user", content=req.message)
+                agent_memory.session_service.add_to_conversation(res.get('session_id'), role="assistant", content=answer)
                 yield ev('message_complete', answer=answer, llm_mode=llm_mode, session_id=res.get('session_id'))
             else:
                 yield ev('error', message=f"Failed to start project: {res.get('error', 'Unknown error')}")
@@ -701,6 +703,8 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
                 if doc_path:
                     yield ev('document_created', phase=decision.phase, filename=os.path.basename(doc_path))
                 answer = f"Phase '{decision.phase}' executed successfully."
+                agent_memory.session_service.add_to_conversation(req.session_id, role="user", content=req.message)
+                agent_memory.session_service.add_to_conversation(req.session_id, role="assistant", content=answer)
                 yield ev('text_delta', text=answer)
                 yield ev('workflow_completed')
                 yield ev('message_complete', answer=answer, llm_mode=llm_mode, session_id=req.session_id)
@@ -721,9 +725,11 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
                 for label, path in (result.get('documents') or {}).items():
                     if path:
                         yield ev('document_created', phase='training', label=label, filename=os.path.basename(path))
-                answer = "Training materials for 'AP Invoice Posting' have been generated."
+                answer = "Training materials have been generated."
                 yield ev('text_delta', text=answer)
                 yield ev('workflow_completed')
+                agent_memory.session_service.add_to_conversation(session_id, role="user", content=req.message)
+                agent_memory.session_service.add_to_conversation(session_id, role="assistant", content=answer)
                 yield ev('message_complete', answer=answer, llm_mode=llm_mode, session_id=session_id)
             else:
                 yield ev('error', message='Failed to generate training materials.')
