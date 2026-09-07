@@ -33,11 +33,19 @@ function ChatApp() {
 
   const chat = useChat(activeSessionId, handleSessionCreated);
 
-  function selectProject(sessionId: string) {
+  async function selectProject(sessionId: string) {
     setActiveSessionId(sessionId);
     chat.reset();
+    const { messages } = await api.getMessages(sessionId);
+    chat.loadHistory(
+      messages.map((m, i) => ({
+        id: `${sessionId}-${i}`,
+        role: m.role === "assistant" ? "assistant" : "user",
+        text: m.content,
+        createdAt: new Date(m.timestamp).getTime(),
+      })),
+    );
   }
-
   function newChat() {
     setActiveSessionId(null);
     chat.reset();
