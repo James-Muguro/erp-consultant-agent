@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     serpapi_api_key: str = Field(..., description="SerpApi API Key")
     
     # LLM / Model Configuration
-    gemini_model: str = Field(default="gemini-2.0-flash-exp", description="Default Gemini model to use")
+    gemini_model: str = Field(default="gemini-3.7-flash", description="Default Gemini model to use")
     
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     max_tokens: int = Field(default=8192, gt=0)
