@@ -38,6 +38,11 @@ function ChatApp() {
     chat.reset();
   }
 
+  function newChat() {
+    setActiveSessionId(null);
+    chat.reset();
+  }
+
   async function createProject(name: string, module: string, erpSystem: string) {
     const { session_id } = await api.startProject(name, module, erpSystem);
     await refreshProjects();
@@ -46,12 +51,10 @@ function ChatApp() {
     setShowNewProject(false);
   }
 
-  async function renameProject(sessionId: string, currentName: string) {
-    const next = window.prompt("Rename project", currentName);
-    if (!next || next === currentName) return;
-    await api.renameProject(sessionId, next);
-    await refreshProjects();
-  }
+async function renameProject(sessionId: string, newName: string) {
+  await api.renameProject(sessionId, newName);
+  await refreshProjects();
+}
 
   async function archiveProject(sessionId: string) {
     if (!window.confirm("Archive this project? You can still access it later if needed.")) return;
@@ -69,10 +72,11 @@ function ChatApp() {
         projects={projects}
         activeSessionId={activeSessionId}
         onSelect={selectProject}
+        onNewChat={newChat}
         onNewProject={() => setShowNewProject(true)}
         onRename={renameProject}
         onArchive={archiveProject}
-      />
+        />
       <main className="flex flex-1 flex-col">
         {loadingProjects ? (
           <div className="flex flex-1 items-center justify-center text-sm text-ink-faint">
