@@ -358,7 +358,7 @@ def execute_phase(session_id: str, phase_name: str, current_user: User = Depends
     if phase_name not in phase_map:
         raise HTTPException(status_code=400, detail=f"Unknown phase: {phase_name}")
 
-    result = phase_map[phase_name](session_id=session_id)
+    result = phase_map[decision.phase](**phase_kwargs)
     if not result.get('success'):
         raise HTTPException(status_code=500, detail=result.get('error'))
     return result
@@ -540,7 +540,7 @@ def chat(req: ChatRequest, current_user: User = Depends(get_current_user)):
         if decision.phase not in phase_map:
             return _chat_response("Could not determine which phase to run.", llm_mode=llm_mode, success=False)
 
-        result = phase_map[decision.phase](session_id=req.session_id)
+        result = phase_map[decision.phase](**phase_kwargs)
         if result.get('success'):
             return _chat_response(f"Phase '{decision.phase}' executed successfully.", llm_mode=llm_mode, session_id=req.session_id)
         else:
@@ -689,7 +689,13 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
                 return
 
             yield ev('agent_started', agent=decision.phase, message=f"Running {decision.phase.replace('_', ' ')} phase")
-            result = phase_map[decision.phase](session_id=req.session_id)
+            phase_kwargs = {'session_id': req.session_id}
+            if decision.phase == 'requirements':
+                # The only phase with a required (non-optional) extra
+                # argument - the user's message IS the stakeholder input
+                # for a requirements-gathering phase.
+                phase_kwargs['stakeholder_input'] = req.message
+            result = phase_map[decision.phase](**phase_kwargs)
             if result.get('success'):
                 doc_path = result.get('document_path')
                 if doc_path:
