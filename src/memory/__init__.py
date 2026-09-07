@@ -40,7 +40,8 @@ class AgentMemory:
         project_name: str,
         module: str,
         erp_system: str = "SAP S/4HANA",
-        user_id: Optional[str] = None
+        user_id: Optional[str] = None,
+        is_casual: bool = False
     ) -> str:
         """Create a new project session"""
         slug = project_name.lower().replace(' ', '_')[:30]
@@ -50,7 +51,8 @@ class AgentMemory:
             project_name=project_name,
             module=module,
             erp_system=erp_system,
-            user_id=user_id
+            user_id=user_id,
+            is_casual=is_casual
         )
         return session_id
     
