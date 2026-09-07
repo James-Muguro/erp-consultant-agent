@@ -43,7 +43,17 @@ class Settings(BaseSettings):
     
     # Agent Configuration
     max_iterations: int = Field(default=10, gt=0)
+    # Phase-level ceiling: bounds one whole agent phase call (tool use +
+    # LLM calls + document generation), wired into
+    # ERPOrchestratorAgent._call_agent_safely via run_with_timeout.
     timeout_seconds: int = Field(default=300, gt=0)
+    # LLM-call-level settings: bound and harden individual provider calls,
+    # wired into HybridLLMClient (see src/utils/llm.py). Deliberately
+    # smaller than timeout_seconds - several of these can happen inside
+    # one phase (retries, provider fallback) and must still fit inside the
+    # phase-level ceiling above with room to spare.
+    llm_call_timeout_seconds: int = Field(default=60, gt=0)
+    llm_retry_attempts: int = Field(default=2, gt=0)
     
     # Logging Configuration
     log_level: str = Field(default="INFO")

@@ -255,3 +255,86 @@ def setup_integration_tests():
     from src.utils.logger import setup_logging
     setup_logging()
     yield
+
+
+class TestPhaseHardening:
+    """Tests for the orchestration-hardening added in this stage: phase
+    calls are time-bounded and exceptions are contained instead of
+    propagating, and every phase now records execution metrics."""
+
+    @pytest.fixture
+    def hardening_session(self):
+        session_id = agent_memory.create_project(
+            project_name="Hardening Test",
+            module="FI",
+            erp_system="SAP S/4HANA"
+        )
+        yield session_id
+        agent_memory.session_service.delete_session(session_id)
+
+    @patch('src.agents.requirements_agent.RequirementsAgent.gather_requirements')
+    def test_unexpected_agent_exception_is_contained_not_raised(self, mock_gather, hardening_session):
+        """An agent raising an unexpected exception (not returning a
+        {'success': False} dict, an actual crash) must come back as a
+        structured failure, never propagate out of the orchestrator."""
+        mock_gather.side_effect = RuntimeError("boom - unexpected agent crash")
+
+        orch = ERPOrchestratorAgent()
+        result = orch.execute_requirements_phase(
+            session_id=hardening_session,
+            stakeholder_input="Test requirements"
+        )
+
+        assert result['success'] is False
+        assert 'boom - unexpected agent crash' in result['error']
+        assert 'duration' in result
+
+        # Session must not have silently advanced past a failed phase
+        session = agent_memory.session_service.get_session(hardening_session)
+        assert session.current_phase == ProjectPhase.REQUIREMENTS_GATHERING.value
+
+    @patch('src.agents.requirements_agent.RequirementsAgent.gather_requirements')
+    def test_phase_exceeding_timeout_is_stopped_and_reported(self, mock_gather, hardening_session):
+        """A hung agent call must not block the caller past the configured
+        phase timeout - it should come back as a clear, user-facing
+        timeout message instead of hanging indefinitely."""
+        import time as time_module
+
+        def hangs(*args, **kwargs):
+            time_module.sleep(2)
+            return {'success': True}
+
+        mock_gather.side_effect = hangs
+
+        orch = ERPOrchestratorAgent()
+        with patch('src.orchestrator.settings.timeout_seconds', 0.1):
+            result = orch.execute_requirements_phase(
+                session_id=hardening_session,
+                stakeholder_input="Test requirements"
+            )
+
+        assert result['success'] is False
+        assert 'longer than expected' in result['error']
+
+    @patch('src.agents.requirements_agent.RequirementsAgent.gather_requirements')
+    def test_successful_phase_records_metrics(self, mock_gather, hardening_session):
+        from src.utils.logger import metrics_collector
+
+        mock_gather.return_value = {
+            'success': True,
+            'requirements': {'executive_summary': 'ok'},
+            'document_path': '/test/path.md',
+        }
+
+        before = len(metrics_collector.tasks) if hasattr(metrics_collector, 'tasks') else None
+
+        orch = ERPOrchestratorAgent()
+        result = orch.execute_requirements_phase(
+            session_id=hardening_session,
+            stakeholder_input="Test requirements"
+        )
+
+        assert result['success'] is True
+        assert 'duration' in result  # added by _call_agent_safely if the agent didn't set one
+        if before is not None:
+            assert len(metrics_collector.tasks) == before + 1

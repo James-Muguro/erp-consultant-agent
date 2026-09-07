@@ -8,6 +8,7 @@ from enum import Enum
 
 from src.config.settings import settings
 from src.utils.logger import AgentLogger, metrics_collector
+from src.utils.resilience import run_with_timeout, OperationTimeoutError
 from src.utils.prompts import ORCHESTRATOR_SYSTEM_PROMPT
 from src.memory import agent_memory
 from src.agents import (
@@ -83,6 +84,52 @@ class ERPOrchestratorAgent:
         }
         
         self.logger.info("Orchestrator Agent initialized")
+
+    def _call_agent_safely(self, phase_name: str, agent_fn, **kwargs) -> Dict[str, Any]:
+        """Runs one agent's phase method with a hard time ceiling and turns
+        any exception into a structured failure result instead of letting
+        it propagate - an agent failure (or a genuine hang) should produce
+        a useful response, not a crashed request. Also records
+        execution metadata (duration, success/failure) for every phase,
+        not just start_project, closing a real gap the metrics previously
+        had.
+
+        The timeout here bounds the *whole* phase call (tool use plus
+        however many LLM calls the agent makes), which is deliberately
+        larger than the per-LLM-call timeout in HybridLLMClient - several
+        of those can happen inside one phase (retries, provider fallback)
+        and all need to fit inside this outer ceiling. See
+        src/utils/resilience.py for what run_with_timeout does and doesn't
+        guarantee (it bounds how long the caller waits, not whether the
+        underlying call keeps running in the background)."""
+        start_time = time.time()
+        try:
+            result = run_with_timeout(agent_fn, timeout=settings.timeout_seconds, **kwargs)
+        except OperationTimeoutError:
+            duration = time.time() - start_time
+            self.logger.error(f"{phase_name} phase timed out after {settings.timeout_seconds}s")
+            metrics_collector.record_task(phase_name, False, duration)
+            return {
+                'success': False,
+                'error': f"This step took longer than expected ({settings.timeout_seconds}s) and was stopped. "
+                         f"Please try again.",
+                'duration': duration,
+            }
+        except Exception as e:
+            duration = time.time() - start_time
+            self.logger.log_agent_error(phase_name, e)
+            metrics_collector.record_task(phase_name, False, duration)
+            return {
+                'success': False,
+                'error': f"An unexpected error occurred during {phase_name.replace('_', ' ')}: {e}",
+                'duration': duration,
+            }
+
+        duration = time.time() - start_time
+        if isinstance(result, dict) and 'duration' not in result:
+            result['duration'] = duration
+        metrics_collector.record_task(phase_name, bool(isinstance(result, dict) and result.get('success')), duration)
+        return result
     
     def start_project(
         self,
@@ -179,7 +226,9 @@ class ERPOrchestratorAgent:
             return {'success': False, 'error': 'Session not found'}
         
         # Execute requirements agent
-        result = requirements_agent.gather_requirements(
+        result = self._call_agent_safely(
+            'requirements_gathering',
+            requirements_agent.gather_requirements,
             session_id=session_id,
             project_name=session.project_name,
             module=session.module,
@@ -235,7 +284,9 @@ class ERPOrchestratorAgent:
             process_name = f"{session.module} Standard Process"
         
         # Execute process mapping agent
-        result = process_mapping_agent.map_process(
+        result = self._call_agent_safely(
+            'process_mapping',
+            process_mapping_agent.map_process,
             session_id=session_id,
             process_name=process_name,
             requirements=requirements,
@@ -274,7 +325,9 @@ class ERPOrchestratorAgent:
         process_maps = session.process_maps or {}
         
         # Execute solution design agent
-        result = solution_design_agent.design_solution(
+        result = self._call_agent_safely(
+            'solution_design',
+            solution_design_agent.design_solution,
             session_id=session_id,
             requirements=requirements,
             process_maps=process_maps,
@@ -309,7 +362,9 @@ class ERPOrchestratorAgent:
         solution_design = design_output.get('structured_design', {})
         
         # Execute QA testing agent
-        result = qa_testing_agent.generate_test_cases(
+        result = self._call_agent_safely(
+            'qa_testing',
+            qa_testing_agent.generate_test_cases,
             session_id=session_id,
             solution_design=solution_design,
             module=session.module,
@@ -344,7 +399,9 @@ class ERPOrchestratorAgent:
             user_roles = ["Business User", "Power User", "Administrator"]
         
         # Execute UAT testing agent
-        result = uat_testing_agent.generate_uat_scenarios(
+        result = self._call_agent_safely(
+            'uat_testing',
+            uat_testing_agent.generate_uat_scenarios,
             session_id=session_id,
             business_processes=process_maps,
             user_roles=user_roles
@@ -383,7 +440,9 @@ class ERPOrchestratorAgent:
             user_roles = ["End User", "Process Owner", "System Administrator"]
         
         # Execute training agent
-        result = training_agent.create_training_materials(
+        result = self._call_agent_safely(
+            'training',
+            training_agent.create_training_materials,
             session_id=session_id,
             process_name=process_name,
             user_roles=user_roles,

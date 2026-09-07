@@ -20,6 +20,8 @@ from typing import Optional
 from src.utils.llm_client import LLMClient as GeminiLLMClient
 from openai import OpenAI
 from src.config.settings import settings
+from src.utils.resilience import call_with_retries, DEFAULT_RETRY_BASE_DELAY
+import time
 
 try:
     from anthropic import Anthropic
@@ -148,17 +150,27 @@ class HybridLLMClient:
     def generate_content(self, prompt: str, generation_config: Optional[dict] = None):
         """Try each configured provider in order. Always returns an
         object with a `.text` attribute, regardless of which tier
-        succeeded - every agent relies on that being consistent."""
+        succeeded - every agent relies on that being consistent.
+
+        Each tier gets up to settings.llm_retry_attempts attempts (with
+        exponential backoff) before falling through to the next tier, and
+        each individual attempt is bounded to settings.llm_call_timeout_seconds
+        - see src/utils/resilience.py for what that timeout does and
+        doesn't guarantee."""
         generation_config = generation_config or {}
         temperature = generation_config.get("temperature", self.temperature)
         max_tokens = generation_config.get("max_output_tokens", settings.max_tokens)
         response_schema = generation_config.get("response_schema")
 
+        retry_kwargs = dict(max_attempts=settings.llm_retry_attempts, timeout=settings.llm_call_timeout_seconds)
+
         if self.use_gemini and self.gemini:
             try:
-                return self.gemini.generate_content(prompt, generation_config=generation_config)
+                return call_with_retries(
+                    self.gemini.generate_content, prompt, generation_config=generation_config, **retry_kwargs
+                )
             except Exception as e:
-                logger.warning(f"HybridLLM: Gemini generation failed, trying Groq: {e}")
+                logger.warning(f"HybridLLM: Gemini generation failed after retries, trying Groq: {e}")
 
         if self.groq_client:
             try:
@@ -167,21 +179,27 @@ class HybridLLMClient:
                 # regardless of what settings.max_tokens (Gemini-sized)
                 # says, so a normal request doesn't get rejected outright.
                 groq_max_tokens = min(max_tokens, 2048)
-                return _openai_compatible_call(self.groq_client, settings.groq_model, prompt, temperature, groq_max_tokens, response_schema)
+                return call_with_retries(
+                    _openai_compatible_call, self.groq_client, settings.groq_model, prompt,
+                    temperature, groq_max_tokens, response_schema, **retry_kwargs
+                )
             except Exception as e:
-                logger.warning(f"HybridLLM: Groq generation failed, trying OpenAI: {e}")
+                logger.warning(f"HybridLLM: Groq generation failed after retries, trying OpenAI: {e}")
 
         if self.openai_client:
             try:
-                return _openai_compatible_call(self.openai_client, settings.openai_model, prompt, temperature, max_tokens, response_schema)
+                return call_with_retries(
+                    _openai_compatible_call, self.openai_client, settings.openai_model, prompt,
+                    temperature, max_tokens, response_schema, **retry_kwargs
+                )
             except Exception as e:
-                logger.warning(f"HybridLLM: OpenAI generation failed, trying Anthropic: {e}")
+                logger.warning(f"HybridLLM: OpenAI generation failed after retries, trying Anthropic: {e}")
 
         if self.anthropic_client:
             try:
-                return self._try_anthropic(prompt, max_tokens, response_schema)
+                return call_with_retries(self._try_anthropic, prompt, max_tokens, response_schema, **retry_kwargs)
             except Exception as e:
-                logger.error(f"HybridLLM: Anthropic generation failed: {e}")
+                logger.error(f"HybridLLM: Anthropic generation failed after retries: {e}")
 
         logger.error("HybridLLM: No LLM backend succeeded")
         raise RuntimeError(
@@ -225,34 +243,66 @@ class HybridLLMClient:
                     raise
                 raise _TierFailedBeforeFirstChunk(e)
 
+        def _run_tier_with_retry(make_source, tier_label):
+            """Retries a tier's stream-start (not a mid-stream failure -
+            those still can't be retried transparently, see the docstring
+            above) up to settings.llm_retry_attempts times with backoff,
+            same as the non-streaming generate_content. make_source is a
+            zero-arg callable that creates a *fresh* generator each call,
+            since a generator that already raised can't be re-iterated."""
+            last_exc = None
+            for attempt in range(settings.llm_retry_attempts):
+                try:
+                    yield from _run(make_source())
+                    return
+                except _TierFailedBeforeFirstChunk as e:
+                    last_exc = e
+                    if attempt < settings.llm_retry_attempts - 1:
+                        delay = DEFAULT_RETRY_BASE_DELAY * (2 ** attempt)
+                        logger.warning(
+                            f"HybridLLM: {tier_label} stream failed to start "
+                            f"(attempt {attempt + 1}/{settings.llm_retry_attempts}): "
+                            f"{e.__cause__}. Retrying in {delay:.1f}s"
+                        )
+                        time.sleep(delay)
+            raise last_exc
+
         if self.use_gemini and self.gemini:
             try:
-                yield from _run(self.gemini.generate_content_stream(prompt, generation_config))
+                yield from _run_tier_with_retry(
+                    lambda: self.gemini.generate_content_stream(prompt, generation_config), "Gemini"
+                )
                 return
             except _TierFailedBeforeFirstChunk as e:
-                logger.warning(f"HybridLLM: Gemini stream failed to start, trying Groq: {e.__cause__}")
+                logger.warning(f"HybridLLM: Gemini stream failed after retries, trying Groq: {e.__cause__}")
 
         if self.groq_client:
             try:
                 groq_max_tokens = min(max_tokens, 2048)
-                yield from _run(_openai_compatible_stream(self.groq_client, settings.groq_model, prompt, temperature, groq_max_tokens))
+                yield from _run_tier_with_retry(
+                    lambda: _openai_compatible_stream(self.groq_client, settings.groq_model, prompt, temperature, groq_max_tokens),
+                    "Groq"
+                )
                 return
             except _TierFailedBeforeFirstChunk as e:
-                logger.warning(f"HybridLLM: Groq stream failed to start, trying OpenAI: {e.__cause__}")
+                logger.warning(f"HybridLLM: Groq stream failed after retries, trying OpenAI: {e.__cause__}")
 
         if self.openai_client:
             try:
-                yield from _run(_openai_compatible_stream(self.openai_client, settings.openai_model, prompt, temperature, max_tokens))
+                yield from _run_tier_with_retry(
+                    lambda: _openai_compatible_stream(self.openai_client, settings.openai_model, prompt, temperature, max_tokens),
+                    "OpenAI"
+                )
                 return
             except _TierFailedBeforeFirstChunk as e:
-                logger.warning(f"HybridLLM: OpenAI stream failed to start, trying Anthropic: {e.__cause__}")
+                logger.warning(f"HybridLLM: OpenAI stream failed after retries, trying Anthropic: {e.__cause__}")
 
         if self.anthropic_client:
             try:
-                yield from _run(self._try_anthropic_stream(prompt, max_tokens))
+                yield from _run_tier_with_retry(lambda: self._try_anthropic_stream(prompt, max_tokens), "Anthropic")
                 return
             except _TierFailedBeforeFirstChunk as e:
-                logger.error(f"HybridLLM: Anthropic stream failed to start: {e.__cause__}")
+                logger.error(f"HybridLLM: Anthropic stream failed after retries: {e.__cause__}")
 
         logger.error("HybridLLM: No LLM backend succeeded (streaming)")
         raise RuntimeError(
