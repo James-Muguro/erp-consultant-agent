@@ -117,7 +117,10 @@ Justification: ...
 
         for l in lines:
             stripped = l.strip()
-            if stripped.startswith(tuple('123456789.')) or stripped.split()[0].isdigit():
+            if not stripped:
+                continue
+            words = stripped.split()
+            if stripped.startswith(tuple('123456789.')) or words[0].isdigit():
                 steps.append(stripped.lstrip('0123456789. ').strip())
 
         if not steps:
