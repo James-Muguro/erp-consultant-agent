@@ -569,7 +569,7 @@ def chat(req: ChatRequest, current_user: User = Depends(get_current_user)):
         # above) - otherwise plain Q&A chats vanish on refresh and never
         # appear in "your conversations".
         title = _derive_chat_title(req.message)
-        session_id = agent_memory.create_project(project_name=title, module='FI', user_id=current_user.id)
+        session_id = agent_memory.create_project(project_name=title, module='FI', user_id=current_user.id, is_casual=True)
 
     data = info_retriever(req.message, {'summary': ''}, prefer_web=req.prefer_web)
     generation_config = {
@@ -728,7 +728,7 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
             # above) - otherwise plain Q&A chats vanish on refresh and never
             # appear in "your conversations".
             title = _derive_chat_title(req.message)
-            session_id = agent_memory.create_project(project_name=title, module='FI', user_id=current_user.id)
+            session_id = agent_memory.create_project(project_name=title, module='FI', user_id=current_user.id, is_casual=True)
 
         yield ev('tool_started', tool='info_retriever', message='Searching knowledge base and web')
         data = info_retriever(req.message, {'summary': ''}, prefer_web=req.prefer_web)
