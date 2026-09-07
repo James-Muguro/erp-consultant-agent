@@ -9,6 +9,7 @@ export interface ProjectSummary {
   project_name: string;
   module: string;
   erp_system: string;
+  is_casual: boolean;
   current_phase: string;
   completed_phases: string[];
   phases_completed: number;
