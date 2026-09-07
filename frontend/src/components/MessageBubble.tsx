@@ -1,4 +1,6 @@
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import rehypeRaw from "rehype-raw";
 import { FileText } from "lucide-react";
 import type { ChatMessage } from "../types";
 import { api } from "../api/client";
@@ -27,7 +29,9 @@ export function MessageBubble({
           <p className="whitespace-pre-wrap">{message.text}</p>
         ) : (
           <div className="prose-chat">
-            <ReactMarkdown>{message.text || (message.isStreaming ? "…" : "")}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>
+              {message.text || (message.isStreaming ? "…" : "")}
+            </ReactMarkdown>
           </div>
         )}
 
