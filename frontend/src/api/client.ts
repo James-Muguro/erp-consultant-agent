@@ -156,6 +156,7 @@ export const api = {
     sessionId: string | null,
     onEvent: (event: ChatStreamEvent) => void,
     signal?: AbortSignal,
+    agentHint?: string,
   ): Promise<void> {
     const token = getToken();
     const res = await fetch("/api/chat/stream", {
@@ -164,7 +165,7 @@ export const api = {
         "Content-Type": "application/json",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
-      body: JSON.stringify({ message, session_id: sessionId }),
+      body: JSON.stringify({ message, session_id: sessionId, agent_hint: agentHint }),
       signal,
     });
 
