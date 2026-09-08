@@ -37,6 +37,11 @@ export interface DocumentRef {
   filename: string;
 }
 
+export interface NextAction {
+  label: string;
+  agent_hint: string;
+}
+
 export type ChatRole = "user" | "assistant";
 
 export interface ChatMessage {
@@ -47,8 +52,8 @@ export interface ChatMessage {
   documents?: DocumentRef[];
   isStreaming?: boolean;
   error?: boolean;
+  nextAction?: NextAction | null;
 }
-
 /** One parsed Server-Sent Event from /api/chat/stream. */
 export interface ChatStreamEvent {
   type:
