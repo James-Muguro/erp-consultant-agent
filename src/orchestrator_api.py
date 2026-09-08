@@ -579,6 +579,18 @@ def chat(req: ChatRequest, current_user: User = Depends(get_current_user)):
     llm_instance = llm_mod.get_llm()
     llm_mode = "gemini" if getattr(llm_instance, "use_gemini", True) else "gpt-4"
 
+    if req.session_id:
+        session = agent_memory.session_service.get_session(req.session_id)
+        if session and (session.metadata or {}).get('intake', {}).get('active'):
+            res = _handle_intake_message(session, req)
+            if not res.get('success'):
+                return _chat_response(res.get('error', 'Intake failed.'), llm_mode=llm_mode,
+                                      success=False, session_id=req.session_id)
+            answer = res['answer']
+            agent_memory.session_service.add_to_conversation(req.session_id, role="user", content=req.message)
+            agent_memory.session_service.add_to_conversation(req.session_id, role="assistant", content=answer)
+            return _chat_response(answer, llm_mode=llm_mode, session_id=req.session_id)
+
     # Explicit agent_hint always wins - it's a direct instruction from the
     # caller, not something that needs classifying
     if req.agent_hint and req.session_id:
@@ -719,14 +731,9 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
         llm_instance = llm_mod.get_llm()
         llm_mode = "gemini" if getattr(llm_instance, "use_gemini", True) else "gpt-4"
 
-        if req.agent_hint and req.session_id:
+        if req.session_id:
             session = agent_memory.session_service.get_session(req.session_id)
-            if not session:
-                yield ev('error', message='Session not found.')
-                return
-            hint = req.agent_hint.lower()
-
-            if hint == 'start_intake' or (session.metadata or {}).get('intake', {}).get('active'):
+            if session and (session.metadata or {}).get('intake', {}).get('active'):
                 yield ev('agent_started', agent='intake', message='Gathering project context')
                 res = _handle_intake_message(session, req)
                 if not res.get('success'):
@@ -737,6 +744,28 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
                 agent_memory.session_service.add_to_conversation(req.session_id, role="assistant", content=answer)
                 if res.get('document_path'):
                     yield ev('document_created', phase='requirements_template', filename=os.path.basename(res['document_path']))
+                yield ev('text_delta', text=answer)
+                yield ev('workflow_completed')
+                next_action = _next_action_for(agent_memory.session_service.get_session(req.session_id))
+                yield ev('message_complete', answer=answer, llm_mode=llm_mode, session_id=req.session_id,
+                          next_action=next_action)
+                return
+
+        if req.agent_hint and req.session_id:
+            session = agent_memory.session_service.get_session(req.session_id)
+            if not session:
+                yield ev('error', message='Session not found.')
+                return
+            hint = req.agent_hint.lower()
+
+            if hint == 'start_intake':
+                res = _handle_intake_message(session, req)
+                if not res.get('success'):
+                    yield ev('error', message=res.get('error', 'Intake failed.'))
+                    return
+                answer = res['answer']
+                agent_memory.session_service.add_to_conversation(req.session_id, role="user", content=req.message)
+                agent_memory.session_service.add_to_conversation(req.session_id, role="assistant", content=answer)
                 yield ev('text_delta', text=answer)
                 yield ev('workflow_completed')
                 next_action = _next_action_for(agent_memory.session_service.get_session(req.session_id))
