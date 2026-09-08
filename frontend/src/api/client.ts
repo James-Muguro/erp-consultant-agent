@@ -112,6 +112,13 @@ export const api = {
     );
   },
 
+  async deleteProject(sessionId: string) {
+    return request<{ session_id: string; deleted: boolean }>(
+      `/api/projects/${sessionId}/permanent`,
+      { method: "DELETE" },
+    );
+  },
+
   async getMessages(sessionId: string) {
     return request<{ session_id: string; messages: { role: string; content: string; timestamp: string }[] }>(
       `/api/projects/${sessionId}/messages`,

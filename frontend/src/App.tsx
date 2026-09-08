@@ -85,6 +85,16 @@ async function renameProject(sessionId: string, newName: string) {
     await refreshProjects();
   }
 
+  async function deleteProject(sessionId: string) {
+    if (!window.confirm("Permanently delete this chat? This cannot be undone.")) return;
+    await api.deleteProject(sessionId);
+    if (sessionId === activeSessionId) {
+      setActiveSessionId(null);
+      chat.reset();
+    }
+    await refreshProjects();
+  }
+
   return (
     <div className="flex h-screen bg-paper">
       <Sidebar
@@ -95,6 +105,7 @@ async function renameProject(sessionId: string, newName: string) {
         onNewProject={() => setShowNewProject(true)}
         onRename={renameProject}
         onArchive={archiveProject}
+        onDelete={deleteProject}
         />
       <main className="flex flex-1 flex-col">
         {loadingProjects ? (

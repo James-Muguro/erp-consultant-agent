@@ -409,6 +409,18 @@ def archive_project(session_id: str, current_user: User = Depends(get_current_us
     return {"session_id": session_id, "archived": True}
 
 
+@app.delete("/api/projects/{session_id}/permanent")
+def delete_project_permanently(session_id: str, current_user: User = Depends(get_current_user)):
+    """Permanently deletes a session and its data - distinct from
+    archive_project, which only hides it from the default list.
+    Irreversible."""
+    _get_owned_session(session_id, current_user)
+    deleted = agent_memory.session_service.delete_session(session_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"session_id": session_id, "deleted": True}
+
+
 @app.post("/api/feedback")
 def submit_feedback(req: FeedbackRequest, current_user: User = Depends(get_current_user),
                      db: Session = Depends(get_db)):

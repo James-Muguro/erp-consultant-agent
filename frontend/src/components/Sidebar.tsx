@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { Archive, LogOut, MessageSquarePlus, Pencil, Plus, Search } from "lucide-react";
+import { Archive, LogOut, MessageSquarePlus, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import type { ProjectSummary } from "../types";
 import { useAuth } from "../context/AuthContext";
 
@@ -11,6 +11,7 @@ export function Sidebar({
   onNewProject,
   onRename,
   onArchive,
+  onDelete,
 }: {
   projects: ProjectSummary[];
   activeSessionId: string | null;
@@ -19,6 +20,7 @@ export function Sidebar({
   onNewProject: () => void;
   onRename: (sessionId: string, newName: string) => void;
   onArchive: (sessionId: string) => void;
+  onDelete: (sessionId: string) => void;
 }) {
   const { user, logout } = useAuth();
   const [query, setQuery] = useState("");
@@ -147,9 +149,19 @@ export function Sidebar({
                         onArchive(project.session_id);
                       }}
                       title="Archive"
-                      className="rounded-sm p-1 text-ink-faint hover:bg-surface hover:text-danger"
+                      className="rounded-sm p-1 text-ink-faint hover:bg-surface hover:text-ink"
                     >
                       <Archive size={13} />
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDelete(project.session_id);
+                      }}
+                      title="Delete"
+                      className="rounded-sm p-1 text-ink-faint hover:bg-surface hover:text-danger"
+                    >
+                      <Trash2 size={13} />
                     </button>
                   </div>
                 )}
