@@ -20,7 +20,7 @@ export function ChatPanel({
   activity: AgentActivityStep[];
   sending: boolean;
   streamError: string | null;
-  onSend: (text: string) => void;
+  onSend: (text: string, agentHint?: string) => void;
   onStop: () => void;
 }) {
   const [draft, setDraft] = useState("");
@@ -44,6 +44,11 @@ export function ChatPanel({
     }
   }
 
+  function handleAction(agentHint: string, label: string) {
+    if (sending) return;
+    onSend(label, agentHint);
+  }
+
   const showEmptyState = messages.length === 0;
 
   return (
@@ -54,7 +59,7 @@ export function ChatPanel({
         ) : (
           <div className="mx-auto flex max-w-3xl flex-col gap-4 px-6 py-6">
             {messages.map((m) => (
-              <MessageBubble key={m.id} message={m} sessionId={sessionId} />
+              <MessageBubble key={m.id} message={m} sessionId={sessionId} onAction={handleAction} />
             ))}
             {sending && activity.length > 0 && <AgentActivity steps={activity} />}
             <div ref={bottomRef} />
