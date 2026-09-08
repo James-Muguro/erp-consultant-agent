@@ -148,6 +148,132 @@ class DocumentGenerator:
         )
         
         return str(filepath)
+
+    def generate_requirements_template(
+        self,
+        project_name: str,
+        module: str,
+        erp_system: str,
+        context: Dict[str, str]
+    ) -> str:
+        """Generate a requirements-gathering questionnaire for the user to
+        take to real stakeholders - deliberately contains no invented
+        answers, only questions tailored from the intake context. This is
+        distinct from generate_requirements_document, which formats
+        already-gathered (real) requirements into a final document."""
+
+        industry = context.get('industry', 'Not specified')
+        company_size = context.get('company_size', 'Not specified')
+        primary_goal = context.get('primary_goal', 'Not specified')
+        scope_areas = context.get('scope_areas', 'Not specified')
+
+        doc_content = f"""# Requirements Gathering Questionnaire
+
+## Project Information
+- **Project Name:** {project_name}
+- **Proposed ERP System:** {erp_system}
+- **Module:** {module}
+- **Date:** {datetime.now().strftime('%Y-%m-%d')}
+
+---
+
+## Project Context (from intake)
+
+- **Industry:** {industry}
+- **Organization Size:** {company_size}
+- **Primary Goal:** {primary_goal}
+- **Scope Areas:** {scope_areas}
+
+---
+
+## Instructions
+
+Use this questionnaire to interview stakeholders across the scope areas
+above. Record their actual answers - do not guess or estimate on their
+behalf. Once complete, bring the answers back to continue the
+requirements-gathering process.
+
+---
+
+## 1. Business Context & Objectives
+
+- What are the top 3 business drivers for this initiative?
+- How will success be measured (KPIs, cost savings, cycle-time reductions)?
+- What is the timeline and budget envelope for this project?
+
+---
+
+## 2. Current Processes & Pain Points
+
+- Which manual or legacy processes cause the most bottlenecks today?
+- Are there regulatory or compliance constraints that apply?
+- What existing systems will this replace or integrate with?
+
+---
+
+## 3. Functional Requirements (by scope area)
+
+For each area listed in scope ({scope_areas}), capture:
+- What are the must-have capabilities?
+- What are the nice-to-have capabilities?
+- Are there any unique workflows specific to this business that standard
+  ERP modules may not cover out of the box?
+
+---
+
+## 4. Data & Migration
+
+- What is the approximate volume of master and transactional data?
+- Which data sources will need to be migrated or integrated?
+- Are there known data quality issues in the current systems?
+
+---
+
+## 5. Integration Requirements
+
+- Which external systems must this ERP connect to?
+- What data formats or protocols are currently in use?
+
+---
+
+## 6. Reporting & Analytics
+
+- What reports or dashboards are critical for each stakeholder role?
+- Is real-time reporting required, or is periodic reporting sufficient?
+
+---
+
+## 7. Constraints & Dependencies
+
+- Are there upcoming regulatory changes or infrastructure upgrades that
+  could affect this project?
+- Are there vendor, staffing, or budget constraints to be aware of?
+
+---
+
+## 8. Acceptance Criteria
+
+- How will each stakeholder validate that their requirements have been met?
+
+---
+
+*Once this questionnaire has been completed with real stakeholder answers,
+paste the responses back into the chat to continue.*
+"""
+
+        filename = f"requirements_questionnaire_{project_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.md"
+        filepath = self.output_dir / filename
+
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(doc_content)
+
+        self.logger.log_tool_usage(
+            "generate_requirements_template",
+            {'project': project_name, 'module': module},
+            f"Template saved to {filepath}"
+        )
+
+        return str(filepath)
     
     def generate_test_case_document(
         self,
