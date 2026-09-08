@@ -29,7 +29,6 @@ class UserOut(BaseModel):
 
 class ProfileUpdateRequest(BaseModel):
     name: str | None = Field(default=None, max_length=120)
-    profile_picture_url: str | None = Field(default=None, max_length=2048)
 
 
 class PasswordChangeRequest(BaseModel):

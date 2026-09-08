@@ -26,7 +26,7 @@ export function Sidebar({
   showArchived: boolean;
   onToggleArchived: () => void;
 }) {
-  const { user, logout, updateAccountSettings, changePassword, deleteAccount } = useAuth();
+  const { user, logout, updateAccountSettings, uploadProfilePicture, changePassword, deleteAccount } = useAuth();
   const [query, setQuery] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingValue, setEditingValue] = useState("");
@@ -34,7 +34,7 @@ export function Sidebar({
   const [editingProfile, setEditingProfile] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [profileName, setProfileName] = useState(user?.name ?? "");
-  const [profilePictureUrl, setProfilePictureUrl] = useState(user?.profile_picture_url ?? "");
+  const [profilePictureFile, setProfilePictureFile] = useState<File | null>(null);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [profileError, setProfileError] = useState<string | null>(null);
@@ -85,7 +85,9 @@ export function Sidebar({
   async function saveProfile() {
     setProfileError(null);
     try {
-      await updateAccountSettings(profileName, profilePictureUrl);
+      await updateAccountSettings(profileName);
+      if (profilePictureFile) await uploadProfilePicture(profilePictureFile);
+      setProfilePictureFile(null);
       setEditingProfile(false);
     } catch (error) {
       setProfileError(error instanceof Error ? error.message : "Could not update profile.");
@@ -247,14 +249,6 @@ export function Sidebar({
                 <dt>Email</dt>
                 <dd className="truncate">{user?.email}</dd>
               </div>
-              <div className="flex justify-between gap-3">
-                <dt>Member since</dt>
-                <dd>{user?.created_at ? new Date(user.created_at).toLocaleDateString() : "-"}</dd>
-              </div>
-              <div className="flex justify-between gap-3">
-                <dt>ID</dt>
-                <dd className="max-w-[9rem] truncate" title={user?.id}>{user?.id}</dd>
-              </div>
             </dl>
             {profileError && <p className="mt-2 text-xs text-danger">{profileError}</p>}
             {!editingProfile && !settingsOpen && (
@@ -284,10 +278,10 @@ export function Sidebar({
                   className="w-full rounded-sm border border-border bg-paper px-2 py-1.5 text-xs text-ink outline-none focus:border-accent"
                 />
                 <input
-                  value={profilePictureUrl}
-                  onChange={(e) => setProfilePictureUrl(e.target.value)}
-                  placeholder="Profile picture URL"
-                  className="w-full rounded-sm border border-border bg-paper px-2 py-1.5 text-xs text-ink outline-none focus:border-accent"
+                  type="file"
+                  accept="image/jpeg,image/png,image/gif,image/webp"
+                  onChange={(e) => setProfilePictureFile(e.target.files?.[0] ?? null)}
+                  className="w-full text-xs text-ink-muted file:mr-2 file:rounded-sm file:border-0 file:bg-accent-soft file:px-2 file:py-1 file:text-xs file:text-accent-strong"
                 />
                 <div className="flex gap-2">
                   <button type="button" onClick={saveProfile} className="flex-1 rounded-sm bg-accent px-2 py-1.5 text-xs text-white hover:bg-accent-strong">Save</button>
@@ -298,6 +292,11 @@ export function Sidebar({
             {settingsOpen && (
               <div className="mt-3 space-y-2">
                 <p className="text-xs font-medium text-ink">Account settings</p>
+                <div className="rounded-sm border border-border p-2 text-xs text-ink-muted">
+                  <p className="font-medium text-ink">Account information</p>
+                  <p className="mt-1 truncate" title={user?.id}>Account ID: {user?.id}</p>
+                  <p>Member since: {user?.created_at ? new Date(user.created_at).toLocaleDateString() : "-"}</p>
+                </div>
                 <input
                   type="password"
                   value={currentPassword}

@@ -6,7 +6,7 @@ import uuid as uuid_lib
 import sys
 import json
 
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, HTTPException, Depends, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -328,7 +328,40 @@ def account_settings(current_user: User = Depends(get_current_user)):
 def update_account_settings(req: ProfileUpdateRequest,
                             current_user: User = Depends(get_current_user),
                             db: Session = Depends(get_db)):
-    return auth_service.update_profile(db, current_user, req.name, req.profile_picture_url)
+    return auth_service.update_profile(db, current_user, req.name, current_user.profile_picture_url)
+
+
+@app.post("/api/auth/profile-picture", response_model=UserOut)
+def upload_profile_picture(file: UploadFile = File(...),
+                           current_user: User = Depends(get_current_user),
+                           db: Session = Depends(get_db)):
+    if file.content_type not in {"image/jpeg", "image/png", "image/gif", "image/webp"}:
+        raise HTTPException(status_code=415, detail="Profile picture must be a supported image")
+
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in {".jpg", ".jpeg", ".png", ".gif", ".webp"}:
+        raise HTTPException(status_code=415, detail="Profile picture must be a supported image")
+
+    picture_dir = Path(settings.output_dir) / "profile_pictures"
+    picture_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{uuid_lib.uuid4().hex}{suffix}"
+    picture_path = picture_dir / filename
+    with picture_path.open("wb") as destination:
+        destination.write(file.file.read())
+
+    return auth_service.update_profile(
+        db, current_user, current_user.name, f"/api/auth/profile-picture/{filename}"
+    )
+
+
+@app.get("/api/auth/profile-picture/{filename}")
+def get_profile_picture(filename: str):
+    if Path(filename).name != filename:
+        raise HTTPException(status_code=404, detail="Profile picture not found")
+    picture_path = Path(settings.output_dir) / "profile_pictures" / filename
+    if not picture_path.is_file():
+        raise HTTPException(status_code=404, detail="Profile picture not found")
+    return FileResponse(path=str(picture_path))
 
 
 @app.post("/api/auth/password")

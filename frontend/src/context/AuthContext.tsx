@@ -7,7 +7,8 @@ interface AuthContextValue {
   loading: boolean;
   login: (email: string, password: string) => Promise<void>;
   signup: (email: string, password: string) => Promise<void>;
-  updateAccountSettings: (name: string, profilePictureUrl: string) => Promise<void>;
+  updateAccountSettings: (name: string) => Promise<void>;
+  uploadProfilePicture: (file: File) => Promise<void>;
   changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
   deleteAccount: () => Promise<void>;
   logout: () => void;
@@ -43,8 +44,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(await api.me());
   }
 
-  async function updateAccountSettings(name: string, profilePictureUrl: string) {
-    setUser(await api.updateAccountSettings(name, profilePictureUrl));
+  async function updateAccountSettings(name: string) {
+    setUser(await api.updateAccountSettings(name));
+  }
+
+  async function uploadProfilePicture(file: File) {
+    setUser(await api.uploadProfilePicture(file));
   }
 
   async function changePassword(currentPassword: string, newPassword: string) {
@@ -63,7 +68,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, signup, updateAccountSettings, changePassword, deleteAccount, logout }}>
+    <AuthContext.Provider value={{ user, loading, login, signup, updateAccountSettings, uploadProfilePicture, changePassword, deleteAccount, logout }}>
       {children}
     </AuthContext.Provider>
   );

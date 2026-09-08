@@ -85,11 +85,24 @@ export const api = {
     return request<User>("/api/auth/me");
   },
 
-  async updateAccountSettings(name: string, profile_picture_url: string) {
+  async updateAccountSettings(name: string) {
     return request<User>("/api/auth/settings", {
       method: "PATCH",
-      body: JSON.stringify({ name: name || null, profile_picture_url: profile_picture_url || null }),
+      body: JSON.stringify({ name: name || null }),
     });
+  },
+
+  async uploadProfilePicture(file: File) {
+    const token = getToken();
+    const form = new FormData();
+    form.append("file", file);
+    const response = await fetch("/api/auth/profile-picture", {
+      method: "POST",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: form,
+    });
+    if (!response.ok) throw new ApiError(response.status, "Could not upload profile picture", null);
+    return (await response.json()) as User;
   },
 
   async changePassword(current_password: string, new_password: string) {
