@@ -97,7 +97,7 @@ async function renameProject(sessionId: string, newName: string) {
   }
 
   return (
-    <div className="flex h-screen bg-paper">
+    <div className="flex h-screen flex-col bg-paper md:flex-row">
       <Sidebar
         projects={projects}
         activeSessionId={activeSessionId}
@@ -110,7 +110,7 @@ async function renameProject(sessionId: string, newName: string) {
         showArchived={showArchived}
         onToggleArchived={() => setShowArchived((current) => !current)}
         />
-      <main className="flex flex-1 flex-col">
+      <main className="flex min-h-0 min-w-0 flex-1 flex-col">
         {loadingProjects ? (
           <div className="flex flex-1 items-center justify-center text-sm text-ink-faint">
             Loading your projects…

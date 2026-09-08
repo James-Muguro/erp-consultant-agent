@@ -57,7 +57,7 @@ export function ChatPanel({
         {showEmptyState ? (
           <EmptyState onPick={(text) => onSend(text)} />
         ) : (
-          <div className="mx-auto flex max-w-3xl flex-col gap-4 px-6 py-6">
+          <div className="mx-auto flex max-w-3xl flex-col gap-4 px-4 py-5 md:gap-4 md:px-6 md:py-6">
             {messages.map((m) => (
               <MessageBubble key={m.id} message={m} sessionId={sessionId} onAction={handleAction} />
             ))}
@@ -67,7 +67,7 @@ export function ChatPanel({
         )}
       </div>
 
-      <div className="border-t border-border bg-surface px-6 py-4">
+      <div className="border-t border-border bg-surface px-3 py-3 md:px-6 md:py-4">
         <div className="mx-auto max-w-3xl">
           {streamError && (
             <p className="mb-2 rounded-md bg-danger-soft px-3 py-1.5 text-xs text-danger">
