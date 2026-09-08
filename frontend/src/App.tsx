@@ -13,11 +13,12 @@ function ChatApp() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [showNewProject, setShowNewProject] = useState(false);
   const [loadingProjects, setLoadingProjects] = useState(true);
+  const [showArchived, setShowArchived] = useState(false);
 
   const refreshProjects = useCallback(async () => {
-    const { projects } = await api.listProjects();
+    const { projects } = await api.listProjects(showArchived);
     setProjects(projects);
-  }, []);
+  }, [showArchived]);
 
   useEffect(() => {
     refreshProjects().finally(() => setLoadingProjects(false));
@@ -106,6 +107,8 @@ async function renameProject(sessionId: string, newName: string) {
         onRename={renameProject}
         onArchive={archiveProject}
         onDelete={deleteProject}
+        showArchived={showArchived}
+        onToggleArchived={() => setShowArchived((current) => !current)}
         />
       <main className="flex flex-1 flex-col">
         {loadingProjects ? (

@@ -12,6 +12,8 @@ export function Sidebar({
   onRename,
   onArchive,
   onDelete,
+  showArchived,
+  onToggleArchived,
 }: {
   projects: ProjectSummary[];
   activeSessionId: string | null;
@@ -21,6 +23,8 @@ export function Sidebar({
   onRename: (sessionId: string, newName: string) => void;
   onArchive: (sessionId: string) => void;
   onDelete: (sessionId: string) => void;
+  showArchived: boolean;
+  onToggleArchived: () => void;
 }) {
   const { user, logout } = useAuth();
   const [query, setQuery] = useState("");
@@ -78,6 +82,13 @@ export function Sidebar({
         >
           <Plus size={13} />
           New project (structured)
+        </button>
+        <button
+          onClick={onToggleArchived}
+          className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-border py-1.5 text-xs font-medium text-ink-muted transition-colors hover:border-accent hover:text-accent"
+        >
+          <Archive size={13} />
+          {showArchived ? "Hide archived" : "Show archived"}
         </button>
       </div>
 
