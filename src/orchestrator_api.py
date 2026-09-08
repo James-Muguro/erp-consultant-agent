@@ -461,9 +461,12 @@ _PHASES_WITH_DOCUMENTS = [
 
 def _collect_session_documents(session_id: str) -> List[Dict[str, str]]:
     """Collect every generated document for a session, across all phases
-    whose output included one. Most phases store a single 'document_path';
-    training stores multiple named documents under 'documents'. Process
-    mapping produces no downloadable document at all."""
+    whose output included one, plus any documents stored directly in
+    session metadata (e.g. the requirements questionnaire template, which
+    isn't tied to a completed phase - see _handle_intake_message). Most
+    phases store a single 'document_path'; training stores multiple named
+    documents under 'documents'. Process mapping produces no downloadable
+    document at all."""
     documents = []
 
     for phase in _PHASES_WITH_DOCUMENTS:
@@ -478,6 +481,11 @@ def _collect_session_documents(session_id: str) -> List[Dict[str, str]]:
         for label, path in (output.get('documents') or {}).items():
             if path:
                 documents.append({'phase': phase, 'label': label, 'path': path})
+
+    session = agent_memory.session_service.get_session(session_id)
+    template_path = (session.metadata or {}).get('requirements_template_path') if session else None
+    if template_path:
+        documents.append({'phase': 'requirements_template', 'label': 'requirements_template', 'path': template_path})
 
     return documents
 
