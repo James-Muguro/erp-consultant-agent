@@ -519,7 +519,11 @@ def download_document(session_id: str, filename: str, current_user: User = Depen
     if not file_path.is_file():
         raise HTTPException(status_code=404, detail="Document file is missing on disk")
 
-    return FileResponse(path=str(file_path), filename=file_path.name, media_type="text/markdown")
+    media_type = (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        if file_path.suffix == ".docx" else "text/markdown"
+    )
+    return FileResponse(path=str(file_path), filename=file_path.name, media_type=media_type)
 
 
 # ---------------------------------------------------------------------------
