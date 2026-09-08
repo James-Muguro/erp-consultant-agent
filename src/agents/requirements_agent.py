@@ -69,7 +69,7 @@ class RequirementsAgent:
                 'category': 'requirements_template',
                 'tags': [module.lower(), 'requirements']
             }, limit=3)
-            
+
             # Build context for the LLM
             context = self._build_context(
                 module_info,
@@ -163,6 +163,29 @@ class RequirementsAgent:
                 'error': str(e),
                 'duration': duration
             }
+
+    def generate_requirements_template(
+        self,
+        project_name: str,
+        module: str,
+        erp_system: str,
+        context: Dict[str, str]
+    ) -> Dict[str, Any]:
+        """Generate a requirements-gathering questionnaire from intake context."""
+        start_time = time.time()
+        try:
+            doc_path = doc_generator.generate_requirements_template(
+                project_name=project_name,
+                module=module,
+                erp_system=erp_system,
+                context=context
+            )
+            duration = time.time() - start_time
+            return {'success': True, 'document_path': doc_path, 'duration': duration}
+        except Exception as e:
+            duration = time.time() - start_time
+            self.logger.log_agent_error("generate_requirements_template", e)
+            return {'success': False, 'error': str(e), 'duration': duration}
     
     def _build_context(
         self,
