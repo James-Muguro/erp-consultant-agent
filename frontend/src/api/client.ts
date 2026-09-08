@@ -2,6 +2,7 @@ import type {
   ApiErrorBody,
   ChatStreamEvent,
   DocumentRef,
+  NextAction,
   ProjectStatus,
   ProjectSummary,
   User,
@@ -9,6 +10,12 @@ import type {
 import { parseSseChunk } from "./sse";
 
 const TOKEN_KEY = "erp_agent_token";
+
+type StartProjectResponse = {
+  session_id: string;
+  project_name: string;
+  next_action?: NextAction | null;
+};
 
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
@@ -85,7 +92,7 @@ export const api = {
   },
 
   async startProject(project_name: string, module: string, erp_system?: string) {
-    return request<{ success: boolean; session_id: string }>("/api/projects/start", {
+    return request<StartProjectResponse>("/api/projects/start", {
       method: "POST",
       body: JSON.stringify({ project_name, module, erp_system }),
     });
