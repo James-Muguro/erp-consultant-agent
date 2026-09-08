@@ -52,10 +52,21 @@ function ChatApp() {
   }
 
   async function createProject(name: string, erpSystem: string) {
-    const { session_id } = await api.startProject(name, "General", erpSystem || undefined);
+    const { session_id, next_action } = await api.startProject(name, "General", erpSystem || undefined);
     await refreshProjects();
     setActiveSessionId(session_id);
     chat.reset();
+    if (next_action) {
+      chat.loadHistory([
+        {
+          id: `${session_id}-welcome`,
+          role: "assistant",
+          text: `"${name}" is ready. Let's get started.`,
+          createdAt: Date.now(),
+          nextAction: next_action,
+        },
+      ]);
+    }
     setShowNewProject(false);
   }
 
