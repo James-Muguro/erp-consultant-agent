@@ -222,7 +222,9 @@ def _next_action_for(session) -> Optional[Dict[str, Any]]:
             return None
         if not has_template:
             return {'label': 'Start requirements intake', 'agent_hint': 'start_intake'}
-        return {'label': "I have my stakeholder answers - structure them", 'agent_hint': 'structure_requirements'}
+        if (session.metadata or {}).get('stakeholder_answers_provided'):
+            return {'label': "I have my stakeholder answers - structure them", 'agent_hint': 'structure_requirements'}
+        return None
 
     if session.current_phase in PHASE_LABELS:
         return {'label': PHASE_LABELS[session.current_phase], 'agent_hint': session.current_phase}
@@ -260,6 +262,8 @@ def _handle_intake_message(session, req: ChatRequest) -> Dict[str, Any]:
         return {'success': False, 'error': template_result.get('error', 'Failed to generate requirements template')}
 
     session.metadata['requirements_template_path'] = template_result['document_path']
+    session.metadata['awaiting_stakeholder_answers'] = True
+    session.metadata['stakeholder_answers_provided'] = False
     agent_memory.session_service.update_session(session.session_id, {'metadata': session.metadata})
 
     answer = ("Thanks - I've put together a requirements questionnaire based on your answers. "
@@ -758,6 +762,11 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
                 yield ev('message_complete', answer=answer, llm_mode=llm_mode, session_id=req.session_id,
                           next_action=next_action)
                 return
+            elif session and (session.metadata or {}).get('awaiting_stakeholder_answers') \
+                    and not (session.metadata or {}).get('stakeholder_answers_provided') \
+                    and len(req.message.strip()) >= 40:
+                session.metadata['stakeholder_answers_provided'] = True
+                agent_memory.session_service.update_session(req.session_id, {'metadata': session.metadata})
 
         if req.agent_hint and req.session_id:
             session = agent_memory.session_service.get_session(req.session_id)
@@ -782,10 +791,20 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
                 return
 
             if hint == 'structure_requirements':
+                history = session.conversation_history or []
+                last_user_message = next(
+                    (m['content'] for m in reversed(history) if m.get('role') == 'user'), None
+                )
+                if not last_user_message or len(last_user_message.strip()) < 40:
+                    yield ev('error', message="I don't see enough stakeholder input to work with yet. "
+                                               "Please paste the completed questionnaire answers as a "
+                                               "message first, then click this button.")
+                    return
+
                 yield ev('agent_started', agent='requirements', message='Structuring your requirements')
                 res = requirements_agent.gather_requirements(
                     session_id=req.session_id, project_name=session.project_name,
-                    module=session.module, stakeholder_input=req.message, erp_system=session.erp_system
+                    module=session.module, stakeholder_input=last_user_message, erp_system=session.erp_system
                 )
                 if not res.get('success'):
                     yield ev('error', message=res.get('error', 'Failed to structure requirements.'))
