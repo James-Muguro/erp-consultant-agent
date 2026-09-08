@@ -1,23 +1,94 @@
 """
-Document Generator Tool - Creates formatted documentation from content
+Document Generator Tool - Creates formatted Word documents for ERP projects
 """
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 from pathlib import Path
-import json
+
+from docx import Document
+from docx.shared import Pt, Inches, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT
 
 from src.config.settings import settings
 from src.utils.logger import AgentLogger
 
+ACCENT_COLOR = RGBColor(0x1F, 0x5F, 0x4A)  # matches the frontend's pine-green accent
+
 
 class DocumentGenerator:
-    """Generates various types of documentation for ERP projects"""
-    
+    """Generates formatted Word (.docx) documentation for ERP projects."""
+
     def __init__(self):
         self.logger = AgentLogger("DocumentGenerator")
         self.output_dir = Path(settings.output_dir) / "documents"
         self.output_dir.mkdir(parents=True, exist_ok=True)
-    
+
+    # ------------------------------------------------------------------
+    # Shared building blocks
+    # ------------------------------------------------------------------
+
+    def _new_document(self, title: str, subtitle: str) -> Document:
+        doc = Document()
+
+        title_para = doc.add_heading(title, level=0)
+        title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        for run in title_para.runs:
+            run.font.color.rgb = ACCENT_COLOR
+
+        subtitle_para = doc.add_paragraph(subtitle)
+        subtitle_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        subtitle_para.runs[0].italic = True
+        subtitle_para.runs[0].font.size = Pt(11)
+
+        doc.add_paragraph()
+        return doc
+
+    def _add_info_table(self, doc: Document, rows: List[tuple]):
+        table = doc.add_table(rows=0, cols=2)
+        table.style = 'Light Grid Accent 1'
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        for label, value in rows:
+            row = table.add_row().cells
+            row[0].text = label
+            row[0].paragraphs[0].runs[0].bold = True
+            row[1].text = str(value)
+        doc.add_paragraph()
+
+    def _add_bullet_list(self, doc: Document, items: List[str]):
+        if not items:
+            doc.add_paragraph("None specified.", style='Intense Quote')
+            return
+        for item in items:
+            doc.add_paragraph(str(item), style='List Bullet')
+
+    def _add_data_table(self, doc: Document, headers: List[str], rows: List[List[str]]):
+        if not rows:
+            doc.add_paragraph("None specified.", style='Intense Quote')
+            return
+        table = doc.add_table(rows=1, cols=len(headers))
+        table.style = 'Light Grid Accent 1'
+        for i, header in enumerate(headers):
+            cell = table.rows[0].cells[i]
+            cell.text = header
+            cell.paragraphs[0].runs[0].bold = True
+        for row_values in rows:
+            row = table.add_row().cells
+            for i, value in enumerate(row_values):
+                row[i].text = str(value)
+        doc.add_paragraph()
+
+    def _save(self, doc: Document, prefix: str, name: str) -> str:
+        safe_name = name.replace(' ', '_').replace('/', '-')
+        filename = f"{prefix}_{safe_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"
+        filepath = self.output_dir / filename
+        doc.save(str(filepath))
+        return str(filepath)
+
+    # ------------------------------------------------------------------
+    # Requirements document (final, from real structured requirements)
+    # ------------------------------------------------------------------
+
     def generate_requirements_document(
         self,
         project_name: str,
@@ -25,129 +96,74 @@ class DocumentGenerator:
         requirements: Dict[str, Any],
         metadata: Optional[Dict] = None
     ) -> str:
-        """Generate a formatted requirements document"""
-        
-        doc_content = f"""# Requirements Document
-        
-## Project Information
-- **Project Name:** {project_name}
-- **Module:** {module}
-- **Date:** {datetime.now().strftime('%Y-%m-%d')}
-- **Version:** 1.0
-- **Status:** Draft
+        doc = self._new_document("Requirements Document", project_name)
 
----
+        self._add_info_table(doc, [
+            ("Project Name", project_name),
+            ("Module", module),
+            ("Date", datetime.now().strftime('%Y-%m-%d')),
+            ("Version", "1.0"),
+            ("Status", "Draft"),
+        ])
 
-## Executive Summary
+        doc.add_heading("Executive Summary", level=1)
+        doc.add_paragraph(requirements.get('executive_summary') or "To be completed.")
 
-{requirements.get('executive_summary', 'To be completed')}
+        doc.add_heading("Business Context and Objectives", level=1)
+        doc.add_paragraph(requirements.get('business_context') or "To be completed.")
+        doc.add_heading("Business Objectives", level=2)
+        self._add_bullet_list(doc, requirements.get('objectives', []))
 
----
-
-## Business Context and Objectives
-
-{requirements.get('business_context', 'To be completed')}
-
-### Business Objectives
-{self._format_list(requirements.get('objectives', []))}
-
----
-
-## Functional Requirements
-
-"""
-        # Add functional requirements by category
+        doc.add_heading("Functional Requirements", level=1)
         functional_reqs = requirements.get('functional_requirements', {})
+        if not functional_reqs:
+            doc.add_paragraph("No functional requirements specified.", style='Intense Quote')
         for category, reqs in functional_reqs.items():
-            doc_content += f"### {category}\n\n"
-            for req in reqs:
-                doc_content += f"**{req.get('id', 'REQ-XXX')}:** {req.get('description', '')}\n"
-                doc_content += f"- **Priority:** {req.get('priority', 'Medium')}\n"
-                doc_content += f"- **Type:** {req.get('type', 'Functional')}\n"
-                if req.get('acceptance_criteria'):
-                    doc_content += f"- **Acceptance Criteria:** {req['acceptance_criteria']}\n"
-                doc_content += "\n"
-        
-        doc_content += """
----
+            doc.add_heading(category, level=2)
+            rows = [
+                [r.get('id', 'REQ-XXX'), r.get('description', ''), r.get('priority', 'Medium'),
+                 r.get('acceptance_criteria', '')]
+                for r in reqs
+            ]
+            self._add_data_table(doc, ["ID", "Description", "Priority", "Acceptance Criteria"], rows)
 
-## Technical Requirements
+        doc.add_heading("Technical Requirements", level=1)
+        self._add_bullet_list(doc, [r.get('description', r) if isinstance(r, dict) else r
+                                     for r in requirements.get('technical_requirements', [])])
 
-"""
-        technical_reqs = requirements.get('technical_requirements', [])
-        doc_content += self._format_requirements_list(technical_reqs)
-        
-        doc_content += """
----
+        doc.add_heading("Integration Requirements", level=1)
+        self._add_bullet_list(doc, [r.get('description', r) if isinstance(r, dict) else r
+                                     for r in requirements.get('integration_requirements', [])])
 
-## Integration Requirements
+        doc.add_heading("Reporting Requirements", level=1)
+        self._add_bullet_list(doc, [r.get('description', r) if isinstance(r, dict) else r
+                                     for r in requirements.get('reporting_requirements', [])])
 
-"""
-        integration_reqs = requirements.get('integration_requirements', [])
-        doc_content += self._format_requirements_list(integration_reqs)
-        
-        doc_content += """
----
+        doc.add_heading("Dependencies and Constraints", level=1)
+        doc.add_heading("Dependencies", level=2)
+        self._add_bullet_list(doc, requirements.get('dependencies', []))
+        doc.add_heading("Constraints", level=2)
+        self._add_bullet_list(doc, requirements.get('constraints', []))
 
-## Reporting Requirements
+        doc.add_heading("Assumptions", level=1)
+        self._add_bullet_list(doc, requirements.get('assumptions', []))
 
-"""
-        reporting_reqs = requirements.get('reporting_requirements', [])
-        doc_content += self._format_requirements_list(reporting_reqs)
-        
-        doc_content += """
----
+        doc.add_heading("Approval", level=1)
+        self._add_data_table(doc, ["Role", "Name", "Signature", "Date"], [
+            ["Business Owner", "", "", ""],
+            ["Project Manager", "", "", ""],
+            ["Technical Lead", "", "", ""],
+            ["Functional Consultant", "", "", ""],
+        ])
 
-## Dependencies and Constraints
+        filepath = self._save(doc, "requirements", project_name)
+        self.logger.log_tool_usage("generate_requirements_document", {'project': project_name, 'module': module},
+                                    f"Document saved to {filepath}")
+        return filepath
 
-### Dependencies
-"""
-        dependencies = requirements.get('dependencies', [])
-        doc_content += self._format_list(dependencies)
-        
-        doc_content += """
-### Constraints
-"""
-        constraints = requirements.get('constraints', [])
-        doc_content += self._format_list(constraints)
-        
-        doc_content += """
----
-
-## Assumptions
-
-"""
-        assumptions = requirements.get('assumptions', [])
-        doc_content += self._format_list(assumptions)
-        
-        doc_content += """
----
-
-## Approval
-
-| Role | Name | Signature | Date |
-|------|------|-----------|------|
-| Business Owner | | | |
-| Project Manager | | | |
-| Technical Lead | | | |
-| Functional Consultant | | | |
-
-"""
-        
-        # Save document
-        filename = f"requirements_{project_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.md"
-        filepath = self.output_dir / filename
-        
-        with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(doc_content)
-        
-        self.logger.log_tool_usage(
-            "generate_requirements_document",
-            {'project': project_name, 'module': module},
-            f"Document saved to {filepath}"
-        )
-        
-        return str(filepath)
+    # ------------------------------------------------------------------
+    # Requirements questionnaire (template - no invented answers)
+    # ------------------------------------------------------------------
 
     def generate_requirements_template(
         self,
@@ -156,125 +172,88 @@ class DocumentGenerator:
         erp_system: str,
         context: Dict[str, str]
     ) -> str:
-        """Generate a requirements-gathering questionnaire for the user to
-        take to real stakeholders - deliberately contains no invented
-        answers, only questions tailored from the intake context. This is
-        distinct from generate_requirements_document, which formats
-        already-gathered (real) requirements into a final document."""
+        doc = self._new_document("Requirements Gathering Questionnaire", project_name)
 
-        industry = context.get('industry', 'Not specified')
-        company_size = context.get('company_size', 'Not specified')
-        primary_goal = context.get('primary_goal', 'Not specified')
-        scope_areas = context.get('scope_areas', 'Not specified')
+        self._add_info_table(doc, [
+            ("Project Name", project_name),
+            ("Proposed ERP System", erp_system),
+            ("Module", module),
+            ("Date", datetime.now().strftime('%Y-%m-%d')),
+        ])
 
-        doc_content = f"""# Requirements Gathering Questionnaire
+        doc.add_heading("Project Context (from intake)", level=1)
+        self._add_data_table(doc, ["Field", "Value"], [
+            ["Industry", context.get('industry', 'Not specified')],
+            ["Organization Size", context.get('company_size', 'Not specified')],
+            ["Primary Goal", context.get('primary_goal', 'Not specified')],
+            ["Scope Areas", context.get('scope_areas', 'Not specified')],
+        ])
 
-## Project Information
-- **Project Name:** {project_name}
-- **Proposed ERP System:** {erp_system}
-- **Module:** {module}
-- **Date:** {datetime.now().strftime('%Y-%m-%d')}
-
----
-
-## Project Context (from intake)
-
-- **Industry:** {industry}
-- **Organization Size:** {company_size}
-- **Primary Goal:** {primary_goal}
-- **Scope Areas:** {scope_areas}
-
----
-
-## Instructions
-
-Use this questionnaire to interview stakeholders across the scope areas
-above. Record their actual answers - do not guess or estimate on their
-behalf. Once complete, bring the answers back to continue the
-requirements-gathering process.
-
----
-
-## 1. Business Context & Objectives
-
-- What are the top 3 business drivers for this initiative?
-- How will success be measured (KPIs, cost savings, cycle-time reductions)?
-- What is the timeline and budget envelope for this project?
-
----
-
-## 2. Current Processes & Pain Points
-
-- Which manual or legacy processes cause the most bottlenecks today?
-- Are there regulatory or compliance constraints that apply?
-- What existing systems will this replace or integrate with?
-
----
-
-## 3. Functional Requirements (by scope area)
-
-For each area listed in scope ({scope_areas}), capture:
-- What are the must-have capabilities?
-- What are the nice-to-have capabilities?
-- Are there any unique workflows specific to this business that standard
-  ERP modules may not cover out of the box?
-
----
-
-## 4. Data & Migration
-
-- What is the approximate volume of master and transactional data?
-- Which data sources will need to be migrated or integrated?
-- Are there known data quality issues in the current systems?
-
----
-
-## 5. Integration Requirements
-
-- Which external systems must this ERP connect to?
-- What data formats or protocols are currently in use?
-
----
-
-## 6. Reporting & Analytics
-
-- What reports or dashboards are critical for each stakeholder role?
-- Is real-time reporting required, or is periodic reporting sufficient?
-
----
-
-## 7. Constraints & Dependencies
-
-- Are there upcoming regulatory changes or infrastructure upgrades that
-  could affect this project?
-- Are there vendor, staffing, or budget constraints to be aware of?
-
----
-
-## 8. Acceptance Criteria
-
-- How will each stakeholder validate that their requirements have been met?
-
----
-
-*Once this questionnaire has been completed with real stakeholder answers,
-paste the responses back into the chat to continue.*
-"""
-
-        filename = f"requirements_questionnaire_{project_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.md"
-        filepath = self.output_dir / filename
-
-        with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(doc_content)
-
-        self.logger.log_tool_usage(
-            "generate_requirements_template",
-            {'project': project_name, 'module': module},
-            f"Template saved to {filepath}"
+        doc.add_heading("Instructions", level=1)
+        doc.add_paragraph(
+            "Use this questionnaire to interview stakeholders across the scope areas above. "
+            "Record their actual answers - do not guess or estimate on their behalf. Once "
+            "complete, bring the answers back to continue the requirements-gathering process."
         )
 
-        return str(filepath)
-    
+        sections = [
+            ("1. Business Context & Objectives", [
+                "What are the top 3 business drivers for this initiative?",
+                "How will success be measured (KPIs, cost savings, cycle-time reductions)?",
+                "What is the timeline and budget envelope for this project?",
+            ]),
+            ("2. Current Processes & Pain Points", [
+                "Which manual or legacy processes cause the most bottlenecks today?",
+                "Are there regulatory or compliance constraints that apply?",
+                "What existing systems will this replace or integrate with?",
+            ]),
+            ("3. Functional Requirements", [
+                f"For each area in scope ({context.get('scope_areas', 'the stated scope')}), "
+                f"what are the must-have capabilities?",
+                "What are the nice-to-have capabilities?",
+                "Are there any unique workflows standard ERP modules may not cover out of the box?",
+            ]),
+            ("4. Data & Migration", [
+                "What is the approximate volume of master and transactional data?",
+                "Which data sources will need to be migrated or integrated?",
+                "Are there known data quality issues in the current systems?",
+            ]),
+            ("5. Integration Requirements", [
+                "Which external systems must this ERP connect to?",
+                "What data formats or protocols are currently in use?",
+            ]),
+            ("6. Reporting & Analytics", [
+                "What reports or dashboards are critical for each stakeholder role?",
+                "Is real-time reporting required, or is periodic reporting sufficient?",
+            ]),
+            ("7. Constraints & Dependencies", [
+                "Are there upcoming regulatory changes or infrastructure upgrades to consider?",
+                "Are there vendor, staffing, or budget constraints to be aware of?",
+            ]),
+            ("8. Acceptance Criteria", [
+                "How will each stakeholder validate that their requirements have been met?",
+            ]),
+        ]
+        for heading, questions in sections:
+            doc.add_heading(heading, level=1)
+            self._add_bullet_list(doc, questions)
+
+        doc.add_paragraph()
+        note = doc.add_paragraph(
+            "Once this questionnaire has been completed with real stakeholder answers, "
+            "paste the responses back into the chat to continue."
+        )
+        note.runs[0].italic = True
+
+        filepath = self._save(doc, "requirements_questionnaire", project_name)
+        self.logger.log_tool_usage("generate_requirements_template", {'project': project_name, 'module': module},
+                                    f"Template saved to {filepath}")
+        return filepath
+
+    # ------------------------------------------------------------------
+    # Test cases
+    # ------------------------------------------------------------------
+
     def generate_test_case_document(
         self,
         project_name: str,
@@ -282,102 +261,51 @@ paste the responses back into the chat to continue.*
         test_cases: List[Dict[str, Any]],
         test_type: str = "QA"
     ) -> str:
-        """Generate a formatted test case document"""
-        
-        doc_content = f"""# {test_type} Test Cases Document
+        doc = self._new_document(f"{test_type} Test Cases", project_name)
 
-## Project Information
-- **Project Name:** {project_name}
-- **Module:** {module}
-- **Test Type:** {test_type}
-- **Date:** {datetime.now().strftime('%Y-%m-%d')}
-- **Version:** 1.0
+        self._add_info_table(doc, [
+            ("Project Name", project_name),
+            ("Module", module),
+            ("Test Type", test_type),
+            ("Date", datetime.now().strftime('%Y-%m-%d')),
+            ("Total Test Cases", len(test_cases)),
+        ])
 
----
+        for idx, tc in enumerate(test_cases, 1):
+            doc.add_heading(f"Test Case {idx}: {tc.get('scenario', 'Test Scenario')}", level=1)
+            self._add_info_table(doc, [
+                ("Test Case ID", tc.get('id', f'TC-{idx:03d}')),
+                ("Priority", tc.get('priority', 'Medium')),
+                ("Test Type", tc.get('type', 'Functional')),
+            ])
+            doc.add_heading("Objective", level=2)
+            doc.add_paragraph(tc.get('objective', 'Not specified.'))
+            doc.add_heading("Preconditions", level=2)
+            self._add_bullet_list(doc, tc.get('preconditions', []))
+            doc.add_heading("Test Steps", level=2)
+            for step_num, step in enumerate(tc.get('steps', []), 1):
+                doc.add_paragraph(f"{step_num}. {step}")
+            doc.add_heading("Expected Result", level=2)
+            doc.add_paragraph(tc.get('expected_result', 'Not specified.'))
+            doc.add_heading("Status", level=2)
+            doc.add_paragraph("☐ Pass    ☐ Fail    ☐ Blocked")
 
-## Test Summary
-
-- **Total Test Cases:** {len(test_cases)}
-- **Critical:** {sum(1 for tc in test_cases if tc.get('priority') == 'Critical')}
-- **High:** {sum(1 for tc in test_cases if tc.get('priority') == 'High')}
-- **Medium:** {sum(1 for tc in test_cases if tc.get('priority') == 'Medium')}
-- **Low:** {sum(1 for tc in test_cases if tc.get('priority') == 'Low')}
-
----
-
-## Test Cases
-
-"""
-        
-        # Group test cases by scenario or module
-        for idx, test_case in enumerate(test_cases, 1):
-            doc_content += f"""
-### Test Case {idx}: {test_case.get('scenario', 'Test Scenario')}
-
-**Test Case ID:** {test_case.get('id', f'TC-{idx:03d}')}  
-**Priority:** {test_case.get('priority', 'Medium')}  
-**Test Type:** {test_case.get('type', 'Functional')}
-
-#### Objective
-{test_case.get('objective', 'Test objective description')}
-
-#### Preconditions
-{self._format_list(test_case.get('preconditions', ['None']))}
-
-#### Test Steps
-
-"""
-            steps = test_case.get('steps', [])
-            for step_num, step in enumerate(steps, 1):
-                doc_content += f"{step_num}. {step}\n"
-            
-            doc_content += f"""
-
-#### Test Data
-{self._format_dict(test_case.get('test_data', {}))}
-
-#### Expected Results
-{test_case.get('expected_result', 'Expected result description')}
-
-#### Actual Results
-_To be filled during testing_
-
-#### Status
-- [ ] Pass
-- [ ] Fail
-- [ ] Blocked
-
-#### Comments
-_________________________________
-
----
-
-"""
-        
-        doc_content += """
-## Test Execution Summary
-
-| Test Case ID | Scenario | Priority | Status | Tester | Date | Comments |
-|--------------|----------|----------|--------|--------|------|----------|
-"""
-        for test_case in test_cases:
-            doc_content += f"| {test_case.get('id', 'TC-XXX')} | {test_case.get('scenario', '')} | {test_case.get('priority', 'Medium')} | | | | |\n"
-        
-        # Save document
-        filename = f"test_cases_{test_type}_{project_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.md"
-        filepath = self.output_dir / filename
-        
-        with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(doc_content)
-        
-        self.logger.log_tool_usage(
-            "generate_test_case_document",
-            {'project': project_name, 'test_type': test_type},
-            f"Document saved to {filepath}"
+        doc.add_heading("Test Execution Summary", level=1)
+        self._add_data_table(
+            doc, ["Test Case ID", "Scenario", "Priority", "Status", "Tester", "Date"],
+            [[tc.get('id', 'TC-XXX'), tc.get('scenario', ''), tc.get('priority', 'Medium'), "", "", ""]
+             for tc in test_cases]
         )
-        
-        return str(filepath)
-    
+
+        filepath = self._save(doc, f"test_cases_{test_type}", project_name)
+        self.logger.log_tool_usage("generate_test_case_document", {'project': project_name, 'test_type': test_type},
+                                    f"Document saved to {filepath}")
+        return filepath
+
+    # ------------------------------------------------------------------
+    # User manual
+    # ------------------------------------------------------------------
+
     def generate_user_manual(
         self,
         process_name: str,
@@ -385,346 +313,103 @@ _________________________________
         process_steps: List[Dict[str, Any]],
         screenshots: Optional[List[str]] = None
     ) -> str:
-        """Generate a user manual"""
-        
-        doc_content = f"""# User Manual: {process_name}
+        doc = self._new_document(f"User Manual: {process_name}", module)
 
-## Overview
+        self._add_info_table(doc, [
+            ("Module", module),
+            ("Process", process_name),
+            ("Date", datetime.now().strftime('%Y-%m-%d')),
+        ])
 
-**Module:** {module}  
-**Process:** {process_name}  
-**Date:** {datetime.now().strftime('%Y-%m-%d')}  
-**Version:** 1.0
+        doc.add_heading("Purpose", level=1)
+        doc.add_paragraph(f"This manual provides step-by-step instructions for executing the "
+                           f"{process_name} process in the ERP system.")
 
----
+        doc.add_heading("Prerequisites", level=1)
+        self._add_bullet_list(doc, [f"Access to {module} module", "Required authorizations",
+                                     "Basic understanding of ERP navigation"])
 
-## Purpose
-
-This manual provides step-by-step instructions for executing the {process_name} process in the ERP system.
-
----
-
-## Prerequisites
-
-- Access to {module} module
-- Required authorizations
-- Basic understanding of ERP navigation
-
----
-
-## Process Steps
-
-"""
-        
+        doc.add_heading("Process Steps", level=1)
         for idx, step in enumerate(process_steps, 1):
-            doc_content += f"""
-### Step {idx}: {step.get('title', 'Process Step')}
-
-**Transaction Code:** {step.get('transaction', 'N/A')}
-
-#### Instructions
-
-{step.get('instructions', 'Step instructions')}
-
-#### Key Fields
-
-"""
+            doc.add_heading(f"Step {idx}: {step.get('title', 'Process Step')}", level=2)
+            doc.add_paragraph(f"Transaction Code: {step.get('transaction', 'N/A')}").runs[0].italic = True
+            doc.add_paragraph(step.get('instructions', 'Not specified.'))
             fields = step.get('fields', [])
             if fields:
-                doc_content += "| Field | Description | Required | Example |\n"
-                doc_content += "|-------|-------------|----------|----------|\n"
-                for field in fields:
-                    doc_content += f"| {field.get('name', '')} | {field.get('description', '')} | {field.get('required', 'No')} | {field.get('example', '')} |\n"
-            
-            doc_content += f"""
+                doc.add_heading("Key Fields", level=3)
+                self._add_data_table(doc, ["Field", "Description", "Required", "Example"], [
+                    [f.get('name', ''), f.get('description', ''), f.get('required', 'No'), f.get('example', '')]
+                    for f in fields
+                ])
+            tips = step.get('tips')
+            if tips:
+                doc.add_heading("Tips", level=3)
+                self._add_bullet_list(doc, tips)
 
-#### Tips and Best Practices
+        filepath = self._save(doc, "user_manual", process_name)
+        self.logger.log_tool_usage("generate_user_manual", {'process': process_name, 'module': module},
+                                    f"Document saved to {filepath}")
+        return filepath
 
-{self._format_list(step.get('tips', ['Follow standard operating procedures']))}
+    # ------------------------------------------------------------------
+    # Solution design
+    # ------------------------------------------------------------------
 
----
-
-"""
-        
-        doc_content += """
-## Troubleshooting
-
-### Common Issues
-
-| Issue | Cause | Solution |
-|-------|-------|----------|
-| | | |
-
----
-
-## FAQs
-
-**Q: Question here?**  
-A: Answer here.
-
----
-
-## Support Contacts
-
-For assistance, please contact:
-- **Helpdesk:** [Contact Info]
-- **Module Expert:** [Contact Info]
-
----
-
-## Glossary
-
-| Term | Definition |
-|------|------------|
-| | |
-
-"""
-        
-        # Save document
-        filename = f"user_manual_{process_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.md"
-        filepath = self.output_dir / filename
-        
-        with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(doc_content)
-        
-        self.logger.log_tool_usage(
-            "generate_user_manual",
-            {'process': process_name, 'module': module},
-            f"Document saved to {filepath}"
-        )
-        
-        return str(filepath)
-    
     def generate_solution_design(
         self,
         project_name: str,
         module: str,
         design: Dict[str, Any]
     ) -> str:
-        """Generate a solution design document"""
-        
-        doc_content = f"""# Solution Design Document
+        doc = self._new_document("Solution Design Document", project_name)
 
-## Project Information
-- **Project Name:** {project_name}
-- **Module:** {module}
-- **Date:** {datetime.now().strftime('%Y-%m-%d')}
-- **Version:** 1.0
-- **Author:** ERP Consultant AI Agent
+        self._add_info_table(doc, [
+            ("Project Name", project_name),
+            ("Module", module),
+            ("Date", datetime.now().strftime('%Y-%m-%d')),
+            ("Author", "ERP Consultant AI"),
+        ])
 
----
+        doc.add_heading("Executive Summary", level=1)
+        doc.add_paragraph(design.get('executive_summary') or "Not specified.")
 
-## Executive Summary
+        doc.add_heading("Solution Architecture", level=1)
+        doc.add_paragraph(design.get('architecture_overview') or "Not specified.")
 
-{design.get('executive_summary', 'Solution design summary')}
+        doc.add_heading("Module Configuration", level=1)
+        for config in design.get('configurations', []):
+            doc.add_heading(config.get('component', 'Component'), level=2)
+            doc.add_paragraph(config.get('description', ''))
+            self._add_bullet_list(doc, config.get('steps', []))
 
----
+        doc.add_heading("Integration Design", level=1)
+        for integ in design.get('integrations', []):
+            doc.add_heading(integ.get('name', 'Integration'), level=2)
+            self._add_info_table(doc, [
+                ("Type", integ.get('type', 'Real-time')),
+                ("Source", integ.get('source', '')),
+                ("Target", integ.get('target', '')),
+            ])
+            doc.add_paragraph(integ.get('description', ''))
 
-## Solution Architecture
-
-### Overview
-
-{design.get('architecture_overview', 'Architecture description')}
-
-### Component Diagram
-
-```
-[Diagram placeholder - To be created]
-```
-
----
-
-## Module Configuration
-
-"""
-        
-        configurations = design.get('configurations', [])
-        for config in configurations:
-            doc_content += f"### {config.get('component', 'Component')}\n\n"
-            doc_content += f"{config.get('description', '')}\n\n"
-            doc_content += "**Configuration Steps:**\n"
-            doc_content += self._format_list(config.get('steps', []))
-            doc_content += "\n"
-        
-        doc_content += """
----
-
-## Master Data Design
-
-"""
-        master_data = design.get('master_data', {})
-        for data_type, details in master_data.items():
-            doc_content += f"### {data_type}\n\n"
-            doc_content += f"{details}\n\n"
-        
-        doc_content += """
----
-
-## Integration Design
-
-"""
-        integrations = design.get('integrations', [])
-        for integration in integrations:
-            doc_content += f"### {integration.get('name', 'Integration')}\n\n"
-            doc_content += f"**Type:** {integration.get('type', 'Real-time')}\n"
-            doc_content += f"**Source:** {integration.get('source', '')}\n"
-            doc_content += f"**Target:** {integration.get('target', '')}\n"
-            doc_content += f"**Description:** {integration.get('description', '')}\n\n"
-        
-        doc_content += """
----
-
-## Security and Authorization
-
-"""
-        security = design.get('security', {})
-        doc_content += f"{security.get('overview', 'Security design overview')}\n\n"
-        
-        doc_content += """
----
-
-## Customizations
-
-"""
+        doc.add_heading("Customizations", level=1)
         customizations = design.get('customizations', [])
         if customizations:
-            doc_content += "| Type | Component | Description | Justification |\n"
-            doc_content += "|------|-----------|-------------|---------------|\n"
-            for custom in customizations:
-                doc_content += f"| {custom.get('type', '')} | {custom.get('component', '')} | {custom.get('description', '')} | {custom.get('justification', '')} |\n"
+            self._add_data_table(doc, ["Type", "Component", "Description", "Justification"], [
+                [c.get('type', ''), c.get('component', ''), c.get('description', ''), c.get('justification', '')]
+                for c in customizations
+            ])
         else:
-            doc_content += "No customizations required. Solution uses standard ERP functionality.\n"
-        
-        doc_content += """
----
+            doc.add_paragraph("No customizations required. Solution uses standard ERP functionality.")
 
-## Migration Strategy
+        doc.add_heading("Migration Strategy", level=1)
+        doc.add_paragraph(design.get('migration', {}).get('strategy') or "Not specified.")
 
-"""
-        migration = design.get('migration', {})
-        doc_content += f"{migration.get('strategy', 'Migration strategy description')}\n\n"
-        
-        doc_content += """
----
-
-## Technical Specifications
-
-"""
-        tech_specs = design.get('technical_specs', {})
-        for spec_name, spec_value in tech_specs.items():
-            doc_content += f"**{spec_name}:** {spec_value}\n"
-        
-        # Save document
-        filename = f"solution_design_{project_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.md"
-        filepath = self.output_dir / filename
-        
-        with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(doc_content)
-        
-        self.logger.log_tool_usage(
-            "generate_solution_design",
-            {'project': project_name, 'module': module},
-            f"Document saved to {filepath}"
-        )
-        
-        return str(filepath)
-    
-    def _format_list(self, items: List[str]) -> str:
-        """Format a list of items as markdown"""
-        if not items:
-            return "- None\n"
-        return "\n".join(f"- {item}" for item in items) + "\n"
-    
-    def _format_requirements_list(self, requirements: List[Dict]) -> str:
-        """Format requirements list"""
-        if not requirements:
-            return "- No requirements specified\n"
-        
-        result = ""
-        for req in requirements:
-            result += f"**{req.get('id', 'REQ-XXX')}:** {req.get('description', '')}\n"
-            result += f"- Priority: {req.get('priority', 'Medium')}\n\n"
-        return result
-    
-    def _format_dict(self, data: Dict) -> str:
-        """Format dictionary as markdown"""
-        if not data:
-            return "- No data specified\n"
-        
-        result = ""
-        for key, value in data.items():
-            result += f"- **{key}:** {value}\n"
-        return result
+        filepath = self._save(doc, "solution_design", project_name)
+        self.logger.log_tool_usage("generate_solution_design", {'project': project_name, 'module': module},
+                                    f"Document saved to {filepath}")
+        return filepath
 
 
 # Global document generator instance
 doc_generator = DocumentGenerator()
-
-# -------------------------------------------------------------------
-# DocumentGeneratorTool (ADD THIS AT THE VERY BOTTOM OF THE FILE)
-# -------------------------------------------------------------------
-
-from typing import Any
-try:
-    from langchain.tools import BaseTool  # type: ignore
-except Exception:
-    # Provide a minimal BaseTool fallback for dev mode when langchain is missing
-    class BaseTool:
-        """Minimal fallback for langchain.tools.BaseTool used for local development.
-
-        This keeps the DocumentGeneratorTool class importable for the POC without adding
-        a hard dependency on langchain.
-        """
-        name: str = "base_tool"
-        description: str = "fallback BaseTool for development"
-
-        def _run(self, *args, **kwargs):  # pragma: no cover - dev fallback
-            raise NotImplementedError("BaseTool._run not implemented in fallback")
-
-        async def _arun(self, *args, **kwargs):  # pragma: no cover - dev fallback
-            raise NotImplementedError("BaseTool._arun not implemented in fallback")
-
-class DocumentGeneratorTool(BaseTool):
-    name: str = "document_generator"
-    description: str = "Generate ERP documentation: requirements docs, test cases, manuals, solution designs."
-
-    def _run(
-        self,
-        action: str,
-        project_name: str,
-        module: str,
-        payload: Dict[str, Any],
-    ) -> str:
-        """
-        Runs the document generator.
-        action: one of ["requirements", "test_cases", "user_manual", "solution_design"]
-        """
-        if action == "requirements":
-            return doc_generator.generate_requirements_document(
-                project_name, module, payload
-            )
-
-        elif action == "test_cases":
-            return doc_generator.generate_test_case_document(
-                project_name, module, payload.get("test_cases", []),
-                payload.get("test_type", "QA"),
-            )
-
-        elif action == "user_manual":
-            return doc_generator.generate_user_manual(
-                payload.get("process_name", ""),
-                module,
-                payload.get("steps", []),
-            )
-
-        elif action == "solution_design":
-            return doc_generator.generate_solution_design(
-                project_name, module, payload
-            )
-
-        else:
-            return f"Unknown action: {action}"
-
-    async def _arun(self, *args, **kwargs):
-        raise NotImplementedError("Async version not implemented.")
-
