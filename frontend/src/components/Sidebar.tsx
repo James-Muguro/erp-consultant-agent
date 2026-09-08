@@ -26,11 +26,18 @@ export function Sidebar({
   showArchived: boolean;
   onToggleArchived: () => void;
 }) {
-  const { user, logout } = useAuth();
+  const { user, logout, updateAccountSettings, changePassword, deleteAccount } = useAuth();
   const [query, setQuery] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingValue, setEditingValue] = useState("");
   const [profileOpen, setProfileOpen] = useState(false);
+  const [editingProfile, setEditingProfile] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [profileName, setProfileName] = useState(user?.name ?? "");
+  const [profilePictureUrl, setProfilePictureUrl] = useState(user?.profile_picture_url ?? "");
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [profileError, setProfileError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   const filtered = useMemo(() => {
@@ -63,6 +70,45 @@ export function Sidebar({
     } else if (e.key === "Escape") {
       e.preventDefault();
       setEditingId(null);
+    }
+  }
+
+  const displayName = user?.name || "Your profile";
+  const initials = (user?.name || "??")
+    .trim()
+    .split(/\s+/)
+    .map((part) => part[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+
+  async function saveProfile() {
+    setProfileError(null);
+    try {
+      await updateAccountSettings(profileName, profilePictureUrl);
+      setEditingProfile(false);
+    } catch (error) {
+      setProfileError(error instanceof Error ? error.message : "Could not update profile.");
+    }
+  }
+
+  async function savePassword() {
+    setProfileError(null);
+    try {
+      await changePassword(currentPassword, newPassword);
+      setCurrentPassword("");
+      setNewPassword("");
+    } catch (error) {
+      setProfileError(error instanceof Error ? error.message : "Could not change password.");
+    }
+  }
+
+  async function removeAccount() {
+    if (!window.confirm("Delete your account and all of its chats? This cannot be undone.")) return;
+    try {
+      await deleteAccount();
+    } catch (error) {
+      setProfileError(error instanceof Error ? error.message : "Could not delete account.");
     }
   }
 
@@ -185,9 +231,22 @@ export function Sidebar({
 
       <div className="relative border-t border-border p-3">
         {profileOpen && (
-          <div className="absolute bottom-full left-3 right-3 mb-2 rounded-md border border-border bg-surface p-3 shadow-lg">
-            <p className="truncate text-sm font-medium text-ink">{user?.email}</p>
+          <div className="absolute bottom-full left-3 right-3 mb-2 max-h-[70vh] overflow-y-auto rounded-md border border-border bg-surface p-3 shadow-lg">
+            <div className="flex items-center gap-2">
+              {user?.profile_picture_url ? (
+                <img src={user.profile_picture_url} alt="" className="h-9 w-9 rounded-full object-cover" />
+              ) : (
+                <span className="flex h-9 w-9 items-center justify-center rounded-full bg-accent-soft text-xs font-semibold text-accent-strong">
+                  {initials}
+                </span>
+              )}
+              <p className="truncate text-sm font-medium text-ink">{displayName}</p>
+            </div>
             <dl className="mt-2 space-y-1 text-xs text-ink-muted">
+              <div className="flex justify-between gap-3">
+                <dt>Email</dt>
+                <dd className="truncate">{user?.email}</dd>
+              </div>
               <div className="flex justify-between gap-3">
                 <dt>Member since</dt>
                 <dd>{user?.created_at ? new Date(user.created_at).toLocaleDateString() : "-"}</dd>
@@ -197,6 +256,67 @@ export function Sidebar({
                 <dd className="max-w-[9rem] truncate" title={user?.id}>{user?.id}</dd>
               </div>
             </dl>
+            {profileError && <p className="mt-2 text-xs text-danger">{profileError}</p>}
+            {!editingProfile && !settingsOpen && (
+              <div className="mt-3 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingProfile(true)}
+                  className="flex-1 rounded-sm border border-border px-2 py-1.5 text-xs text-ink-muted hover:border-accent hover:text-accent"
+                >
+                  Edit profile
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSettingsOpen(true)}
+                  className="flex-1 rounded-sm border border-border px-2 py-1.5 text-xs text-ink-muted hover:border-accent hover:text-accent"
+                >
+                  Account settings
+                </button>
+              </div>
+            )}
+            {editingProfile && (
+              <div className="mt-3 space-y-2">
+                <input
+                  value={profileName}
+                  onChange={(e) => setProfileName(e.target.value)}
+                  placeholder="Name"
+                  className="w-full rounded-sm border border-border bg-paper px-2 py-1.5 text-xs text-ink outline-none focus:border-accent"
+                />
+                <input
+                  value={profilePictureUrl}
+                  onChange={(e) => setProfilePictureUrl(e.target.value)}
+                  placeholder="Profile picture URL"
+                  className="w-full rounded-sm border border-border bg-paper px-2 py-1.5 text-xs text-ink outline-none focus:border-accent"
+                />
+                <div className="flex gap-2">
+                  <button type="button" onClick={saveProfile} className="flex-1 rounded-sm bg-accent px-2 py-1.5 text-xs text-white hover:bg-accent-strong">Save</button>
+                  <button type="button" onClick={() => setEditingProfile(false)} className="flex-1 rounded-sm border border-border px-2 py-1.5 text-xs text-ink-muted">Cancel</button>
+                </div>
+              </div>
+            )}
+            {settingsOpen && (
+              <div className="mt-3 space-y-2">
+                <p className="text-xs font-medium text-ink">Account settings</p>
+                <input
+                  type="password"
+                  value={currentPassword}
+                  onChange={(e) => setCurrentPassword(e.target.value)}
+                  placeholder="Current password"
+                  className="w-full rounded-sm border border-border bg-paper px-2 py-1.5 text-xs text-ink outline-none focus:border-accent"
+                />
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder="New password"
+                  className="w-full rounded-sm border border-border bg-paper px-2 py-1.5 text-xs text-ink outline-none focus:border-accent"
+                />
+                <button type="button" onClick={savePassword} className="w-full rounded-sm border border-border px-2 py-1.5 text-xs text-ink-muted hover:border-accent hover:text-accent">Change password</button>
+                <button type="button" onClick={removeAccount} className="w-full rounded-sm border border-danger px-2 py-1.5 text-xs text-danger hover:bg-danger-soft">Delete account</button>
+                <button type="button" onClick={() => setSettingsOpen(false)} className="w-full px-2 py-1 text-xs text-ink-faint">Back</button>
+              </div>
+            )}
             <button
               onClick={logout}
               className="mt-3 flex w-full items-center gap-2 rounded-sm border border-border px-2 py-1.5 text-left text-xs text-ink-muted hover:border-danger hover:text-danger"
@@ -211,7 +331,14 @@ export function Sidebar({
           title="Profile"
           className="flex w-full items-center justify-between gap-2 rounded-md p-1 text-left hover:bg-paper"
         >
-          <span className="truncate text-xs text-ink-muted">{user?.email}</span>
+          <span className="flex min-w-0 items-center gap-2">
+            {user?.profile_picture_url ? (
+              <img src={user.profile_picture_url} alt="" className="h-7 w-7 shrink-0 rounded-full object-cover" />
+            ) : (
+              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent-soft text-[10px] font-semibold text-accent-strong">{initials}</span>
+            )}
+            <span className="truncate text-xs text-ink-muted">{displayName}</span>
+          </span>
           <ChevronDown size={15} className={`shrink-0 text-ink-faint transition-transform ${profileOpen ? "rotate-180" : ""}`} />
         </button>
       </div>

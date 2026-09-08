@@ -33,11 +33,14 @@ from src.utils.logger import get_logger
 from src.utils.prompts import get_synthesis_prompt
 from src.models.chat_intent_schema import ChatIntent, ChatIntentDecision
 from src.auth.dependencies import get_current_user, get_db
-from src.auth.schemas import SignupRequest, LoginRequest, TokenResponse, UserOut
+from src.auth.schemas import (
+    SignupRequest, LoginRequest, TokenResponse, UserOut,
+    ProfileUpdateRequest, PasswordChangeRequest,
+)
 from src.auth.security import create_access_token
 from src.auth import service as auth_service
 from src.db.base import engine as db_engine
-from src.db.models import User, Feedback
+from src.db.models import User, Feedback, SessionRecord
 
 from contextlib import asynccontextmanager
 
@@ -314,6 +317,40 @@ def login(request: Request, req: LoginRequest, db: Session = Depends(get_db)):
 @app.get("/api/auth/me", response_model=UserOut)
 def me(current_user: User = Depends(get_current_user)):
     return current_user
+
+
+@app.get("/api/auth/settings", response_model=UserOut)
+def account_settings(current_user: User = Depends(get_current_user)):
+    return current_user
+
+
+@app.patch("/api/auth/settings", response_model=UserOut)
+def update_account_settings(req: ProfileUpdateRequest,
+                            current_user: User = Depends(get_current_user),
+                            db: Session = Depends(get_db)):
+    return auth_service.update_profile(db, current_user, req.name, req.profile_picture_url)
+
+
+@app.post("/api/auth/password")
+def change_account_password(req: PasswordChangeRequest,
+                            current_user: User = Depends(get_current_user),
+                            db: Session = Depends(get_db)):
+    if not auth_service.change_password(db, current_user, req.current_password, req.new_password):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    return {"success": True}
+
+
+@app.delete("/api/auth/account")
+def delete_account(current_user: User = Depends(get_current_user),
+                   db: Session = Depends(get_db)):
+    owned_session_ids = agent_memory.session_service.list_sessions_for_user(current_user.id, include_archived=True)
+    db.query(Feedback).filter(Feedback.user_id == current_user.id).delete(synchronize_session=False)
+    db.query(SessionRecord).filter(SessionRecord.user_id == current_user.id).delete(synchronize_session=False)
+    db.delete(current_user)
+    db.commit()
+    for session_id in owned_session_ids:
+        agent_memory.session_service.sessions.pop(session_id, None)
+    return {"deleted": True}
 
 
 # ---------------------------------------------------------------------------

@@ -45,3 +45,19 @@ def authenticate_user(db: Session, email: str, password: str) -> Optional[User]:
     if not user or not verify_password(password, user.hashed_password):
         return None
     return user
+
+
+def update_profile(db: Session, user: User, name: Optional[str], profile_picture_url: Optional[str]) -> User:
+    user.name = name.strip() if name else None
+    user.profile_picture_url = profile_picture_url.strip() if profile_picture_url else None
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def change_password(db: Session, user: User, current_password: str, new_password: str) -> bool:
+    if not verify_password(current_password, user.hashed_password):
+        return False
+    user.hashed_password = hash_password(new_password)
+    db.commit()
+    return True

@@ -85,6 +85,24 @@ export const api = {
     return request<User>("/api/auth/me");
   },
 
+  async updateAccountSettings(name: string, profile_picture_url: string) {
+    return request<User>("/api/auth/settings", {
+      method: "PATCH",
+      body: JSON.stringify({ name: name || null, profile_picture_url: profile_picture_url || null }),
+    });
+  },
+
+  async changePassword(current_password: string, new_password: string) {
+    return request<{ success: boolean }>("/api/auth/password", {
+      method: "POST",
+      body: JSON.stringify({ current_password, new_password }),
+    });
+  },
+
+  async deleteAccount() {
+    return request<{ deleted: boolean }>("/api/auth/account", { method: "DELETE" });
+  },
+
   async listProjects(includeArchived = false) {
     return request<{ projects: ProjectSummary[] }>(
       `/api/projects?include_archived=${includeArchived}`,

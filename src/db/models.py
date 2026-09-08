@@ -63,6 +63,8 @@ class User(Base):
 
     id = Column(String, primary_key=True)
     email = Column(String, unique=True, nullable=False, index=True)
+    name = Column(String, nullable=True)
+    profile_picture_url = Column(Text, nullable=True)
     hashed_password = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False,
                          default=lambda: datetime.now(timezone.utc))

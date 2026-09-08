@@ -22,4 +22,16 @@ class TokenResponse(BaseModel):
 class UserOut(BaseModel):
     id: str
     email: str
+    name: str | None = None
+    profile_picture_url: str | None = None
     created_at: datetime
+
+
+class ProfileUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, max_length=120)
+    profile_picture_url: str | None = Field(default=None, max_length=2048)
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8, max_length=128)
