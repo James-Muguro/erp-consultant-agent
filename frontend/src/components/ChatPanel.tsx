@@ -25,10 +25,19 @@ export function ChatPanel({
 }) {
   const [draft, setDraft] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, activity]);
+
+  useEffect(() => {
+    const input = inputRef.current;
+    if (!input) return;
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, 160)}px`;
+    input.style.overflowY = input.scrollHeight > 160 ? "auto" : "hidden";
+  }, [draft]);
 
   function submit(e?: FormEvent) {
     e?.preventDefault();
@@ -76,12 +85,13 @@ export function ChatPanel({
           )}
           <form onSubmit={submit} className="flex items-end gap-2">
             <textarea
+              ref={inputRef}
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="Ask a question, or describe what you need next…"
               rows={1}
-              className="max-h-40 flex-1 resize-none rounded-md border border-border bg-paper px-3 py-2.5 text-sm text-ink outline-none focus:border-accent"
+              className="max-h-40 flex-1 resize-none overflow-y-hidden rounded-md border border-border bg-paper px-3 py-2.5 text-sm text-ink outline-none focus:border-accent"
             />
             {sending ? (
               <button
