@@ -9,7 +9,7 @@ through the same engine/session interface.
 """
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from src.config.settings import settings
@@ -32,7 +32,16 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, futu
 
 
 def init_db() -> None:
-    """Create all tables that don't already exist. Safe to call on every
-    startup - idempotent, and never drops or alters existing tables."""
+    """Create missing tables and apply additive SQLite compatibility fixes.
+    Safe to call on every startup; it never drops existing data."""
     from src.db import models  # noqa: F401  (registers models on Base.metadata)
     Base.metadata.create_all(bind=engine)
+    if engine.dialect.name == "sqlite":
+        # create_all() does not add columns to an existing SQLite database.
+        # Keep local/test databases compatible with the profile migration.
+        columns = {column["name"] for column in inspect(engine).get_columns("users")}
+        with engine.begin() as connection:
+            if "name" not in columns:
+                connection.execute(text("ALTER TABLE users ADD COLUMN name VARCHAR"))
+            if "profile_picture_url" not in columns:
+                connection.execute(text("ALTER TABLE users ADD COLUMN profile_picture_url TEXT"))
