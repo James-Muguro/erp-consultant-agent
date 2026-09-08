@@ -224,10 +224,8 @@ def _next_action_for(session) -> Optional[Dict[str, Any]]:
             return {'label': 'Start requirements intake', 'agent_hint': 'start_intake'}
         return {'label': "I have my stakeholder answers - structure them", 'agent_hint': 'structure_requirements'}
 
-    if session.current_phase in PHASE_ORDER[:-1]:
-        next_phase = PHASE_ORDER[PHASE_ORDER.index(session.current_phase) + 1]
-        if next_phase != 'completed':
-            return {'label': PHASE_LABELS.get(next_phase, f"Run {next_phase.replace('_', ' ')}"), 'agent_hint': next_phase}
+    if session.current_phase in PHASE_LABELS:
+        return {'label': PHASE_LABELS[session.current_phase], 'agent_hint': session.current_phase}
 
     return None
 
