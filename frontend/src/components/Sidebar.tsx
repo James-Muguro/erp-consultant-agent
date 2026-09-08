@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { Archive, LogOut, MessageSquarePlus, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { Archive, ChevronDown, LogOut, MessageSquarePlus, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import type { ProjectSummary } from "../types";
 import { useAuth } from "../context/AuthContext";
 
@@ -30,6 +30,7 @@ export function Sidebar({
   const [query, setQuery] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingValue, setEditingValue] = useState("");
+  const [profileOpen, setProfileOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   const filtered = useMemo(() => {
@@ -182,14 +183,36 @@ export function Sidebar({
         </ul>
       </nav>
 
-      <div className="flex items-center justify-between border-t border-border p-3">
-        <span className="truncate text-xs text-ink-muted">{user?.email}</span>
+      <div className="relative border-t border-border p-3">
+        {profileOpen && (
+          <div className="absolute bottom-full left-3 right-3 mb-2 rounded-md border border-border bg-surface p-3 shadow-lg">
+            <p className="truncate text-sm font-medium text-ink">{user?.email}</p>
+            <dl className="mt-2 space-y-1 text-xs text-ink-muted">
+              <div className="flex justify-between gap-3">
+                <dt>Member since</dt>
+                <dd>{user?.created_at ? new Date(user.created_at).toLocaleDateString() : "-"}</dd>
+              </div>
+              <div className="flex justify-between gap-3">
+                <dt>ID</dt>
+                <dd className="max-w-[9rem] truncate" title={user?.id}>{user?.id}</dd>
+              </div>
+            </dl>
+            <button
+              onClick={logout}
+              className="mt-3 flex w-full items-center gap-2 rounded-sm border border-border px-2 py-1.5 text-left text-xs text-ink-muted hover:border-danger hover:text-danger"
+            >
+              <LogOut size={14} />
+              Log out
+            </button>
+          </div>
+        )}
         <button
-          onClick={logout}
-          title="Log out"
-          className="rounded-sm p-1.5 text-ink-faint hover:bg-paper hover:text-ink"
+          onClick={() => setProfileOpen((open) => !open)}
+          title="Profile"
+          className="flex w-full items-center justify-between gap-2 rounded-md p-1 text-left hover:bg-paper"
         >
-          <LogOut size={15} />
+          <span className="truncate text-xs text-ink-muted">{user?.email}</span>
+          <ChevronDown size={15} className={`shrink-0 text-ink-faint transition-transform ${profileOpen ? "rotate-180" : ""}`} />
         </button>
       </div>
     </aside>
