@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { api } from "../api/client";
-import type { ChatMessage, ChatStreamEvent, DocumentRef } from "../types";
+import type { ChatMessage, ChatStreamEvent, DocumentRef, NextAction } from "../types";
 
 export interface AgentActivityStep {
   key: string;
@@ -32,7 +32,7 @@ export function useChat(sessionId: string | null, onSessionCreated: (id: string)
   }, []);
 
   const send = useCallback(
-    async (text: string) => {
+    async (text: string, agentHint?: string) => {
       const trimmed = text.trim();
       if (!trimmed || sending) return;
 
@@ -109,10 +109,11 @@ export function useChat(sessionId: string | null, onSessionCreated: (id: string)
           case "message_complete": {
             const newSessionId = event.data.session_id as string | null | undefined;
             if (newSessionId && !sessionId) onSessionCreated(newSessionId);
+            const nextAction = (event.data.next_action ?? null) as NextAction | null;
             setMessages((prev) =>
               prev.map((m) =>
                 m.id === assistantId
-                  ? { ...m, isStreaming: false, documents: documents.length ? documents : undefined }
+                  ? { ...m, isStreaming: false, documents: documents.length ? documents : undefined, nextAction }
                   : m,
               ),
             );
@@ -137,7 +138,7 @@ export function useChat(sessionId: string | null, onSessionCreated: (id: string)
       };
 
       try {
-        await api.streamChat(trimmed, sessionId, handleEvent, controller.signal);
+        await api.streamChat(trimmed, sessionId, handleEvent, controller.signal, agentHint);
       } catch (err) {
         if (!(err instanceof DOMException && err.name === "AbortError")) {
           const message = err instanceof Error ? err.message : "Connection lost.";
