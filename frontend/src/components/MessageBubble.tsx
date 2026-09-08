@@ -8,9 +8,11 @@ import { api } from "../api/client";
 export function MessageBubble({
   message,
   sessionId,
+  onAction,
 }: {
   message: ChatMessage;
   sessionId: string | null;
+  onAction: (agentHint: string, label: string) => void;
 }) {
   const isUser = message.role === "user";
 
@@ -47,6 +49,16 @@ export function MessageBubble({
                 {doc.label}
               </button>
             ))}
+          </div>
+        )}
+        {message.nextAction && !message.isStreaming && (
+          <div className="mt-2 border-t border-border pt-2">
+            <button
+              onClick={() => onAction(message.nextAction!.agent_hint, message.nextAction!.label)}
+              className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-accent-strong"
+            >
+              {message.nextAction.label}
+            </button>
           </div>
         )}
       </div>
