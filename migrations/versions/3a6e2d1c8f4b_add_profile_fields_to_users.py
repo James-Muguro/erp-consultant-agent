@@ -1,7 +1,7 @@
 """add profile fields to users
 
 Revision ID: 3a6e2d1c8f4b
-Revises: 970b49d6d4d9
+Revises: c0e480de24c2
 Create Date: 2026-09-08 00:00:00.000000
 
 """
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 revision: str = '3a6e2d1c8f4b'
-down_revision: Union[str, Sequence[str], None] = '970b49d6d4d9'
+down_revision: Union[str, Sequence[str], None] = 'c0e480de24c2'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
