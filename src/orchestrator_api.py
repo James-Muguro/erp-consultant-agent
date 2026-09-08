@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 from pathlib import Path
 import os
 import uvicorn
@@ -186,6 +186,89 @@ def _derive_chat_title(message: str) -> str:
         title = title[:57].rstrip() + "..."
     return title[0].upper() + title[1:]
 
+INTAKE_QUESTIONS = [
+    {"key": "industry", "text": "What industry is the client in?"},
+    {"key": "company_size", "text": "Roughly how large is the organization (employee count or revenue range)?"},
+    {"key": "primary_goal", "text": "What's the primary business problem or goal driving this ERP initiative?"},
+    {"key": "scope_areas", "text": "Which business areas are in scope for this phase (e.g. Finance, Supply Chain, HR)?"},
+]
+
+PHASE_ORDER = ['requirements_gathering', 'process_mapping', 'solution_design', 'qa_testing', 'uat_testing', 'training', 'completed']
+
+PHASE_LABELS = {
+    'process_mapping': 'Map the business process',
+    'solution_design': 'Design the ERP solution',
+    'qa_testing': 'Generate QA test cases',
+    'uat_testing': 'Prepare UAT scenarios',
+    'training': 'Create training material',
+}
+
+def _next_action_for(session) -> Optional[Dict[str, Any]]:
+    """Deterministic suggestion for the next guided action in a structured
+    project - drives the frontend's action buttons instead of relying on
+    free-text intent classification, which proved unreliable for
+    triggering phases. Returns None for casual chats (no guided workflow)
+    and while mid-intake (the next question IS the response; no button
+    needed until intake finishes)."""
+    if session.is_casual:
+        return None
+
+    intake_state = (session.metadata or {}).get('intake')
+    has_requirements = bool(agent_memory.get_phase_output(session.session_id, 'requirements_gathering'))
+    has_template = bool((session.metadata or {}).get('requirements_template_path'))
+
+    if session.current_phase == 'requirements_gathering' and not has_requirements:
+        if intake_state and intake_state.get('active'):
+            return None
+        if not has_template:
+            return {'label': 'Start requirements intake', 'agent_hint': 'start_intake'}
+        return {'label': "I have my stakeholder answers - structure them", 'agent_hint': 'structure_requirements'}
+
+    if session.current_phase in PHASE_ORDER[:-1]:
+        next_phase = PHASE_ORDER[PHASE_ORDER.index(session.current_phase) + 1]
+        if next_phase != 'completed':
+            return {'label': PHASE_LABELS.get(next_phase, f"Run {next_phase.replace('_', ' ')}"), 'agent_hint': next_phase}
+
+    return None
+
+def _handle_intake_message(session, req: ChatRequest) -> Dict[str, Any]:
+    """Advances the conversational intake state machine by one step.
+    Session.metadata is the source of truth (no schema change needed -
+    it's already a JSON blob). Returns a dict shaped like an agent phase
+    result so callers can treat it the same way as a real phase result."""
+    intake = session.metadata.setdefault('intake', {'active': True, 'question_index': 0, 'answers': {}})
+    idx = intake['question_index']
+
+    if idx > 0:
+        prev_key = INTAKE_QUESTIONS[idx - 1]['key']
+        intake['answers'][prev_key] = req.message
+
+    if idx < len(INTAKE_QUESTIONS):
+        question = INTAKE_QUESTIONS[idx]['text']
+        intake['question_index'] = idx + 1
+        agent_memory.session_service.update_session(session.session_id, {'metadata': session.metadata})
+        return {'success': True, 'answer': question}
+
+    intake['active'] = False
+    agent_memory.session_service.update_session(session.session_id, {'metadata': session.metadata})
+
+    template_result = requirements_agent.generate_requirements_template(
+        project_name=session.project_name,
+        module=session.module,
+        erp_system=session.erp_system,
+        context=intake['answers'],
+    )
+    if not template_result.get('success'):
+        return {'success': False, 'error': template_result.get('error', 'Failed to generate requirements template')}
+
+    session.metadata['requirements_template_path'] = template_result['document_path']
+    agent_memory.session_service.update_session(session.session_id, {'metadata': session.metadata})
+
+    answer = ("Thanks - I've put together a requirements questionnaire based on your answers. "
+              "Download it, work through it with your stakeholders, then come back and paste "
+              "their answers in so I can turn them into a formal requirements document.")
+    return {'success': True, 'answer': answer, 'document_path': template_result['document_path']}
+
 def _get_owned_session(session_id: str, current_user: User):
     """Fetch a session and verify it belongs to current_user. Sessions
     created before per-user auth existed (user_id is None) are treated as
@@ -300,6 +383,8 @@ def start_project(req: ProjectStart, current_user: User = Depends(get_current_us
     )
     if not result.get('success'):
         raise HTTPException(status_code=500, detail=result.get('error', 'Unknown error'))
+    session = agent_memory.session_service.get_session(result['session_id'])
+    result['next_action'] = _next_action_for(session) if session else None
     return result
 
 
@@ -632,23 +717,79 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
         llm_instance = llm_mod.get_llm()
         llm_mode = "gemini" if getattr(llm_instance, "use_gemini", True) else "gpt-4"
 
-        if req.agent_hint and req.session_id and req.agent_hint.lower() == 'requirements':
-            yield ev('agent_started', agent='requirements', message='Gathering requirements')
+        if req.agent_hint and req.session_id:
             session = agent_memory.session_service.get_session(req.session_id)
             if not session:
                 yield ev('error', message='Session not found.')
                 return
-            res = requirements_agent.gather_requirements(
-                session_id=req.session_id, project_name=session.project_name,
-                module=session.module, stakeholder_input=req.message, erp_system=session.erp_system
-            )
-            summary = res.get('requirements', {}).get('executive_summary', 'No summary available.')
-            answer = f"Requirements gathered: {summary}"
-            yield ev('agent_progress', agent='requirements', message='Requirements captured')
-            yield ev('text_delta', text=answer)
-            yield ev('workflow_completed')
-            yield ev('message_complete', answer=answer, llm_mode=llm_mode, session_id=req.session_id)
-            return
+            hint = req.agent_hint.lower()
+
+            if hint == 'start_intake' or (session.metadata or {}).get('intake', {}).get('active'):
+                yield ev('agent_started', agent='intake', message='Gathering project context')
+                res = _handle_intake_message(session, req)
+                if not res.get('success'):
+                    yield ev('error', message=res.get('error', 'Intake failed.'))
+                    return
+                answer = res['answer']
+                agent_memory.session_service.add_to_conversation(req.session_id, role="user", content=req.message)
+                agent_memory.session_service.add_to_conversation(req.session_id, role="assistant", content=answer)
+                if res.get('document_path'):
+                    yield ev('document_created', phase='requirements_template', filename=os.path.basename(res['document_path']))
+                yield ev('text_delta', text=answer)
+                yield ev('workflow_completed')
+                next_action = _next_action_for(agent_memory.session_service.get_session(req.session_id))
+                yield ev('message_complete', answer=answer, llm_mode=llm_mode, session_id=req.session_id,
+                          next_action=next_action)
+                return
+
+            if hint == 'structure_requirements':
+                yield ev('agent_started', agent='requirements', message='Structuring your requirements')
+                res = requirements_agent.gather_requirements(
+                    session_id=req.session_id, project_name=session.project_name,
+                    module=session.module, stakeholder_input=req.message, erp_system=session.erp_system
+                )
+                if not res.get('success'):
+                    yield ev('error', message=res.get('error', 'Failed to structure requirements.'))
+                    return
+                agent_memory.advance_phase(req.session_id, 'process_mapping')
+                summary = res.get('requirements', {}).get('executive_summary', 'Requirements captured.')
+                answer = f"Requirements structured and saved: {summary}"
+                agent_memory.session_service.add_to_conversation(req.session_id, role="user", content=req.message)
+                agent_memory.session_service.add_to_conversation(req.session_id, role="assistant", content=answer)
+                if res.get('document_path'):
+                    yield ev('document_created', phase='requirements_gathering', filename=os.path.basename(res['document_path']))
+                yield ev('text_delta', text=answer)
+                yield ev('workflow_completed')
+                next_action = _next_action_for(agent_memory.session_service.get_session(req.session_id))
+                yield ev('message_complete', answer=answer, llm_mode=llm_mode, session_id=req.session_id,
+                          next_action=next_action)
+                return
+
+            phase_map = {
+                'process_mapping': orchestrator.execute_process_mapping_phase,
+                'solution_design': orchestrator.execute_solution_design_phase,
+                'qa_testing': orchestrator.execute_qa_testing_phase,
+                'uat_testing': orchestrator.execute_uat_testing_phase,
+                'training': orchestrator.execute_training_phase,
+            }
+            if hint in phase_map:
+                yield ev('agent_started', agent=hint, message=f"Running {hint.replace('_', ' ')} phase")
+                result = phase_map[hint](session_id=req.session_id)
+                if not result.get('success'):
+                    yield ev('error', message=f"Failed to execute phase '{hint}': {result.get('error', 'Unknown error')}")
+                    return
+                doc_path = result.get('document_path')
+                if doc_path:
+                    yield ev('document_created', phase=hint, filename=os.path.basename(doc_path))
+                answer = f"Phase '{hint}' executed successfully."
+                agent_memory.session_service.add_to_conversation(req.session_id, role="user", content=req.message)
+                agent_memory.session_service.add_to_conversation(req.session_id, role="assistant", content=answer)
+                yield ev('text_delta', text=answer)
+                yield ev('workflow_completed')
+                next_action = _next_action_for(agent_memory.session_service.get_session(req.session_id))
+                yield ev('message_complete', answer=answer, llm_mode=llm_mode, session_id=req.session_id,
+                          next_action=next_action)
+                return
 
         yield ev('agent_started', agent='router', message='Understanding your request')
         decision = classify_intent(llm_instance, req.message, has_session=bool(req.session_id))
@@ -666,9 +807,10 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
                           f"You can now ask me to gather requirements, run a phase, or ask any question about it.")
                 yield ev('text_delta', text=answer)
                 yield ev('workflow_completed')
-                agent_memory.session_service.add_to_conversation(res.get('session_id'), role="user", content=req.message)
-                agent_memory.session_service.add_to_conversation(res.get('session_id'), role="assistant", content=answer)
-                yield ev('message_complete', answer=answer, llm_mode=llm_mode, session_id=res.get('session_id'))
+                new_session = agent_memory.session_service.get_session(res.get('session_id'))
+                next_action = _next_action_for(new_session) if new_session else None
+                yield ev('message_complete', answer=answer, llm_mode=llm_mode, session_id=res.get('session_id'),
+                          next_action=next_action)
             else:
                 yield ev('error', message=f"Failed to start project: {res.get('error', 'Unknown error')}")
             return
@@ -707,7 +849,9 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
                 agent_memory.session_service.add_to_conversation(req.session_id, role="assistant", content=answer)
                 yield ev('text_delta', text=answer)
                 yield ev('workflow_completed')
-                yield ev('message_complete', answer=answer, llm_mode=llm_mode, session_id=req.session_id)
+                next_action = _next_action_for(agent_memory.session_service.get_session(req.session_id))
+                yield ev('message_complete', answer=answer, llm_mode=llm_mode, session_id=req.session_id,
+                          next_action=next_action)
             else:
                 yield ev('error', message=f"Failed to execute phase '{decision.phase}': {result.get('error', 'Unknown error')}")
             return
@@ -725,12 +869,14 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
                 for label, path in (result.get('documents') or {}).items():
                     if path:
                         yield ev('document_created', phase='training', label=label, filename=os.path.basename(path))
-                answer = "Training materials have been generated."
-                yield ev('text_delta', text=answer)
-                yield ev('workflow_completed')
+                answer = "Training materials for 'AP Invoice Posting' have been generated."
                 agent_memory.session_service.add_to_conversation(session_id, role="user", content=req.message)
                 agent_memory.session_service.add_to_conversation(session_id, role="assistant", content=answer)
-                yield ev('message_complete', answer=answer, llm_mode=llm_mode, session_id=session_id)
+                yield ev('text_delta', text=answer)
+                yield ev('workflow_completed')
+                next_action = _next_action_for(agent_memory.session_service.get_session(session_id))
+                yield ev('message_complete', answer=answer, llm_mode=llm_mode, session_id=session_id,
+                          next_action=next_action)
             else:
                 yield ev('error', message='Failed to generate training materials.')
             return
@@ -787,7 +933,9 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
 
         logger.info({"event": "Chat response ready", "session_id": session_id})
         yield ev('workflow_completed')
-        yield ev('message_complete', answer=final_answer, llm_mode=llm_mode, session_id=session_id)
+        next_action = _next_action_for(agent_memory.session_service.get_session(session_id))
+        yield ev('message_complete', answer=final_answer, llm_mode=llm_mode, session_id=session_id,
+                  next_action=next_action)
 
     except Exception as e:
         logger.error("Unhandled error in chat stream", error=str(e), exc_info=True)
