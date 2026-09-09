@@ -13,6 +13,7 @@ from src.memory import agent_memory
 
 from pydantic import ValidationError
 from src.models.training_schema import TrainingMaterials
+from src.utils.model_selection import TaskCategory
 
 
 class TrainingAgent:
@@ -85,6 +86,7 @@ class TrainingAgent:
             generation_config = {
                 'temperature': self.config.temperature,
                 'max_output_tokens': settings.max_tokens,
+                'task': TaskCategory.STRUCTURED_GENERATION,
             }
             
             # Generate training materials using Gemini, constrained to our schema

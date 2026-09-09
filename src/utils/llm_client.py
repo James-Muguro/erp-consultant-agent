@@ -39,6 +39,7 @@ class LLMClient:
         temperature = generation_config.get("temperature", self.temperature)
         max_tokens = generation_config.get("max_output_tokens", settings.max_tokens)
         response_schema = generation_config.get("response_schema")
+        model = generation_config.get("model", settings.gemini_model)
 
         config_kwargs = {
             "temperature": temperature,
@@ -49,7 +50,7 @@ class LLMClient:
             config_kwargs["response_schema"] = response_schema
 
         response = self.gemini_client.models.generate_content(
-            model=settings.gemini_model,
+            model=model,
             contents=prompt,
             config=genai_types.GenerateContentConfig(**config_kwargs)
         )
@@ -73,9 +74,10 @@ class LLMClient:
         generation_config = generation_config or {}
         temperature = generation_config.get("temperature", self.temperature)
         max_tokens = generation_config.get("max_output_tokens", settings.max_tokens)
+        model = generation_config.get("model", settings.gemini_model)
 
         stream = self.gemini_client.models.generate_content_stream(
-            model=settings.gemini_model,
+            model=model,
             contents=prompt,
             config=genai_types.GenerateContentConfig(
                 temperature=temperature,

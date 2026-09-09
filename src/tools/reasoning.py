@@ -5,6 +5,7 @@ from typing import Dict, Any
 from src.utils.llm import get_llm
 from src.config.settings import settings
 from src.utils.logger import AgentLogger
+from src.utils.model_selection import TaskCategory
 
 
 class ReasoningTool:
@@ -19,7 +20,8 @@ class ReasoningTool:
         # Store generation config separately
         self.generation_config = {
             'temperature': 0.2,
-            'max_output_tokens': 512
+            'max_output_tokens': 512,
+            'task': TaskCategory.LIGHTWEIGHT,
         }
 
     def reload_model(self):

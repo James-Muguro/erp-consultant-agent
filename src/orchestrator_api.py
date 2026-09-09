@@ -42,6 +42,7 @@ from src.auth.security import create_access_token
 from src.auth import service as auth_service
 from src.db.base import engine as db_engine
 from src.db.models import User, Feedback, SessionRecord
+from src.utils.model_selection import TaskCategory
 
 from contextlib import asynccontextmanager
 
@@ -180,7 +181,6 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     )
 
 
-app.mount("/ui", StaticFiles(directory="ui"), name="ui_legacy")
 if os.path.isdir("frontend/dist/assets"):
     app.mount("/assets", StaticFiles(directory="frontend/dist/assets"), name="frontend_assets")
 
@@ -709,7 +709,11 @@ Default to ask_question whenever the message is ambiguous, conversational, or in
     try:
         response = llm_instance.generate_content(
             prompt,
-            generation_config={'response_schema': ChatIntentDecision, 'temperature': 0.0}
+            generation_config={
+                'response_schema': ChatIntentDecision,
+                'temperature': 0.0,
+                'task': TaskCategory.LIGHTWEIGHT,
+            }
         )
         return ChatIntentDecision.model_validate_json(response.text)
     except Exception as e:
@@ -826,7 +830,8 @@ def chat(req: ChatRequest, current_user: User = Depends(get_current_user)):
     data = info_retriever(req.message, {'summary': ''}, prefer_web=req.prefer_web)
     generation_config = {
         'temperature': 0.5,
-        'max_output_tokens': 2048,
+        'max_output_tokens': settings.max_tokens,
+        'task': TaskCategory.LIGHTWEIGHT,
     }
 
     if data and (data.get('kb_results') or data.get('web_results') or data.get('sources')):
@@ -1097,7 +1102,11 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
         data = info_retriever(req.message, {'summary': ''}, prefer_web=req.prefer_web)
         yield ev('tool_completed', tool='info_retriever')
 
-        generation_config = {'temperature': 0.5, 'max_output_tokens': 2048}
+        generation_config = {
+            'temperature': 0.5,
+            'max_output_tokens': settings.max_tokens,
+            'task': TaskCategory.LIGHTWEIGHT,
+        }
         if data and (data.get('kb_results') or data.get('web_results') or data.get('sources')):
             prompt = get_synthesis_prompt(req.message, data)
         else:
@@ -1160,8 +1169,7 @@ def chat_stream(req: ChatRequest, request: Request, current_user: User = Depends
 @app.get("/")
 def get_ui():
     """Serves the built React frontend (frontend/dist, from `npm run build`
-    - see frontend/README.md). The old vanilla-JS demo UI is preserved,
-    unchanged, at /ui rather than deleted - see Phase 24 in the roadmap."""
+    - see frontend/README.md)."""
     try:
         with open('frontend/dist/index.html', 'r', encoding='utf-8') as f:
             html = f.read()
@@ -1170,7 +1178,6 @@ def get_ui():
         return HTMLResponse(
             content='<h3>ERP Orchestrator API</h3>'
                     '<p>Frontend not built yet - run <code>npm run build</code> in frontend/. '
-                    'The previous demo UI is still available at <a href="/ui">/ui</a>. '
                     'API docs: <a href="/docs">/docs</a>.</p>',
             status_code=200,
         )

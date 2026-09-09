@@ -13,6 +13,7 @@ from src.memory import agent_memory
 
 from pydantic import ValidationError
 from src.models.process_map_schema import ProcessMap
+from src.utils.model_selection import TaskCategory
 
 
 class ProcessMappingAgent:
@@ -98,6 +99,7 @@ class ProcessMappingAgent:
             generation_config = {
                 'temperature': self.config.temperature,
                 'max_output_tokens': settings.max_tokens,
+                'task': TaskCategory.STANDARD_AGENT,
             }
             
             # Generate process map using Gemini, constrained to our schema

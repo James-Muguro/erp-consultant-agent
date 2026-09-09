@@ -13,6 +13,7 @@ from src.memory import agent_memory
 
 from pydantic import ValidationError
 from src.models.test_case_schema import TestCasesDocument
+from src.utils.model_selection import TaskCategory
 
 
 class QATestingAgent:
@@ -86,6 +87,7 @@ class QATestingAgent:
             generation_config = {
                 'temperature': self.config.temperature,
                 'max_output_tokens': max(settings.max_tokens, 8192),
+                'task': TaskCategory.STRUCTURED_GENERATION,
             }
             
             # Generate test cases using Gemini, constrained to our schema
@@ -346,6 +348,7 @@ class UATTestingAgent:
             generation_config = {
                 'temperature': self.config.temperature,
                 'max_output_tokens': max(settings.max_tokens, 8192),
+                'task': TaskCategory.STANDARD_AGENT,
             }
             
             # Generate UAT scenarios using Gemini, constrained to our schema

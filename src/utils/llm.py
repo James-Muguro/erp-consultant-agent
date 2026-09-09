@@ -21,6 +21,7 @@ from openai import OpenAI
 from src.config.settings import settings
 from src.utils.resilience import call_with_retries, DEFAULT_RETRY_BASE_DELAY
 from src.utils.logger import get_logger
+from src.utils.model_selection import resolve_task_profile
 import time
 
 try:
@@ -136,13 +137,13 @@ class HybridLLMClient:
             self.anthropic_client = Anthropic(api_key=settings.anthropic_api_key)
             logger.info("HybridLLM: Anthropic fallback client initialized")
 
-    def _try_anthropic(self, prompt, max_tokens, response_schema):
+    def _try_anthropic(self, prompt, max_tokens, response_schema, model=None):
         # Anthropic Python SDK v1.0+ removed temperature/top_p/top_k from
         # Messages.create() entirely - no sampling control available here.
         if response_schema is not None:
             tool_name = "emit_" + response_schema.__name__
             resp = self.anthropic_client.messages.create(
-                model=settings.anthropic_model,
+                model=model or settings.anthropic_model,
                 max_tokens=max_tokens,
                 tools=[{
                     "name": tool_name,
@@ -159,7 +160,7 @@ class HybridLLMClient:
             raise RuntimeError("Anthropic did not return a tool_use block")
         else:
             resp = self.anthropic_client.messages.create(
-                model=settings.anthropic_model,
+                model=model or settings.anthropic_model,
                 max_tokens=max_tokens,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -202,14 +203,18 @@ class HybridLLMClient:
         temperature = generation_config.get("temperature", self.temperature)
         max_tokens = generation_config.get("max_output_tokens", settings.max_tokens)
         response_schema = generation_config.get("response_schema")
+        task_profile = resolve_task_profile(generation_config.get("task"))
 
         retry_kwargs = dict(max_attempts=settings.llm_retry_attempts, timeout=settings.llm_call_timeout_seconds)
 
         if self.use_gemini and self.gemini:
             start = time.time()
             try:
+                gemini_config = dict(generation_config)
+                if task_profile and task_profile.model_for("gemini"):
+                    gemini_config["model"] = task_profile.model_for("gemini")
                 resp = call_with_retries(
-                    self.gemini.generate_content, prompt, generation_config=generation_config, **retry_kwargs
+                    self.gemini.generate_content, prompt, generation_config=gemini_config, **retry_kwargs
                 )
                 self._log_llm_call("gemini", start, resp)
                 return resp
@@ -219,13 +224,11 @@ class HybridLLMClient:
         if self.groq_client:
             start = time.time()
             try:
-                # Groq's free tier has a much tighter per-minute token
-                # budget than Gemini - cap the requested output size
-                # regardless of what settings.max_tokens (Gemini-sized)
-                # says, so a normal request doesn't get rejected outright.
-                groq_max_tokens = min(max_tokens, 2048)
+                groq_max_tokens = max_tokens
                 resp = call_with_retries(
-                    _openai_compatible_call, self.groq_client, settings.groq_model, prompt,
+                    _openai_compatible_call, self.groq_client,
+                    task_profile.model_for("groq") if task_profile and task_profile.model_for("groq") else settings.groq_model,
+                    prompt,
                     temperature, groq_max_tokens, response_schema, **retry_kwargs
                 )
                 self._log_llm_call("groq", start, resp)
@@ -237,7 +240,9 @@ class HybridLLMClient:
             start = time.time()
             try:
                 resp = call_with_retries(
-                    _openai_compatible_call, self.openai_client, settings.openai_model, prompt,
+                    _openai_compatible_call, self.openai_client,
+                    task_profile.model_for("openai") if task_profile and task_profile.model_for("openai") else settings.openai_model,
+                    prompt,
                     temperature, max_tokens, response_schema, **retry_kwargs
                 )
                 self._log_llm_call("openai", start, resp)
@@ -248,7 +253,11 @@ class HybridLLMClient:
         if self.anthropic_client:
             start = time.time()
             try:
-                resp = call_with_retries(self._try_anthropic, prompt, max_tokens, response_schema, **retry_kwargs)
+                resp = call_with_retries(
+                    self._try_anthropic, prompt, max_tokens, response_schema,
+                    task_profile.model_for("anthropic") if task_profile and task_profile.model_for("anthropic") else None,
+                    **retry_kwargs
+                )
                 self._log_llm_call("anthropic", start, resp)
                 return resp
             except Exception as e:
@@ -260,9 +269,9 @@ class HybridLLMClient:
             "(Gemini, Groq, OpenAI, and Anthropic all failed or are not configured)."
         )
 
-    def _try_anthropic_stream(self, prompt, max_tokens):
+    def _try_anthropic_stream(self, prompt, max_tokens, model=None):
         with self.anthropic_client.messages.stream(
-            model=settings.anthropic_model,
+            model=model or settings.anthropic_model,
             max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}],
         ) as stream:
@@ -283,6 +292,7 @@ class HybridLLMClient:
         generation_config = generation_config or {}
         temperature = generation_config.get("temperature", self.temperature)
         max_tokens = generation_config.get("max_output_tokens", settings.max_tokens)
+        task_profile = resolve_task_profile(generation_config.get("task"))
 
         def _run(chunk_source):
             yielded_any = False
@@ -322,8 +332,11 @@ class HybridLLMClient:
 
         if self.use_gemini and self.gemini:
             try:
+                gemini_config = dict(generation_config)
+                if task_profile and task_profile.model_for("gemini"):
+                    gemini_config["model"] = task_profile.model_for("gemini")
                 yield from _run_tier_with_retry(
-                    lambda: self.gemini.generate_content_stream(prompt, generation_config), "Gemini"
+                    lambda: self.gemini.generate_content_stream(prompt, gemini_config), "Gemini"
                 )
                 return
             except _TierFailedBeforeFirstChunk as e:
@@ -331,9 +344,13 @@ class HybridLLMClient:
 
         if self.groq_client:
             try:
-                groq_max_tokens = min(max_tokens, 2048)
+                groq_max_tokens = max_tokens
                 yield from _run_tier_with_retry(
-                    lambda: _openai_compatible_stream(self.groq_client, settings.groq_model, prompt, temperature, groq_max_tokens),
+                    lambda: _openai_compatible_stream(
+                        self.groq_client,
+                        task_profile.model_for("groq") if task_profile and task_profile.model_for("groq") else settings.groq_model,
+                        prompt, temperature, groq_max_tokens
+                    ),
                     "Groq"
                 )
                 return
@@ -343,7 +360,11 @@ class HybridLLMClient:
         if self.openai_client:
             try:
                 yield from _run_tier_with_retry(
-                    lambda: _openai_compatible_stream(self.openai_client, settings.openai_model, prompt, temperature, max_tokens),
+                    lambda: _openai_compatible_stream(
+                        self.openai_client,
+                        task_profile.model_for("openai") if task_profile and task_profile.model_for("openai") else settings.openai_model,
+                        prompt, temperature, max_tokens
+                    ),
                     "OpenAI"
                 )
                 return
@@ -352,7 +373,13 @@ class HybridLLMClient:
 
         if self.anthropic_client:
             try:
-                yield from _run_tier_with_retry(lambda: self._try_anthropic_stream(prompt, max_tokens), "Anthropic")
+                yield from _run_tier_with_retry(
+                    lambda: self._try_anthropic_stream(
+                        prompt, max_tokens,
+                        task_profile.model_for("anthropic") if task_profile and task_profile.model_for("anthropic") else None,
+                    ),
+                    "Anthropic"
+                )
                 return
             except _TierFailedBeforeFirstChunk as e:
                 logger.error(f"HybridLLM: Anthropic stream failed after retries: {e.__cause__}")

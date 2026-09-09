@@ -4,6 +4,7 @@ from termcolor import cprint
 from src.utils.llm import get_llm
 from src.config.settings import settings
 from src.utils.logger import get_logger
+from src.utils.model_selection import TaskCategory
 
 logger = get_logger(__name__)
 
@@ -36,6 +37,7 @@ class Agent:
         generation_config = {
             "temperature": self.temperature,
             "max_output_tokens": settings.max_tokens,
+            "task": TaskCategory.STANDARD_AGENT,
         }
 
         # Try generating content with hybrid LLM

@@ -13,6 +13,7 @@ from src.memory import agent_memory
 
 from pydantic import ValidationError
 from src.models.solution_design_schema import SolutionDesign
+from src.utils.model_selection import TaskCategory
 
 
 class SolutionDesignAgent:
@@ -98,6 +99,7 @@ class SolutionDesignAgent:
             generation_config = {
                 'temperature': self.config.temperature,
                 'max_output_tokens': max(settings.max_tokens, 8192),
+                'task': TaskCategory.HIGH_REASONING,
             }
             
             # Generate solution design using Gemini, constrained to our schema

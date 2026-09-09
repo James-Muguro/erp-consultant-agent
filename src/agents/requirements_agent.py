@@ -13,6 +13,7 @@ from src.utils.prompts import REQUIREMENTS_SYSTEM_PROMPT, REQUIREMENTS_TASK_PROM
 from src.tools import erp_kb, doc_generator
 from src.memory import agent_memory
 from src.models.requirements_schema import RequirementsDocument
+from src.utils.model_selection import TaskCategory
 
 
 class RequirementsAgent:
@@ -33,6 +34,7 @@ class RequirementsAgent:
         self.generation_config = {
             'temperature': self.config.temperature,
             'max_output_tokens': max(settings.max_tokens, 8192),
+            'task': TaskCategory.HIGH_REASONING,
         }
 
     def reload_model(self):

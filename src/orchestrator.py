@@ -32,6 +32,53 @@ class ProjectPhase(Enum):
     COMPLETED = "completed"
 
 
+def _select_phase_context(
+    session,
+    phase: str,
+    current_request: Optional[str] = None,
+    process_name: Optional[str] = None,
+    current_state: Optional[str] = None,
+    user_roles: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Select the minimum session context required by one workflow phase."""
+    context = {
+        'project': {
+            'project_name': session.project_name,
+            'module': session.module,
+            'erp_system': session.erp_system,
+        },
+        'request': current_request if phase == ProjectPhase.REQUIREMENTS_GATHERING.value else None,
+        'phase_outputs': {},
+        'phase_inputs': {},
+    }
+
+    if phase == ProjectPhase.PROCESS_MAPPING.value:
+        context['phase_inputs'] = {
+            'process_name': process_name,
+            'current_state': current_state,
+        }
+    elif phase == ProjectPhase.UAT_TESTING.value:
+        context['phase_inputs'] = {'user_roles': user_roles}
+    elif phase == ProjectPhase.TRAINING.value:
+        context['phase_inputs'] = {
+            'process_name': process_name,
+            'user_roles': user_roles,
+        }
+
+    required_outputs = {
+        ProjectPhase.PROCESS_MAPPING.value: ['requirements_gathering'],
+        ProjectPhase.SOLUTION_DESIGN.value: ['requirements_gathering', 'process_mapping'],
+        ProjectPhase.QA_TESTING.value: ['solution_design'],
+        ProjectPhase.UAT_TESTING.value: ['process_mapping'],
+        ProjectPhase.TRAINING.value: ['solution_design'],
+    }.get(phase, [])
+    context['phase_outputs'] = {
+        output_phase: agent_memory.get_phase_output(session.session_id, output_phase)
+        for output_phase in required_outputs
+    }
+    return context
+
+
 class ERPOrchestratorAgent:
     """
     Orchestrator agent that manages the complete ERP consulting workflow
@@ -224,16 +271,22 @@ class ERPOrchestratorAgent:
         session = agent_memory.session_service.get_session(session_id)
         if not session:
             return {'success': False, 'error': 'Session not found'}
+
+        context = _select_phase_context(
+            session, ProjectPhase.REQUIREMENTS_GATHERING.value,
+            current_request=stakeholder_input,
+        )
+        project = context['project']
         
         # Execute requirements agent
         result = self._call_agent_safely(
             'requirements_gathering',
             requirements_agent.gather_requirements,
             session_id=session_id,
-            project_name=session.project_name,
-            module=session.module,
-            stakeholder_input=stakeholder_input,
-            erp_system=session.erp_system
+            project_name=project['project_name'],
+            module=project['module'],
+            stakeholder_input=context['request'],
+            erp_system=project['erp_system']
         )
         
         if result['success']:
@@ -272,27 +325,30 @@ class ERPOrchestratorAgent:
         if not session:
             return {'success': False, 'error': 'Session not found'}
         
-        # Get requirements from previous phase
-        requirements_output = agent_memory.get_phase_output(session_id, 'requirements_gathering')
+        context = _select_phase_context(
+            session, ProjectPhase.PROCESS_MAPPING.value,
+            process_name=process_name,
+            current_state=current_state,
+        )
+        project = context['project']
+        requirements_output = context['phase_outputs']['requirements_gathering']
         if not requirements_output:
             return {'success': False, 'error': 'Requirements not found. Complete requirements phase first.'}
+
+        selected_process_name = context['phase_inputs']['process_name'] or f"{project['module']} Standard Process"
         
         requirements = requirements_output.get('structured_requirements', {})
-        
-        # Use module name as process if not provided
-        if not process_name:
-            process_name = f"{session.module} Standard Process"
         
         # Execute process mapping agent
         result = self._call_agent_safely(
             'process_mapping',
             process_mapping_agent.map_process,
             session_id=session_id,
-            process_name=process_name,
+            process_name=selected_process_name,
             requirements=requirements,
-            current_state=current_state,
-            module=session.module,
-            erp_system=session.erp_system
+            current_state=context['phase_inputs']['current_state'],
+            module=project['module'],
+            erp_system=project['erp_system']
         )
         
         if result['success']:
@@ -314,15 +370,16 @@ class ERPOrchestratorAgent:
         if not session:
             return {'success': False, 'error': 'Session not found'}
         
-        # Get requirements and process maps
-        requirements_output = agent_memory.get_phase_output(session_id, 'requirements_gathering')
+        context = _select_phase_context(session, ProjectPhase.SOLUTION_DESIGN.value)
+        project = context['project']
+        requirements_output = context['phase_outputs']['requirements_gathering']
         if not requirements_output:
             return {'success': False, 'error': 'Requirements not found'}
         
         requirements = requirements_output.get('structured_requirements', {})
         requirements['module'] = session.module
         
-        process_maps = session.process_maps or {}
+        process_maps = context['phase_outputs']['process_mapping'] or {}
         
         # Execute solution design agent
         result = self._call_agent_safely(
@@ -331,7 +388,7 @@ class ERPOrchestratorAgent:
             session_id=session_id,
             requirements=requirements,
             process_maps=process_maps,
-            erp_system=session.erp_system
+            erp_system=project['erp_system']
         )
         
         if result['success']:
@@ -354,8 +411,9 @@ class ERPOrchestratorAgent:
         if not session:
             return {'success': False, 'error': 'Session not found'}
         
-        # Get solution design
-        design_output = agent_memory.get_phase_output(session_id, 'solution_design')
+        context = _select_phase_context(session, ProjectPhase.QA_TESTING.value)
+        project = context['project']
+        design_output = context['phase_outputs']['solution_design']
         if not design_output:
             return {'success': False, 'error': 'Solution design not found'}
         
@@ -367,7 +425,7 @@ class ERPOrchestratorAgent:
             qa_testing_agent.generate_test_cases,
             session_id=session_id,
             solution_design=solution_design,
-            module=session.module,
+            module=project['module'],
             scope=scope
         )
         
@@ -391,12 +449,16 @@ class ERPOrchestratorAgent:
         if not session:
             return {'success': False, 'error': 'Session not found'}
         
-        # Get process maps
-        process_maps = session.process_maps or {}
+        context = _select_phase_context(
+            session, ProjectPhase.UAT_TESTING.value,
+            user_roles=user_roles,
+        )
+        process_maps = context['phase_outputs']['process_mapping'] or {}
         
         # Default user roles if not provided
-        if not user_roles:
-            user_roles = ["Business User", "Power User", "Administrator"]
+        user_roles = context['phase_inputs'].get('user_roles') or [
+            "Business User", "Power User", "Administrator"
+        ]
         
         # Execute UAT testing agent
         result = self._call_agent_safely(
@@ -428,16 +490,20 @@ class ERPOrchestratorAgent:
         if not session:
             return {'success': False, 'error': 'Session not found'}
         
-        # Get solution design
-        design_output = agent_memory.get_phase_output(session_id, 'solution_design')
+        context = _select_phase_context(
+            session, ProjectPhase.TRAINING.value,
+            process_name=process_name,
+            user_roles=user_roles,
+        )
+        project = context['project']
+        design_output = context['phase_outputs']['solution_design']
         solution_design = design_output.get('structured_design', {}) if design_output else {}
         
         # Default values
-        if not process_name:
-            process_name = f"{session.module} Business Process"
-        
-        if not user_roles:
-            user_roles = ["End User", "Process Owner", "System Administrator"]
+        process_name = context['phase_inputs'].get('process_name') or f"{project['module']} Business Process"
+        user_roles = context['phase_inputs'].get('user_roles') or [
+            "End User", "Process Owner", "System Administrator"
+        ]
         
         # Execute training agent
         result = self._call_agent_safely(
