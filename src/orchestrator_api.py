@@ -598,13 +598,21 @@ def _collect_session_documents(session_id: str) -> List[Dict[str, str]]:
     session metadata (e.g. the requirements questionnaire template, which
     isn't tied to a completed phase - see _handle_intake_message). Most
     phases store a single 'document_path'; training stores multiple named
-    documents under 'documents'. Process mapping produces no downloadable
-    document at all."""
+    documents under 'documents'. Process mapping stores one document per
+    process name."""
     documents = []
 
     for phase in _PHASES_WITH_DOCUMENTS:
         output = agent_memory.get_phase_output(session_id, phase)
         if not output or not isinstance(output, dict):
+            continue
+
+        if phase == 'process_mapping':
+            # process_maps is keyed by process name (multiple maps possible),
+            # unlike every other phase's flat {'document_path': ...} shape.
+            for process_name, process_data in output.items():
+                if isinstance(process_data, dict) and process_data.get('document_path'):
+                    documents.append({'phase': phase, 'label': process_name, 'path': process_data['document_path']})
             continue
 
         doc_path = output.get('document_path')
@@ -968,6 +976,9 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
                 doc_path = result.get('document_path')
                 if doc_path:
                     yield ev('document_created', phase=hint, filename=os.path.basename(doc_path))
+                for label, path in (result.get('documents') or {}).items():
+                    if path:
+                        yield ev('document_created', phase=hint, label=label, filename=os.path.basename(path))
                 answer = f"Phase '{hint}' executed successfully."
                 agent_memory.session_service.add_to_conversation(req.session_id, role="user", content=req.message)
                 agent_memory.session_service.add_to_conversation(req.session_id, role="assistant", content=answer)
