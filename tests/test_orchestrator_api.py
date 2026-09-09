@@ -24,6 +24,19 @@ def test_health():
     assert r.json()['status'] == 'ok'
 
 
+def test_security_headers_present_on_every_response():
+    """Checked against a plain, unauthenticated 401 response - these
+    headers should be unconditional, not something only successful/
+    authenticated responses get."""
+    client = TestClient(app)
+    r = client.get('/api/auth/me')
+    assert r.headers.get('X-Content-Type-Options') == 'nosniff'
+    assert r.headers.get('X-Frame-Options') == 'DENY'
+    assert r.headers.get('Referrer-Policy') == 'strict-origin-when-cross-origin'
+    assert 'geolocation=()' in r.headers.get('Permissions-Policy', '')
+    assert 'max-age=' in r.headers.get('Strict-Transport-Security', '')
+
+
 def test_signup_login_me():
     client = TestClient(app)
     email = f"test-{uuid.uuid4().hex[:12]}@example.com"
