@@ -8,7 +8,7 @@ import time
 from src.config.settings import settings, PROCESS_MAPPING_AGENT_CONFIG
 from src.utils.logger import AgentLogger, metrics_collector
 from src.utils.prompts import PROCESS_MAPPING_SYSTEM_PROMPT, PROCESS_MAPPING_TASK_PROMPT
-from src.tools import erp_kb
+from src.tools import erp_kb, doc_generator
 from src.memory import agent_memory
 
 from pydantic import ValidationError
@@ -116,14 +116,23 @@ class ProcessMappingAgent:
                 self.logger.error(f"Schema validation failed, falling back to heuristic parsing: {e}")
                 structured_process = self._parse_process_map(process_map_text)
             
-            # Save to session
             session = agent_memory.session_service.get_session(session_id)
+            project_name = session.project_name if session else "ERP Project"
+            doc_path = doc_generator.generate_process_map(
+                project_name=project_name,
+                process_name=process_name,
+                module=module,
+                process_map=structured_process
+            )
+
+            # Save to session
             if session:
                 if not session.process_maps:
                     session.process_maps = {}
                 session.process_maps[process_name] = {
                     'structured': structured_process,
                     'raw_text': process_map_text,
+                    'document_path': doc_path,
                     'timestamp': time.time()
                 }
                 agent_memory.session_service.update_session(
@@ -155,6 +164,7 @@ class ProcessMappingAgent:
             return {
                 'success': True,
                 'process_map': structured_process,
+                'document_path': doc_path,
                 'raw_text': process_map_text,
                 'duration': duration
             }
