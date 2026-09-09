@@ -22,6 +22,7 @@ import structlog
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 from src.orchestrator import orchestrator
 from src.config.settings import settings
@@ -53,17 +54,34 @@ app = FastAPI(title="ERP Orchestrator API", lifespan=lifespan)
 
 logger = get_logger(__name__)
 
-limiter = Limiter(key_func=get_remote_address)
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-
-# Auth endpoints get their own (stricter) limits since brute-forcing
-# passwords is the main threat there. Effectively disabled under pytest -
-# TestClient shares one fake IP across every test, so a real per-minute
-# limit would fail unrelated tests depending on run order, not because of
-# a real vulnerability. Real requests never carry PYTEST_CURRENT_TEST.
+# Effectively disabled under pytest for both the default and auth-specific
+# limits below - TestClient shares one fake IP across every test, so a
+# real per-minute limit would fail unrelated tests depending on run order,
+# not because of a real vulnerability. Real requests never carry
+# PYTEST_CURRENT_TEST.
 _TESTING = "pytest" in sys.modules
 AUTH_RATE_LIMIT = "10000/minute" if _TESTING else "5/minute"
+DEFAULT_RATE_LIMIT = "100000/minute" if _TESTING else "60/minute"
+
+limiter = Limiter(
+    key_func=get_remote_address,
+    # Applies to every route that doesn't set its own more specific
+    # @limiter.limit(...) (auth's stricter AUTH_RATE_LIMIT below still
+    # wins there) - closes a real gap: LLM-calling endpoints (chat,
+    # project start, phase execution) cost real money per request and had
+    # no rate limit at all before this. IP-based, same as auth's limiting -
+    # not perfect for users sharing a NAT'd IP, but meaningfully protective
+    # against a runaway client or a leaked/stolen token being hammered.
+    default_limits=[DEFAULT_RATE_LIMIT],
+)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+# Required for default_limits to actually apply to routes that don't have
+# their own @limiter.limit(...) - without this middleware, default_limits
+# is silently a no-op on undecorated routes (confirmed by testing: without
+# it, 70 rapid requests to an undecorated route all succeeded despite a
+# 60/minute default configured).
+app.add_middleware(SlowAPIMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -71,6 +89,35 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    """Standard defensive headers on every response. Deliberately does NOT
+    set Content-Security-Policy - this app serves both its own frontend
+    (dist/) and FastAPI's built-in /docs (Swagger UI, which loads CDN
+    scripts and would likely break under a strict CSP), and there's no
+    browser available in the environment this was written in to verify a
+    CSP wouldn't also break the frontend's own asset loading. Shipping an
+    unverified CSP risks silently breaking the app in a way that's only
+    visible in a real browser - worse than not having one yet. Add it once
+    someone can click through the app in an actual browser to confirm it
+    doesn't break anything; a reasonable starting point is:
+    default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+    font-src 'self' https://fonts.gstatic.com; img-src 'self' data:;
+    connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
+    (probably restricted to only the app's own routes, with /docs exempted)."""
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    # Safe to always send - browsers ignore HSTS on a plain-HTTP response,
+    # and Render terminates TLS at its edge so the browser-facing
+    # connection is HTTPS even though it's forwarded to this process as
+    # plain HTTP internally.
+    response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+    return response
 
 
 @app.middleware("http")
