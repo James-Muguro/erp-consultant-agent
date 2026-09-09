@@ -251,6 +251,59 @@ class DocumentGenerator:
         return filepath
 
     # ------------------------------------------------------------------
+    # Process maps
+    # ------------------------------------------------------------------
+
+    def generate_process_map(
+        self,
+        project_name: str,
+        process_name: str,
+        module: str,
+        process_map: Dict[str, Any]
+    ) -> str:
+        doc = self._new_document(f"Process Map: {process_name}", project_name)
+
+        self._add_info_table(doc, [
+            ("Project Name", project_name),
+            ("Process", process_name),
+            ("Module", module),
+            ("Date", datetime.now().strftime('%Y-%m-%d')),
+        ])
+
+        doc.add_heading("Overview", level=1)
+        doc.add_paragraph(process_map.get('overview') or "Not specified.")
+
+        doc.add_heading("Scope", level=1)
+        doc.add_paragraph(process_map.get('scope') or "Not specified.")
+
+        doc.add_heading("Roles", level=1)
+        self._add_bullet_list(doc, process_map.get('roles', []))
+
+        doc.add_heading("Process Steps", level=1)
+        steps = process_map.get('steps', [])
+        if steps:
+            self._add_data_table(doc, ["#", "Step", "Description", "Responsible Role"], [
+                [s.get('number', i + 1), s.get('name', ''), s.get('description', ''), s.get('responsible_role', '')]
+                for i, s in enumerate(steps)
+            ])
+        else:
+            doc.add_paragraph("No steps specified.", style='Intense Quote')
+
+        doc.add_heading("Decision Points", level=1)
+        self._add_bullet_list(doc, process_map.get('decision_points', []))
+
+        doc.add_heading("Integration Points", level=1)
+        self._add_bullet_list(doc, process_map.get('integration_points', []))
+
+        doc.add_heading("Exceptions", level=1)
+        self._add_bullet_list(doc, process_map.get('exceptions', []))
+
+        filepath = self._save(doc, "process_map", process_name)
+        self.logger.log_tool_usage("generate_process_map", {'project': project_name, 'process': process_name},
+                                    f"Document saved to {filepath}")
+        return filepath
+
+    # ------------------------------------------------------------------
     # Test cases
     # ------------------------------------------------------------------
 
