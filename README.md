@@ -8,7 +8,7 @@ The project combines specialized AI agents with an orchestrator, project session
 
 Try the deployed application:
 
-https://erpconsultant-ai.onrender.com/
+[https://erpconsultant-ai-piyd.onrender.com](https://erpconsultant-ai-piyd.onrender.com)
 
 The application provides a web-based interface where users interact with the ERP Consultant AI agent, create projects, continue project sessions, execute consulting workflow phases, and access generated deliverables.
 
