@@ -48,6 +48,16 @@ Target ERP System: {erp_system}
 Stakeholder Input:
 {stakeholder_input}
 
+CRITICAL: The stakeholder input above may describe multiple distinct
+functional domains (e.g. Finance, Procurement, HR/Payroll, Grants
+Management, Monitoring & Evaluation, etc.). You MUST create a separate
+category in functional_requirements for EVERY distinct domain explicitly
+mentioned in the input - do not omit any, and do not stop early. Likewise,
+you MUST populate technical_requirements, integration_requirements, and
+reporting_requirements whenever the input describes anything relevant to
+them (e.g. named external systems, data formats, or specific reports) -
+never mark these as unspecified if the input actually describes them.
+
 Produce:
 - Structured requirements in JSON, grounded strictly in the stakeholder input above.
 - A summary of key functional areas actually mentioned.
@@ -112,6 +122,10 @@ Requirements:
 
 Process Maps:
 {process_maps}
+
+CRITICAL: Cover every business domain, module, process, and role mentioned
+in the requirements and process maps. Do not omit any domain or stop after
+the first few areas; each one must have its relevant design details.
 
 Produce:
 - Module configurations, workflow steps, and dependencies specific to {erp_system}.
@@ -198,6 +212,10 @@ Module: {module}
 Solution Design:
 {solution_design}
 
+CRITICAL: Cover every business domain, module, process, and requirement
+mentioned in the solution design. Do not omit any domain or stop after the
+first few areas; ground every test case in the provided design.
+
 Generate functional, integration, performance, and security test cases
 based on the given ERP module and solution design above.
 """
@@ -215,6 +233,10 @@ Business Processes:
 User Roles: {user_roles}
 
 {scenarios}
+
+CRITICAL: Cover every business process, user role, and domain mentioned
+above. Do not omit any or stop after the first few scenarios; each must be
+represented in the acceptance coverage.
 
 Create user acceptance test scenarios and verify business process flows
 for this specific ERP implementation.

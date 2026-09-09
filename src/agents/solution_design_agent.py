@@ -93,10 +93,11 @@ class SolutionDesignAgent:
                 context
             )
             
-            # Define generation config
+            # Define generation config - multi-domain solution designs need
+            # enough output room to cover every business area completely.
             generation_config = {
                 'temperature': self.config.temperature,
-                'max_output_tokens': settings.max_tokens,
+                'max_output_tokens': max(settings.max_tokens, 8192),
             }
             
             # Generate solution design using Gemini, constrained to our schema

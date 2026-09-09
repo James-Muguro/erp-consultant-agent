@@ -25,10 +25,14 @@ class RequirementsAgent:
         # Get the singleton model instance (no args allowed in get_llm)
         self.model = get_llm()
 
-        # Store generation configuration for Gemini API calls
+        # Define generation config - requirements documents covering
+        # multiple business domains need substantial output room; the
+        # global default can cause a smaller/fallback model to gracefully
+        # truncate valid JSON early (stopping after 1-2 categories) rather
+        # than erroring, which is a silent quality loss, not a crash.
         self.generation_config = {
             'temperature': self.config.temperature,
-            'max_output_tokens': settings.max_tokens,
+            'max_output_tokens': max(settings.max_tokens, 8192),
         }
 
     def reload_model(self):

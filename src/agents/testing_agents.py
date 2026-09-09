@@ -81,10 +81,11 @@ class QATestingAgent:
                 context
             )
             
-            # Define generation config
+            # Define generation config - multi-domain QA coverage needs
+            # enough output room to avoid truncating valid JSON early.
             generation_config = {
                 'temperature': self.config.temperature,
-                'max_output_tokens': settings.max_tokens,
+                'max_output_tokens': max(settings.max_tokens, 8192),
             }
             
             # Generate test cases using Gemini, constrained to our schema
@@ -340,10 +341,11 @@ class UATTestingAgent:
                 context
             )
             
-            # Define generation config
+            # Define generation config - multi-domain UAT coverage needs
+            # enough output room to avoid truncating valid JSON early.
             generation_config = {
                 'temperature': self.config.temperature,
-                'max_output_tokens': settings.max_tokens,
+                'max_output_tokens': max(settings.max_tokens, 8192),
             }
             
             # Generate UAT scenarios using Gemini, constrained to our schema
