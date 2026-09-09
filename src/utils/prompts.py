@@ -36,10 +36,22 @@ Your responsibilities:
 """
 
 REQUIREMENTS_TASK_PROMPT = """
-Your task is to process stakeholder input and produce:
-- Structured requirements in JSON.
-- A summary of key functional areas.
-- Any assumptions or follow-up questions for clarification.
+Your task is to process the following stakeholder input and produce a
+complete, specific requirements document for this exact project. Do not
+invent generic or unrelated content - every requirement must be traceable
+to something stated below or a reasonable inference from it.
+
+Project Name: {project_name}
+Module: {module}
+Target ERP System: {erp_system}
+
+Stakeholder Input:
+{stakeholder_input}
+
+Produce:
+- Structured requirements in JSON, grounded strictly in the stakeholder input above.
+- A summary of key functional areas actually mentioned.
+- Any assumptions or follow-up questions for clarification, if genuinely needed.
 """
 
 # -----------------------------
@@ -56,11 +68,22 @@ Your responsibilities:
 """
 
 PROCESS_MAPPING_TASK_PROMPT = """
-Your task:
-- Generate detailed process maps based on structured requirements.
-- Include roles, responsibilities, steps, and decision points.
-- Identify gaps or potential conflicts in the current process design.
-- Return results as JSON for the orchestrator to route to solution design.
+Your task is to generate a detailed business process map for the
+following specific process. Ground every step in the requirements
+provided below - do not invent an unrelated generic process.
+
+Process Name: {process_name}
+
+Relevant Requirements:
+{requirements}
+
+Current (As-Is) Process:
+{current_state}
+
+Generate detailed process maps including roles, responsibilities, steps,
+and decision points, specific to this process and these requirements.
+Identify gaps or potential conflicts in the current process design.
+Return results as JSON for the orchestrator to route to solution design.
 """
 
 # -----------------------------
@@ -77,11 +100,23 @@ Your responsibilities:
 """
 
 SOLUTION_DESIGN_TASK_PROMPT = """
-Your task:
-- Produce a detailed solution design based on process maps.
-- Include module configurations, workflow steps, and dependencies.
-- Highlight assumptions or gaps that need clarification.
-- Return structured design as JSON for downstream agents.
+Your task is to produce a detailed solution design for the following
+project. The design MUST be specific to the target ERP system named below
+- do not default to any other ERP system's terminology, modules, or
+transaction codes.
+
+Target ERP System: {erp_system}
+
+Requirements:
+{requirements}
+
+Process Maps:
+{process_maps}
+
+Produce:
+- Module configurations, workflow steps, and dependencies specific to {erp_system}.
+- Assumptions or gaps that need clarification.
+- Structured design as JSON for downstream agents.
 """
 
 # -----------------------------
@@ -137,20 +172,53 @@ Your responsibilities:
 """
 
 TRAINING_TASK_PROMPT = """
-Your task:
-- Develop comprehensive training content and materials.
-- Include step-by-step guides, role-specific instructions, and best practices.
-- Ensure materials are structured and easily consumable.
-- Return all outputs in JSON for project completion.
+Your task is to develop training content for the following specific
+process and roles - do not produce generic or unrelated example content.
+
+Process: {process_name}
+User Roles: {user_roles}
+
+Solution Design Context:
+{solution_design}
+
+Produce comprehensive, role-specific training content and materials,
+including step-by-step guides tailored to this exact process. Return all
+outputs in JSON for project completion.
 """
 
 # QA Testing Prompts
 QA_TESTING_SYSTEM_PROMPT = "You are a QA testing agent. Your task is to generate test cases based on requirements."
-QA_TESTING_TASK_PROMPT = "Generate functional, integration, performance, and security test cases based on the given ERP module requirements."
+QA_TESTING_TASK_PROMPT = """
+Generate {scope} test cases for the following specific ERP module and
+solution design. Ground every test case in the details below - do not
+invent unrelated generic scenarios.
+
+Module: {module}
+
+Solution Design:
+{solution_design}
+
+Generate functional, integration, performance, and security test cases
+based on the given ERP module and solution design above.
+"""
 
 # UAT Testing Prompts
 UAT_TESTING_SYSTEM_PROMPT = "You are a UAT testing agent. Your task is to validate business processes from an end-user perspective."
-UAT_TESTING_TASK_PROMPT = "Create user acceptance test scenarios and verify business process flows for ERP implementations."
+UAT_TESTING_TASK_PROMPT = """
+Create user acceptance test scenarios for the following specific business
+processes and user roles. Ground every scenario in the details below - do
+not invent unrelated generic scenarios.
+
+Business Processes:
+{business_processes}
+
+User Roles: {user_roles}
+
+{scenarios}
+
+Create user acceptance test scenarios and verify business process flows
+for this specific ERP implementation.
+"""
 
 
 def get_synthesis_prompt(query: str, data: dict) -> str:
