@@ -2,9 +2,9 @@
 Configuration settings for ERP Consultant Agent
 """
 import os
-from typing import Optional, List
+from typing import Optional, List, ClassVar
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+from pydantic import Field, field_validator
 
 
 class Settings(BaseSettings):
@@ -110,6 +110,37 @@ class Settings(BaseSettings):
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+
+    # Known placeholder values from .env.example and common weak defaults -
+    # rejected outright regardless of length, since someone could copy one
+    # of these and pad it to 32+ characters without it being any less
+    # guessable.
+    _WEAK_JWT_SECRETS: ClassVar[set] = {
+        "generate_a_long_random_secret_here",
+        "changeme", "change_me", "secret", "your-secret-key",
+        "your_secret_key_here", "insecure", "development",
+    }
+
+    @field_validator("jwt_secret_key")
+    @classmethod
+    def _validate_jwt_secret_strength(cls, v: str) -> str:
+        """Fails fast at startup rather than silently accepting a weak
+        signing key that would make every issued access token forgeable.
+        This intentionally has no test/dev bypass - see .env.example and
+        SECURITY.md for how to generate a real one; every environment,
+        including local dev, needs one."""
+        if v.strip().lower() in cls._WEAK_JWT_SECRETS:
+            raise ValueError(
+                "JWT_SECRET_KEY is set to a known placeholder/example value. "
+                "Generate a real one: openssl rand -hex 32"
+            )
+        if len(v) < 32:
+            raise ValueError(
+                f"JWT_SECRET_KEY must be at least 32 characters (got {len(v)}) - a short key "
+                "is brute-forceable and would let an attacker forge access tokens. "
+                "Generate one: openssl rand -hex 32"
+            )
+        return v
 
     def init_directories(self) -> None:
         """Create output and log directories. Call once at application startup."""
