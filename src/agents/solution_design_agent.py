@@ -126,7 +126,8 @@ class SolutionDesignAgent:
             doc_path = doc_generator.generate_solution_design(
                 project_name=project_name,
                 module=module,
-                design=structured_design
+                design=structured_design,
+                session_id=session_id
             )
             
             # Save to session

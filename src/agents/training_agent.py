@@ -117,7 +117,8 @@ class TrainingAgent:
                 user_manual_path = doc_generator.generate_user_manual(
                     process_name=process_name,
                     module=module,
-                    process_steps=structured_materials['user_manual'].get('steps', [])
+                    process_steps=structured_materials['user_manual'].get('steps', []),
+                    session_id=session_id
                 )
                 documents['user_manual'] = user_manual_path
             

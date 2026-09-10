@@ -175,7 +175,8 @@ class RequirementsAgent:
         project_name: str,
         module: str,
         erp_system: str,
-        context: Dict[str, str]
+        context: Dict[str, str],
+        session_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """Generate a requirements-gathering questionnaire from intake context."""
         start_time = time.time()
@@ -184,7 +185,8 @@ class RequirementsAgent:
                 project_name=project_name,
                 module=module,
                 erp_system=erp_system,
-                context=context
+                context=context,
+                session_id=session_id
             )
             duration = time.time() - start_time
             return {'success': True, 'document_path': doc_path, 'duration': duration}

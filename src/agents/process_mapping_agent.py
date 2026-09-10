@@ -124,7 +124,8 @@ class ProcessMappingAgent:
                 project_name=project_name,
                 process_name=process_name,
                 module=module,
-                process_map=structured_process
+                process_map=structured_process,
+                session_id=session_id
             )
 
             # Save to session

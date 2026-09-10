@@ -115,7 +115,8 @@ class QATestingAgent:
                 project_name=project_name,
                 module=module,
                 test_cases=structured_test_cases,
-                test_type="QA"
+                test_type="QA",
+                session_id=session_id
             )
             
             # Save to session
@@ -378,7 +379,8 @@ class UATTestingAgent:
                 project_name=project_name,
                 module=module,
                 test_cases=structured_scenarios,
-                test_type="UAT"
+                test_type="UAT",
+                session_id=session_id
             )
             
             # Save to session

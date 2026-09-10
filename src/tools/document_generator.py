@@ -1,6 +1,9 @@
 """
-Document Generator Tool - Creates formatted Word documents for ERP projects
+Document Generator Tool - Creates formatted Word documents for ERP projects,
+persisted durably in Postgres (see GeneratedDocument) rather than relying on
+local disk, which Render wipes on every redeploy or free-tier idle-restart.
 """
+import uuid
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 from pathlib import Path
@@ -78,11 +81,46 @@ class DocumentGenerator:
                 row[i].text = str(value)
         doc.add_paragraph()
 
-    def _save(self, doc: Document, prefix: str, name: str) -> str:
+    def _persist_to_db(self, session_id: str, phase: str, label: str, filepath: str):
+        """Reads the just-written file's bytes and stores them in Postgres.
+        This, not the local file, is the durable source of truth used by
+        download_document - the local copy is transient and may not exist
+        by the time someone downloads it, especially after a redeploy."""
+        from src.db.base import SessionLocal
+        from src.db.models import GeneratedDocument
+
+        with open(filepath, 'rb') as f:
+            content = f.read()
+
+        db = SessionLocal()
+        try:
+            record = GeneratedDocument(
+                id=uuid.uuid4().hex,
+                session_id=session_id,
+                phase=phase,
+                label=label,
+                filename=Path(filepath).name,
+                content=content,
+            )
+            db.add(record)
+            db.commit()
+        finally:
+            db.close()
+
+    def _save(self, doc: Document, prefix: str, name: str,
+              session_id: Optional[str] = None, phase: Optional[str] = None,
+              label: Optional[str] = None) -> str:
         safe_name = name.replace(' ', '_').replace('/', '-')
         filename = f"{prefix}_{safe_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"
         filepath = self.output_dir / filename
         doc.save(str(filepath))
+
+        if session_id:
+            self._persist_to_db(session_id, phase or prefix, label or prefix, str(filepath))
+        else:
+            self.logger.warning(f"Document generated without session_id - not persisted to DB, "
+                                 f"will not survive a redeploy: {filepath}")
+
         return str(filepath)
 
     # ------------------------------------------------------------------
@@ -94,7 +132,8 @@ class DocumentGenerator:
         project_name: str,
         module: str,
         requirements: Dict[str, Any],
-        metadata: Optional[Dict] = None
+        metadata: Optional[Dict] = None,
+        session_id: Optional[str] = None,
     ) -> str:
         doc = self._new_document("Requirements Document", project_name)
 
@@ -156,7 +195,9 @@ class DocumentGenerator:
             ["Functional Consultant", "", "", ""],
         ])
 
-        filepath = self._save(doc, "requirements", project_name)
+        sid = session_id or (metadata or {}).get('session_id')
+        filepath = self._save(doc, "requirements", project_name, session_id=sid,
+                               phase="requirements_gathering", label="requirements_gathering")
         self.logger.log_tool_usage("generate_requirements_document", {'project': project_name, 'module': module},
                                     f"Document saved to {filepath}")
         return filepath
@@ -170,7 +211,8 @@ class DocumentGenerator:
         project_name: str,
         module: str,
         erp_system: str,
-        context: Dict[str, str]
+        context: Dict[str, str],
+        session_id: Optional[str] = None,
     ) -> str:
         doc = self._new_document("Requirements Gathering Questionnaire", project_name)
 
@@ -245,13 +287,14 @@ class DocumentGenerator:
         )
         note.runs[0].italic = True
 
-        filepath = self._save(doc, "requirements_questionnaire", project_name)
+        filepath = self._save(doc, "requirements_questionnaire", project_name, session_id=session_id,
+                               phase="requirements_template", label="requirements_template")
         self.logger.log_tool_usage("generate_requirements_template", {'project': project_name, 'module': module},
                                     f"Template saved to {filepath}")
         return filepath
 
     # ------------------------------------------------------------------
-    # Process maps
+    # Process map
     # ------------------------------------------------------------------
 
     def generate_process_map(
@@ -259,7 +302,8 @@ class DocumentGenerator:
         project_name: str,
         process_name: str,
         module: str,
-        process_map: Dict[str, Any]
+        process_map: Dict[str, Any],
+        session_id: Optional[str] = None,
     ) -> str:
         doc = self._new_document(f"Process Map: {process_name}", project_name)
 
@@ -298,7 +342,8 @@ class DocumentGenerator:
         doc.add_heading("Exceptions", level=1)
         self._add_bullet_list(doc, process_map.get('exceptions', []))
 
-        filepath = self._save(doc, "process_map", process_name)
+        filepath = self._save(doc, "process_map", process_name, session_id=session_id,
+                               phase="process_mapping", label=process_name)
         self.logger.log_tool_usage("generate_process_map", {'project': project_name, 'process': process_name},
                                     f"Document saved to {filepath}")
         return filepath
@@ -312,7 +357,8 @@ class DocumentGenerator:
         project_name: str,
         module: str,
         test_cases: List[Dict[str, Any]],
-        test_type: str = "QA"
+        test_type: str = "QA",
+        session_id: Optional[str] = None,
     ) -> str:
         doc = self._new_document(f"{test_type} Test Cases", project_name)
 
@@ -350,7 +396,9 @@ class DocumentGenerator:
              for tc in test_cases]
         )
 
-        filepath = self._save(doc, f"test_cases_{test_type}", project_name)
+        phase = "qa_testing" if test_type == "QA" else "uat_testing"
+        filepath = self._save(doc, f"test_cases_{test_type}", project_name, session_id=session_id,
+                               phase=phase, label=phase)
         self.logger.log_tool_usage("generate_test_case_document", {'project': project_name, 'test_type': test_type},
                                     f"Document saved to {filepath}")
         return filepath
@@ -364,7 +412,8 @@ class DocumentGenerator:
         process_name: str,
         module: str,
         process_steps: List[Dict[str, Any]],
-        screenshots: Optional[List[str]] = None
+        screenshots: Optional[List[str]] = None,
+        session_id: Optional[str] = None,
     ) -> str:
         doc = self._new_document(f"User Manual: {process_name}", module)
 
@@ -399,7 +448,8 @@ class DocumentGenerator:
                 doc.add_heading("Tips", level=3)
                 self._add_bullet_list(doc, tips)
 
-        filepath = self._save(doc, "user_manual", process_name)
+        filepath = self._save(doc, "user_manual", process_name, session_id=session_id,
+                               phase="training", label="user_manual")
         self.logger.log_tool_usage("generate_user_manual", {'process': process_name, 'module': module},
                                     f"Document saved to {filepath}")
         return filepath
@@ -412,7 +462,8 @@ class DocumentGenerator:
         self,
         project_name: str,
         module: str,
-        design: Dict[str, Any]
+        design: Dict[str, Any],
+        session_id: Optional[str] = None,
     ) -> str:
         doc = self._new_document("Solution Design Document", project_name)
 
@@ -458,7 +509,8 @@ class DocumentGenerator:
         doc.add_heading("Migration Strategy", level=1)
         doc.add_paragraph(design.get('migration', {}).get('strategy') or "Not specified.")
 
-        filepath = self._save(doc, "solution_design", project_name)
+        filepath = self._save(doc, "solution_design", project_name, session_id=session_id,
+                               phase="solution_design", label="solution_design")
         self.logger.log_tool_usage("generate_solution_design", {'project': project_name, 'module': module},
                                     f"Document saved to {filepath}")
         return filepath

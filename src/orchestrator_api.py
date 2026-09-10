@@ -317,6 +317,7 @@ def _run_intake_step(session_id: str, user_input: Optional[str], resume: bool) -
             module=session.module,
             erp_system=session.erp_system,
             context=answers,
+            session_id=session_id
         )
         if not result.get("success"):
             return {'success': False, 'error': result.get('error', 'Failed to generate requirements template')}
@@ -612,33 +613,19 @@ _PHASES_WITH_DOCUMENTS = [
 
 
 def _collect_session_documents(session_id: str) -> List[Dict[str, str]]:
-    documents = []
+    """Documents are stored durably in Postgres (GeneratedDocument), not
+    local disk - see document_generator.py's _persist_to_db. Local disk
+    is wiped on every Render redeploy/idle-restart, so it can never be
+    the source of truth for downloads."""
+    from src.db.base import SessionLocal
+    from src.db.models import GeneratedDocument
 
-    for phase in _PHASES_WITH_DOCUMENTS:
-        output = agent_memory.get_phase_output(session_id, phase)
-        if not output or not isinstance(output, dict):
-            continue
-
-        if phase == 'process_mapping':
-            for process_name, process_data in output.items():
-                if isinstance(process_data, dict) and process_data.get('document_path'):
-                    documents.append({'phase': phase, 'label': process_name, 'path': process_data['document_path']})
-            continue
-
-        doc_path = output.get('document_path')
-        if doc_path:
-            documents.append({'phase': phase, 'label': phase, 'path': doc_path})
-
-        for label, path in (output.get('documents') or {}).items():
-            if path:
-                documents.append({'phase': phase, 'label': label, 'path': path})
-
-    session = agent_memory.session_service.get_session(session_id)
-    template_path = (session.metadata or {}).get('requirements_template_path') if session else None
-    if template_path:
-        documents.append({'phase': 'requirements_template', 'label': 'requirements_template', 'path': template_path})
-
-    return documents
+    db = SessionLocal()
+    try:
+        records = db.query(GeneratedDocument).filter(GeneratedDocument.session_id == session_id).all()
+        return [{'phase': r.phase, 'label': r.label, 'path': r.filename} for r in records]
+    finally:
+        db.close()
 
 
 @app.get("/api/projects/{session_id}/documents")
@@ -663,20 +650,27 @@ def get_messages(session_id: str, current_user: User = Depends(get_current_user)
 def download_document(session_id: str, filename: str, current_user: User = Depends(get_current_user)):
     _get_owned_session(session_id, current_user)
 
-    docs = _collect_session_documents(session_id)
-    match = next((d for d in docs if os.path.basename(d['path']) == filename), None)
-    if not match:
+    from src.db.base import SessionLocal
+    from src.db.models import GeneratedDocument
+    from fastapi.responses import Response
+
+    db = SessionLocal()
+    try:
+        record = db.query(GeneratedDocument).filter(
+            GeneratedDocument.session_id == session_id,
+            GeneratedDocument.filename == filename,
+        ).first()
+    finally:
+        db.close()
+
+    if not record:
         raise HTTPException(status_code=404, detail="Document not found for this session")
 
-    file_path = Path(match['path'])
-    if not file_path.is_file():
-        raise HTTPException(status_code=404, detail="Document file is missing on disk")
-
-    media_type = (
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        if file_path.suffix == ".docx" else "text/markdown"
+    return Response(
+        content=record.content,
+        media_type=record.content_type,
+        headers={"Content-Disposition": f'attachment; filename="{record.filename}"'},
     )
-    return FileResponse(path=str(file_path), filename=file_path.name, media_type=media_type)
 
 
 # ---------------------------------------------------------------------------

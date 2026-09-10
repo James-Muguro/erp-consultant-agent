@@ -15,7 +15,7 @@ key from sessions to users without an awkward later migration.
 """
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Boolean, Integer, Float
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Boolean, Integer, LargeBinary, Float
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.types import JSON
 
@@ -84,6 +84,26 @@ class Feedback(Base):
     created_at = Column(DateTime(timezone=True), nullable=False,
                          default=lambda: datetime.now(timezone.utc))
 
+class GeneratedDocument(Base):
+    """Durable storage for generated documents (requirements, process
+    maps, solution designs, test cases, training materials, etc).
+    Documents were previously written only to local disk
+    (output/documents/), which is wiped on every Render redeploy or
+    free-tier idle-restart - this table is the fix. The actual file
+    bytes live here; local disk is now only a transient scratch space
+    used during generation, never the source of truth for downloads."""
+    __tablename__ = "generated_documents"
+
+    id = Column(String, primary_key=True)
+    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=False, index=True)
+    phase = Column(String, nullable=False)
+    label = Column(String, nullable=False)
+    filename = Column(String, nullable=False)
+    content_type = Column(String, nullable=False,
+                           default="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    content = Column(LargeBinary, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False,
+                         default=lambda: datetime.now(timezone.utc))
 
 class ProjectMemory(Base):
     """Per-project agent knowledge: seeded templates, patterns the agents
