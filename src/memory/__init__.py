@@ -14,6 +14,7 @@ from .memory_bank import (
     MemoryBank,
     memory_bank
 )
+from .project_memory import ProjectMemoryStore, project_memory_store
 
 __all__ = [
     'SessionState',
@@ -22,18 +23,24 @@ __all__ = [
     'MemoryEntry',
     'MemoryBank',
     'memory_bank',
+    'ProjectMemoryStore',
+    'project_memory_store',
     'AgentMemory'
 ]
 
 
 class AgentMemory:
     """
-    Unified memory interface that combines session management and long-term memory
+    Unified memory interface that combines session management and
+    per-project long-term memory (see project_memory.py - every memory
+    operation below is scoped to a specific session_id; there is no
+    cross-project recall).
     """
     
     def __init__(self):
         self.session_service = session_service
         self.memory_bank = memory_bank
+        self.project_memory = project_memory_store
     
     def create_project(
         self,
@@ -54,6 +61,11 @@ class AgentMemory:
             user_id=user_id,
             is_casual=is_casual
         )
+        # Casual (no-explicit-project) sessions don't need the full
+        # requirements/design/testing template scaffolding - only real
+        # projects that will actually run phases do.
+        if not is_casual:
+            self.project_memory.seed_defaults(session_id)
         return session_id
     
     def get_project_state(self, session_id: str) -> dict:
@@ -102,17 +114,19 @@ class AgentMemory:
         """Move to next phase"""
         self.session_service.advance_phase(session_id, new_phase)
     
-    # Memory operations
+    # Memory operations - all scoped to session_id, see project_memory.py
     def remember(
         self,
+        session_id: str,
         key: str,
         content: str,
         category: str,
         tags: list = None,
         importance: float = 1.0
     ):
-        """Store something in long-term memory"""
-        self.memory_bank.store_memory(
+        """Store something in this project's long-term memory"""
+        self.project_memory.store_memory(
+            session_id=session_id,
             entry_id=key,
             category=category,
             content=content,
@@ -120,27 +134,31 @@ class AgentMemory:
             importance=importance
         )
     
-    def recall(self, context: dict, limit: int = 5):
-        """Recall relevant memories for current context"""
-        return self.memory_bank.get_relevant_memories(context, limit)
+    def recall(self, session_id: str, context: dict, limit: int = 5):
+        """Recall memories relevant to the given context, scoped to this
+        project only - never returns another project's entries."""
+        return self.project_memory.get_relevant_memories(session_id, context, limit)
     
-    def get_template(self, template_type: str):
-        """Get a template from memory"""
-        memories = self.memory_bank.search_by_category(
+    def get_template(self, session_id: str, template_type: str):
+        """Get a template from this project's memory"""
+        memories = self.project_memory.search_by_category(
+            session_id,
             f"{template_type}_template",
             limit=1
         )
         return memories[0].content if memories else None
     
-    def get_best_practices(self, tags: list = None):
-        """Get best practices from memory"""
+    def get_best_practices(self, session_id: str, tags: list = None):
+        """Get best practices from this project's memory"""
         if tags:
-            return self.memory_bank.search_by_tags(
+            return self.project_memory.search_by_tags(
+                session_id,
                 tags=['best-practice'] + tags,
                 limit=10
             )
         else:
-            return self.memory_bank.search_by_category(
+            return self.project_memory.search_by_category(
+                session_id,
                 'best_practice',
                 limit=10
             )
@@ -154,7 +172,8 @@ class AgentMemory:
         # Store successful patterns as memories
         if len(session.completed_phases) >= 4:  # At least partially complete
             learning_id = f"lesson_{session_id}"
-            self.memory_bank.store_memory(
+            self.project_memory.store_memory(
+                session_id=session_id,
                 entry_id=learning_id,
                 category='lesson_learned',
                 content=f"Project: {session.project_name}, Module: {session.module}",
@@ -168,14 +187,27 @@ class AgentMemory:
                 importance=0.8
             )
     
-    def get_memory_stats(self) -> dict:
-        """Get statistics about memory usage"""
+    def get_memory_stats(self, session_id: str) -> dict:
+        """Get statistics about one project's memory usage. Requires a
+        session_id now that memory is per-project rather than global -
+        there's no longer a single pool to summarize across everyone."""
+        categories: dict = {}
+        for cat in ('requirements_template', 'process_pattern', 'solution_pattern',
+                    'test_case_template', 'best_practice', 'lesson_learned',
+                    'common_issue', 'erp_knowledge'):
+            entries = self.project_memory.search_by_category(session_id, cat)
+            if entries:
+                categories[cat] = len(entries)
         return {
             'sessions': {
                 'active': len(self.session_service.list_sessions()),
                 'sessions': self.session_service.list_sessions()
             },
-            'memory_bank': self.memory_bank.get_statistics()
+            'project_memory': {
+                'session_id': session_id,
+                'total_memories': sum(categories.values()),
+                'categories': categories,
+            }
         }
 
 

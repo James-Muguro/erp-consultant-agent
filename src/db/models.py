@@ -15,7 +15,7 @@ key from sessions to users without an awkward later migration.
 """
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Boolean, Integer
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Boolean, Integer, Float
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.types import JSON
 
@@ -83,3 +83,35 @@ class Feedback(Base):
     comment = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False,
                          default=lambda: datetime.now(timezone.utc))
+
+
+class ProjectMemory(Base):
+    """Per-project agent knowledge: seeded templates, patterns the agents
+    generate as they work, lessons learned at project completion, and
+    (soon) extracted text from uploaded documents.
+
+    Strictly scoped to session_id - this replaces the old global,
+    file-based MemoryBank (src/memory/memory_bank.py), which had every
+    project's "learned" content shared across ALL users and projects. That
+    was fine for a single-tenant hackathon demo but is a real cross-tenant
+    data leak once there's more than one user: one user's project details
+    could surface in another user's agent-generated output. Every query
+    against this table must filter by session_id - there is no
+    cross-project read path, by design.
+    """
+    __tablename__ = "project_memories"
+
+    id = Column(String, primary_key=True)
+    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=False, index=True)
+    category = Column(String, nullable=False, index=True)
+    content = Column(Text, nullable=False)
+    entry_metadata = Column(_json_type()(), nullable=True)
+    # Stored as JSON (not a native array type) so this works identically on
+    # SQLite (dev) and Postgres (prod) - consistent with the rest of this
+    # file's approach to cross-dialect columns.
+    tags = Column(_json_type()(), nullable=True)
+    importance = Column(Float, nullable=False, default=1.0)
+    access_count = Column(Integer, nullable=False, default=0)
+    last_accessed = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False,
+                         default=lambda: datetime.now(timezone.utc), index=True)
