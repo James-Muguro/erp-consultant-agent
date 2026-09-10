@@ -479,22 +479,32 @@ class DbSessionService(InMemorySessionService):
         finally:
             db.close()
 
-    def delete_session(self, session_id: str) -> bool:
-        from src.db.models import SessionRecord
+def delete_session(self, session_id: str) -> bool:
+    from src.db.models import SessionRecord, ProjectMemory, Feedback
+
+    db = self._db_session_factory()
+    try:
+        record = db.get(SessionRecord, session_id)
+        if record is None:
+            return False
+
+        db.query(ProjectMemory).filter(
+            ProjectMemory.session_id == session_id
+        ).delete(synchronize_session=False)
+
+        db.query(Feedback).filter(
+            Feedback.session_id == session_id
+        ).delete(synchronize_session=False)
+
+        db.delete(record)
+        db.commit()
 
         self.sessions.pop(session_id, None)
 
-        db = self._db_session_factory()
-        try:
-            record = db.get(SessionRecord, session_id)
-            if record is None:
-                return False
-            db.delete(record)
-            db.commit()
-            self.logger.info("Session deleted", session_id=session_id)
-            return True
-        finally:
-            db.close()
+        self.logger.info("Session deleted", session_id=session_id)
+        return True
+    finally:
+        db.close()
 
 
 # Global session service instance - database-backed (see DbSessionService
