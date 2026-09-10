@@ -142,22 +142,16 @@ def make_checkpointer(database_url: str):
     checkpointer.setup()
     return checkpointer
 
-_GRAPH_INSTANCE = None
+import threading
 
+_GRAPH_INSTANCE = None
+_GRAPH_LOCK = threading.Lock()
 
 def get_intake_graph():
-    """Lazily-built singleton, same pattern as llm.get_llm() and the
-    orchestrator/agent_memory module-level instances elsewhere in this
-    codebase. Keeps one long-lived psycopg connection for the app's
-    lifetime rather than opening/closing per request.
-
-    Known limitation: this single connection is not proven safe under
-    concurrent requests from multiple worker threads (Starlette runs sync
-    routes in a threadpool). Fine for today's low-traffic usage; revisit
-    with a connection pool (psycopg_pool) if concurrent intake traffic
-    becomes real."""
     global _GRAPH_INSTANCE
     if _GRAPH_INSTANCE is None:
-        checkpointer = make_checkpointer(settings.database_url)
-        _GRAPH_INSTANCE = build_intake_graph(checkpointer)
+        with _GRAPH_LOCK:
+            if _GRAPH_INSTANCE is None:  # re-check inside the lock
+                checkpointer = make_checkpointer(settings.database_url)
+                _GRAPH_INSTANCE = build_intake_graph(checkpointer)
     return _GRAPH_INSTANCE
