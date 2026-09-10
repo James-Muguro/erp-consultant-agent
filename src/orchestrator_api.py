@@ -318,14 +318,23 @@ def _run_intake_step(session_id: str, user_input: Optional[str], resume: bool) -
         logger.info({"event": "intake_pre_resume", "session_id": session_id,
                      "next": snapshot.next, "answers": (snapshot.values or {}).get("answers")})
         if snapshot.next == ('await_stakeholder_answers',) and (not user_input or len(user_input.strip()) < 40):
-            return {...}
+            return {
+                'success': True,
+                'answer': "I don't see enough stakeholder input to work with yet. Please paste the "
+                          "completed questionnaire answers as a message, and I'll take it from there.",
+            }
 
     try:
         if resume:
             result = graph.invoke(Command(resume=user_input), config=config)
         else:
             session = agent_memory.session_service.get_session(session_id)
-            result = graph.invoke({...}, config=config)
+            result = graph.invoke({
+                "session_id": session_id,
+                "project_name": session.project_name,
+                "module": session.module,
+                "erp_system": session.erp_system,
+            }, config=config)
     except Exception as e:
         logger.error(f"Intake graph step failed: {e}")
         return {'success': False, 'error': str(e)}
