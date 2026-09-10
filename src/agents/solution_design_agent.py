@@ -69,7 +69,7 @@ class SolutionDesignAgent:
             integration_points = erp_kb.get_integration_points(module, erp_system)
             
             # Get relevant design patterns from memory
-            design_patterns = agent_memory.recall({
+            design_patterns = agent_memory.recall(session_id, {
                 'category': 'solution_pattern',
                 'tags': [module.lower(), 'design']
             }, limit=3)

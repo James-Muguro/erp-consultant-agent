@@ -75,7 +75,7 @@ class ProcessMappingAgent:
             module_info = erp_kb.get_module_info(module, erp_system)
             
             # Get relevant memories
-            past_processes = agent_memory.recall({
+            past_processes = agent_memory.recall(session_id, {
                 'category': 'process_pattern',
                 'tags': [process_name.lower(), module.lower()]
             }, limit=3)

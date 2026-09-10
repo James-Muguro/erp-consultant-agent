@@ -63,7 +63,7 @@ class TrainingAgent:
         
         try:
             # Get training templates from memory
-            training_templates = agent_memory.recall({
+            training_templates = agent_memory.recall(session_id, {
                 'category': 'requirements_template',  # Using general templates
                 'tags': ['training', 'documentation']
             }, limit=2)

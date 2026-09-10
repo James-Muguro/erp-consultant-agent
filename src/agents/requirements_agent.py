@@ -70,8 +70,8 @@ class RequirementsAgent:
             best_practices = erp_kb.get_best_practices(module, erp_system)
             
             # Get templates from memory
-            template = agent_memory.get_template('requirements')
-            past_learnings = agent_memory.recall({
+            template = agent_memory.get_template(session_id, 'requirements')
+            past_learnings = agent_memory.recall(session_id, {
                 'category': 'requirements_template',
                 'tags': [module.lower(), 'requirements']
             }, limit=3)

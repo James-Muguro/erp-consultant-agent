@@ -63,7 +63,7 @@ class QATestingAgent:
         
         try:
             # Get test templates from memory
-            test_templates = agent_memory.recall({
+            test_templates = agent_memory.recall(session_id, {
                 'category': 'test_case_template',
                 'tags': ['qa', module.lower()]
             }, limit=3)
@@ -325,7 +325,7 @@ class UATTestingAgent:
         
         try:
             # Get UAT templates from memory
-            uat_templates = agent_memory.recall({
+            uat_templates = agent_memory.recall(session_id, {
                 'category': 'test_case_template',
                 'tags': ['uat', 'user-acceptance']
             }, limit=2)
