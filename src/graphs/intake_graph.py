@@ -118,16 +118,27 @@ def build_intake_graph(checkpointer):
 
 
 def make_checkpointer(database_url: str):
-    """Creates the Postgres connection LangGraph's checkpointer needs.
-    autocommit=True and row_factory=dict_row are required - the
-    checkpointer raises a confusing TypeError deep inside its own code
-    without them. Call .setup() once (idempotent) before first use."""
-    import psycopg
+    """Creates a pooled Postgres connection for LangGraph's checkpointer.
+    A single shared connection is NOT safe under concurrent requests -
+    FastAPI runs sync routes in a threadpool, and simultaneous use of one
+    psycopg connection object across threads can silently return
+    incorrect results (confirmed root cause of a real production bug:
+    the intake flow intermittently 'forgot' it was mid-question and fell
+    through to normal chat routing). A ConnectionPool gives each
+    concurrent caller its own connection, checked out and returned
+    safely. autocommit=True and row_factory=dict_row are still required
+    per-connection - the checkpointer raises a confusing TypeError deep
+    inside its own code without them."""
+    from psycopg_pool import ConnectionPool
     from psycopg.rows import dict_row
     from langgraph.checkpoint.postgres import PostgresSaver
 
-    conn = psycopg.connect(database_url, autocommit=True, row_factory=dict_row)
-    checkpointer = PostgresSaver(conn)
+    pool = ConnectionPool(
+        conninfo=database_url,
+        max_size=10,
+        kwargs={"autocommit": True, "row_factory": dict_row},
+    )
+    checkpointer = PostgresSaver(pool)
     checkpointer.setup()
     return checkpointer
 
