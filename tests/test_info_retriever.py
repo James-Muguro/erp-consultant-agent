@@ -11,7 +11,7 @@ def mock_dependencies():
     each source returns."""
     with patch("src.tools.info_retriever.reasoning_tool") as mock_reasoning, \
          patch("src.tools.info_retriever.erp_kb") as mock_kb, \
-         patch("src.tools.info_retriever.memory_bank") as mock_memory, \
+         patch("src.tools.info_retriever.project_memory_store") as mock_memory, \
          patch("src.tools.info_retriever.google_search_tool") as mock_google:
         mock_kb.search_knowledge.return_value = []
         mock_memory.search_by_keywords.return_value = []
@@ -27,7 +27,21 @@ def mock_dependencies():
 
 
 class TestDecisionRouting:
-    def test_kb_decision_only_queries_kb_and_memory_not_web(self, mock_dependencies):
+    def test_kb_decision_queries_kb_and_memory_when_session_id_given(self, mock_dependencies):
+        mock_dependencies["reasoning"].assess_source.return_value = {
+            'decision': 'kb', 'confidence': 0.8, 'reasoning': 'internal question'
+        }
+
+        result = retrieve("what is a GL account?", session_id="prj_test_123")
+
+        mock_dependencies["kb"].search_knowledge.assert_called_once()
+        mock_dependencies["memory"].search_by_keywords.assert_called_once()
+        mock_dependencies["google_instance"].assert_not_called()
+        assert result['web_results'] == []
+
+    def test_kb_decision_skips_memory_search_when_no_session_id(self, mock_dependencies):
+        """No active project means no project-scoped memory to search -
+        this must not search across every project as a fallback."""
         mock_dependencies["reasoning"].assess_source.return_value = {
             'decision': 'kb', 'confidence': 0.8, 'reasoning': 'internal question'
         }
@@ -35,16 +49,15 @@ class TestDecisionRouting:
         result = retrieve("what is a GL account?")
 
         mock_dependencies["kb"].search_knowledge.assert_called_once()
-        mock_dependencies["memory"].search_by_keywords.assert_called_once()
-        mock_dependencies["google_instance"].assert_not_called()
-        assert result['web_results'] == []
+        mock_dependencies["memory"].search_by_keywords.assert_not_called()
+        assert not any(s['type'] == 'memory' for s in result['sources'])
 
     def test_web_decision_only_queries_web_not_kb(self, mock_dependencies):
         mock_dependencies["reasoning"].assess_source.return_value = {
             'decision': 'web', 'confidence': 0.9, 'reasoning': 'needs current info'
         }
 
-        result = retrieve("latest SAP release date")
+        result = retrieve("latest SAP release date", session_id="prj_test_123")
 
         mock_dependencies["kb"].search_knowledge.assert_not_called()
         mock_dependencies["memory"].search_by_keywords.assert_not_called()
@@ -56,7 +69,7 @@ class TestDecisionRouting:
             'decision': 'hybrid', 'confidence': 0.7, 'reasoning': 'mixed'
         }
 
-        retrieve("query")
+        retrieve("query", session_id="prj_test_123")
 
         mock_dependencies["kb"].search_knowledge.assert_called_once()
         mock_dependencies["google_instance"].assert_called_once()
@@ -70,6 +83,16 @@ class TestDecisionRouting:
     def test_prefer_web_result_decision_is_recorded_as_web(self, mock_dependencies):
         result = retrieve("query", prefer_web=True)
         assert result['decision']['decision'] == 'web'
+
+
+class TestMemoryScoping:
+    def test_memory_search_is_scoped_to_the_given_session_id(self, mock_dependencies):
+        mock_dependencies["reasoning"].assess_source.return_value = {'decision': 'kb', 'confidence': 0.8, 'reasoning': 'x'}
+
+        retrieve("query", session_id="prj_specific_project")
+
+        args, kwargs = mock_dependencies["memory"].search_by_keywords.call_args
+        assert args[0] == "prj_specific_project"
 
 
 class TestResultAggregation:
@@ -98,7 +121,7 @@ class TestResultAggregation:
         fake_memory_item.to_dict.return_value = {'summary': 'a past decision'}
         mock_dependencies["memory"].search_by_keywords.return_value = [fake_memory_item]
 
-        result = retrieve("query")
+        result = retrieve("query", session_id="prj_test_123")
 
         assert {'summary': 'a past decision'} in result['kb_results']
         assert any(s['type'] == 'memory' for s in result['sources'])

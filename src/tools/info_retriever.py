@@ -1,10 +1,10 @@
 """
 Info Retriever - Decides between internal KB, memory, or web search and returns aggregated results
 """
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from src.tools import google_search as google_search_tool
 from src.tools.erp_knowledge_base import erp_kb
-from src.memory.memory_bank import memory_bank
+from src.memory.project_memory import project_memory_store
 from src.tools.reasoning import reasoning_tool
 from src.utils.logger import AgentLogger
 
@@ -12,8 +12,18 @@ from src.utils.logger import AgentLogger
 logger = AgentLogger("InfoRetriever")
 
 
-def retrieve(query: str, context: Dict[str, Any] = None, prefer_web: bool = False) -> Dict[str, Any]:
+def retrieve(
+    query: str,
+    context: Dict[str, Any] = None,
+    prefer_web: bool = False,
+    session_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """Retrieve information about a query using KB, memory, or web.
+
+    session_id scopes the "memory" source to one project's own knowledge -
+    a question asked with no active project (session_id=None, e.g. before
+    starting one) simply has no project memory to search, so that source
+    is skipped entirely rather than searching across every project.
 
     Returns aggregated results with source metadata and scores.
     """
@@ -40,11 +50,12 @@ def retrieve(query: str, context: Dict[str, Any] = None, prefer_web: bool = Fals
             results['kb_results'].extend(kb_hits)
             results['sources'].append({'type': 'kb', 'items': kb_hits})
 
-        mem_hits = memory_bank.search_by_keywords(query.lower().split())
-        if mem_hits:
-            mem_dicts = [m.to_dict() for m in mem_hits]
-            results['kb_results'].extend(mem_dicts)
-            results['sources'].append({'type': 'memory', 'items': mem_dicts})
+        if session_id:
+            mem_hits = project_memory_store.search_by_keywords(session_id, query.lower().split())
+            if mem_hits:
+                mem_dicts = [m.to_dict() for m in mem_hits]
+                results['kb_results'].extend(mem_dicts)
+                results['sources'].append({'type': 'memory', 'items': mem_dicts})
 
     # Use web if decision is web or hybrid
     if decision['decision'] in ('web', 'hybrid'):

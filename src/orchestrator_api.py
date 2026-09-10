@@ -49,6 +49,14 @@ from contextlib import asynccontextmanager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings.init_directories()
+    if not settings.database_url.startswith("sqlite"):
+        # LangGraph's Postgres checkpointer has no SQLite equivalent - skip
+        # eager init under the zero-setup SQLite default (dev/test), same
+        # convention as DbSessionService's own dialect check. The intake
+        # graph will simply be unavailable in that mode; the rest of the
+        # app is unaffected.
+        from src.graphs.intake_graph import get_intake_graph
+        get_intake_graph()
     yield
 
 app = FastAPI(title="ERP Orchestrator API", lifespan=lifespan)
@@ -236,13 +244,6 @@ def _derive_chat_title(message: str) -> str:
         title = title[:57].rstrip() + "..."
     return title[0].upper() + title[1:]
 
-INTAKE_QUESTIONS = [
-    {"key": "industry", "text": "What industry is the client in?"},
-    {"key": "company_size", "text": "Roughly how large is the organization (employee count or revenue range)?"},
-    {"key": "primary_goal", "text": "What's the primary business problem or goal driving this ERP initiative?"},
-    {"key": "scope_areas", "text": "Which business areas are in scope for this phase (e.g. Finance, Supply Chain, HR)?"},
-]
-
 PHASE_ORDER = ['requirements_gathering', 'process_mapping', 'solution_design', 'qa_testing', 'uat_testing', 'training', 'completed']
 
 PHASE_LABELS = {
@@ -263,17 +264,16 @@ def _next_action_for(session) -> Optional[Dict[str, Any]]:
     if session.is_casual:
         return None
 
-    intake_state = (session.metadata or {}).get('intake')
     has_requirements = bool(agent_memory.get_phase_output(session.session_id, 'requirements_gathering'))
-    has_template = bool((session.metadata or {}).get('requirements_template_path'))
 
     if session.current_phase == 'requirements_gathering' and not has_requirements:
-        if intake_state and intake_state.get('active'):
+        if _intake_is_pending(session.session_id):
+            # Graph is waiting on the next question's answer, or on the
+            # user's pasted stakeholder answers - no button needed either
+            # way; the next plain message IS the response it's waiting for.
             return None
-        if not has_template:
+        if not _intake_is_complete(session.session_id):
             return {'label': 'Start requirements intake', 'agent_hint': 'start_intake'}
-        if (session.metadata or {}).get('stakeholder_answers_provided'):
-            return {'label': "I have my stakeholder answers - structure them", 'agent_hint': 'structure_requirements'}
         return None
 
     if session.current_phase in PHASE_LABELS:
@@ -281,45 +281,81 @@ def _next_action_for(session) -> Optional[Dict[str, Any]]:
 
     return None
 
-def _handle_intake_message(session, req: ChatRequest) -> Dict[str, Any]:
-    """Advances the conversational intake state machine by one step.
-    Session.metadata is the source of truth (no schema change needed -
-    it's already a JSON blob). Returns a dict shaped like an agent phase
-    result so callers can treat it the same way as a real phase result."""
-    intake = session.metadata.setdefault('intake', {'active': True, 'question_index': 0, 'answers': {}})
-    idx = intake['question_index']
+def _intake_config(session_id: str) -> dict:
+    return {"configurable": {"thread_id": session_id}}
 
-    if idx > 0:
-        prev_key = INTAKE_QUESTIONS[idx - 1]['key']
-        intake['answers'][prev_key] = req.message
 
-    if idx < len(INTAKE_QUESTIONS):
-        question = INTAKE_QUESTIONS[idx]['text']
-        intake['question_index'] = idx + 1
-        agent_memory.session_service.update_session(session.session_id, {'metadata': session.metadata})
-        return {'success': True, 'answer': question}
+def _intake_is_pending(session_id: str) -> bool:
+    """True if this session has a LangGraph intake flow paused waiting for
+    input. Returns False (not pending) if the intake graph isn't available
+    at all - e.g. under the SQLite dev/test default, which LangGraph's
+    Postgres checkpointer doesn't support. See lifespan() for the same
+    dialect check."""
+    if settings.database_url.startswith("sqlite"):
+        return False
+    from src.graphs.intake_graph import get_intake_graph
+    snapshot = get_intake_graph().get_state(_intake_config(session_id))
+    return bool(snapshot.next)
 
-    intake['active'] = False
-    agent_memory.session_service.update_session(session.session_id, {'metadata': session.metadata})
 
-    template_result = requirements_agent.generate_requirements_template(
-        project_name=session.project_name,
-        module=session.module,
-        erp_system=session.erp_system,
-        context=intake['answers'],
-    )
-    if not template_result.get('success'):
-        return {'success': False, 'error': template_result.get('error', 'Failed to generate requirements template')}
+def _intake_is_complete(session_id: str) -> bool:
+    if settings.database_url.startswith("sqlite"):
+        return True  # nothing to offer if intake can't run at all
+    from src.graphs.intake_graph import get_intake_graph
+    snapshot = get_intake_graph().get_state(_intake_config(session_id))
+    return bool(snapshot.values) and not snapshot.next
 
-    session.metadata['requirements_template_path'] = template_result['document_path']
-    session.metadata['awaiting_stakeholder_answers'] = True
-    session.metadata['stakeholder_answers_provided'] = False
-    agent_memory.session_service.update_session(session.session_id, {'metadata': session.metadata})
 
-    answer = ("Thanks - I've put together a requirements questionnaire based on your answers. "
-              "Download it, work through it with your stakeholders, then come back and paste "
-              "their answers in so I can turn them into a formal requirements document.")
-    return {'success': True, 'answer': answer, 'document_path': template_result['document_path']}
+def _run_intake_step(session_id: str, user_input: Optional[str], resume: bool) -> Dict[str, Any]:
+    """Advances the intake graph by one step - either starting it fresh
+    (resume=False) or resuming a paused interrupt with the user's message
+    (resume=True). Returns a dict shaped like an agent phase result so
+    callers can treat it uniformly.
+
+    The minimum-length check only applies when resuming from
+    await_stakeholder_answers specifically - the four intake questions
+    (collect_intake) accept any-length answers ('Healthcare' is a valid,
+    short, correct answer)."""
+    from src.graphs.intake_graph import get_intake_graph
+    from langgraph.types import Command
+
+    graph = get_intake_graph()
+    config = _intake_config(session_id)
+
+    if resume:
+        snapshot = graph.get_state(config)
+        if snapshot.next == ('await_stakeholder_answers',) and (not user_input or len(user_input.strip()) < 40):
+            return {
+                'success': True,
+                'answer': "I don't see enough stakeholder input to work with yet. Please paste the "
+                          "completed questionnaire answers as a message, and I'll take it from there.",
+            }
+
+    try:
+        if resume:
+            result = graph.invoke(Command(resume=user_input), config=config)
+        else:
+            session = agent_memory.session_service.get_session(session_id)
+            result = graph.invoke({
+                "session_id": session_id,
+                "project_name": session.project_name,
+                "module": session.module,
+                "erp_system": session.erp_system,
+            }, config=config)
+    except Exception as e:
+        logger.error(f"Intake graph step failed: {e}")
+        return {'success': False, 'error': str(e)}
+
+    interrupts = result.get('__interrupt__')
+    if interrupts:
+        answer = result.get('final_answer') or interrupts[0].value
+        return {'success': True, 'answer': answer, 'document_path': result.get('document_path')}
+
+    return {
+        'success': True,
+        'answer': result.get('final_answer', 'Done.'),
+        'document_path': result.get('document_path'),
+    }
 
 def _get_owned_session(session_id: str, current_user: User):
     """Fetch a session and verify it belongs to current_user. Sessions
@@ -573,8 +609,7 @@ def execute_phase(session_id: str, phase_name: str, current_user: User = Depends
 
     if phase_name not in phase_map:
         raise HTTPException(status_code=400, detail=f"Unknown phase: {phase_name}")
-
-    result = phase_map[decision.phase](**phase_kwargs)
+    result = phase_map[phase_name](session_id=session_id)
     if not result.get('success'):
         raise HTTPException(status_code=500, detail=result.get('error'))
     return result
@@ -732,17 +767,15 @@ def chat(req: ChatRequest, current_user: User = Depends(get_current_user)):
     llm_instance = llm_mod.get_llm()
     llm_mode = "gemini" if getattr(llm_instance, "use_gemini", True) else "gpt-4"
 
-    if req.session_id:
-        session = agent_memory.session_service.get_session(req.session_id)
-        if session and (session.metadata or {}).get('intake', {}).get('active'):
-            res = _handle_intake_message(session, req)
-            if not res.get('success'):
-                return _chat_response(res.get('error', 'Intake failed.'), llm_mode=llm_mode,
-                                      success=False, session_id=req.session_id)
-            answer = res['answer']
-            agent_memory.session_service.add_to_conversation(req.session_id, role="user", content=req.message)
-            agent_memory.session_service.add_to_conversation(req.session_id, role="assistant", content=answer)
-            return _chat_response(answer, llm_mode=llm_mode, session_id=req.session_id)
+    if req.session_id and _intake_is_pending(req.session_id):
+        res = _run_intake_step(req.session_id, req.message, resume=True)
+        if not res.get('success'):
+            return _chat_response(res.get('error', 'Intake failed.'), llm_mode=llm_mode,
+                                  success=False, session_id=req.session_id)
+        answer = res['answer']
+        agent_memory.session_service.add_to_conversation(req.session_id, role="user", content=req.message)
+        agent_memory.session_service.add_to_conversation(req.session_id, role="assistant", content=answer)
+        return _chat_response(answer, llm_mode=llm_mode, session_id=req.session_id)
 
     # Explicit agent_hint always wins - it's a direct instruction from the
     # caller, not something that needs classifying
@@ -792,6 +825,10 @@ def chat(req: ChatRequest, current_user: User = Depends(get_current_user)):
         if decision.phase not in phase_map:
             return _chat_response("Could not determine which phase to run.", llm_mode=llm_mode, success=False)
 
+        phase_kwargs = {'session_id': req.session_id}
+        if decision.phase == 'requirements':
+            phase_kwargs['stakeholder_input'] = req.message
+
         result = phase_map[decision.phase](**phase_kwargs)
         if result.get('success'):
             return _chat_response(f"Phase '{decision.phase}' executed successfully.", llm_mode=llm_mode, session_id=req.session_id)
@@ -827,7 +864,7 @@ def chat(req: ChatRequest, current_user: User = Depends(get_current_user)):
         title = _derive_chat_title(req.message)
         session_id = agent_memory.create_project(project_name=title, module='FI', user_id=current_user.id, is_casual=True)
 
-    data = info_retriever(req.message, {'summary': ''}, prefer_web=req.prefer_web)
+    data = info_retriever(req.message, {'summary': ''}, prefer_web=req.prefer_web, session_id=req.session_id)
     generation_config = {
         'temperature': 0.5,
         'max_output_tokens': settings.max_tokens,
@@ -885,30 +922,23 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
         llm_instance = llm_mod.get_llm()
         llm_mode = "gemini" if getattr(llm_instance, "use_gemini", True) else "gpt-4"
 
-        if req.session_id:
-            session = agent_memory.session_service.get_session(req.session_id)
-            if session and (session.metadata or {}).get('intake', {}).get('active'):
-                yield ev('agent_started', agent='intake', message='Gathering project context')
-                res = _handle_intake_message(session, req)
-                if not res.get('success'):
-                    yield ev('error', message=res.get('error', 'Intake failed.'))
-                    return
-                answer = res['answer']
-                agent_memory.session_service.add_to_conversation(req.session_id, role="user", content=req.message)
-                agent_memory.session_service.add_to_conversation(req.session_id, role="assistant", content=answer)
-                if res.get('document_path'):
-                    yield ev('document_created', phase='requirements_template', filename=os.path.basename(res['document_path']))
-                yield ev('text_delta', text=answer)
-                yield ev('workflow_completed')
-                next_action = _next_action_for(agent_memory.session_service.get_session(req.session_id))
-                yield ev('message_complete', answer=answer, llm_mode=llm_mode, session_id=req.session_id,
-                          next_action=next_action)
+        if req.session_id and _intake_is_pending(req.session_id):
+            yield ev('agent_started', agent='intake', message='Gathering project context')
+            res = _run_intake_step(req.session_id, req.message, resume=True)
+            if not res.get('success'):
+                yield ev('error', message=res.get('error', 'Intake failed.'))
                 return
-            elif session and (session.metadata or {}).get('awaiting_stakeholder_answers') \
-                    and not (session.metadata or {}).get('stakeholder_answers_provided') \
-                    and len(req.message.strip()) >= 40:
-                session.metadata['stakeholder_answers_provided'] = True
-                agent_memory.session_service.update_session(req.session_id, {'metadata': session.metadata})
+            answer = res['answer']
+            agent_memory.session_service.add_to_conversation(req.session_id, role="user", content=req.message)
+            agent_memory.session_service.add_to_conversation(req.session_id, role="assistant", content=answer)
+            if res.get('document_path'):
+                yield ev('document_created', phase='requirements_template', filename=os.path.basename(res['document_path']))
+            yield ev('text_delta', text=answer)
+            yield ev('workflow_completed')
+            next_action = _next_action_for(agent_memory.session_service.get_session(req.session_id))
+            yield ev('message_complete', answer=answer, llm_mode=llm_mode, session_id=req.session_id,
+                      next_action=next_action)
+            return
 
         if req.agent_hint and req.session_id:
             session = agent_memory.session_service.get_session(req.session_id)
@@ -918,46 +948,13 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
             hint = req.agent_hint.lower()
 
             if hint == 'start_intake':
-                res = _handle_intake_message(session, req)
+                res = _run_intake_step(req.session_id, None, resume=False)
                 if not res.get('success'):
                     yield ev('error', message=res.get('error', 'Intake failed.'))
                     return
                 answer = res['answer']
                 agent_memory.session_service.add_to_conversation(req.session_id, role="user", content=req.message)
                 agent_memory.session_service.add_to_conversation(req.session_id, role="assistant", content=answer)
-                yield ev('text_delta', text=answer)
-                yield ev('workflow_completed')
-                next_action = _next_action_for(agent_memory.session_service.get_session(req.session_id))
-                yield ev('message_complete', answer=answer, llm_mode=llm_mode, session_id=req.session_id,
-                          next_action=next_action)
-                return
-
-            if hint == 'structure_requirements':
-                history = session.conversation_history or []
-                last_user_message = next(
-                    (m['content'] for m in reversed(history) if m.get('role') == 'user'), None
-                )
-                if not last_user_message or len(last_user_message.strip()) < 40:
-                    yield ev('error', message="I don't see enough stakeholder input to work with yet. "
-                                               "Please paste the completed questionnaire answers as a "
-                                               "message first, then click this button.")
-                    return
-
-                yield ev('agent_started', agent='requirements', message='Structuring your requirements')
-                res = requirements_agent.gather_requirements(
-                    session_id=req.session_id, project_name=session.project_name,
-                    module=session.module, stakeholder_input=last_user_message, erp_system=session.erp_system
-                )
-                if not res.get('success'):
-                    yield ev('error', message=res.get('error', 'Failed to structure requirements.'))
-                    return
-                agent_memory.advance_phase(req.session_id, 'process_mapping')
-                summary = res.get('requirements', {}).get('executive_summary', 'Requirements captured.')
-                answer = f"Requirements structured and saved: {summary}"
-                agent_memory.session_service.add_to_conversation(req.session_id, role="user", content=req.message)
-                agent_memory.session_service.add_to_conversation(req.session_id, role="assistant", content=answer)
-                if res.get('document_path'):
-                    yield ev('document_created', phase='requirements_gathering', filename=os.path.basename(res['document_path']))
                 yield ev('text_delta', text=answer)
                 yield ev('workflow_completed')
                 next_action = _next_action_for(agent_memory.session_service.get_session(req.session_id))
@@ -1099,7 +1096,7 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
             session_id = agent_memory.create_project(project_name=title, module='FI', user_id=current_user.id, is_casual=True)
 
         yield ev('tool_started', tool='info_retriever', message='Searching knowledge base and web')
-        data = info_retriever(req.message, {'summary': ''}, prefer_web=req.prefer_web)
+        data = info_retriever(req.message, {'summary': ''}, prefer_web=req.prefer_web, session_id=req.session_id)
         yield ev('tool_completed', tool='info_retriever')
 
         generation_config = {

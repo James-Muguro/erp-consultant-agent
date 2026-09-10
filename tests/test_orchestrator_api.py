@@ -357,7 +357,7 @@ def test_chat_end_to_end(mock_get_llm, mock_info_retriever):
     assert 'message' not in data
     
     # Ensure the correct mocks were called
-    mock_info_retriever.assert_called_once_with('What is a bill of lading?', {'summary': ''}, prefer_web=False)
+    mock_info_retriever.assert_called_once_with('What is a bill of lading?', {'summary': ''}, prefer_web=False, session_id=None)
     mock_get_llm.assert_called_once()
     # Two calls now: one to classify intent, one to synthesize the answer
     assert mock_llm.generate_content.call_count == 2
