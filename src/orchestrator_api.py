@@ -49,47 +49,22 @@ from contextlib import asynccontextmanager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings.init_directories()
-    if not settings.database_url.startswith("sqlite"):
-        # LangGraph's Postgres checkpointer has no SQLite equivalent - skip
-        # eager init under the zero-setup SQLite default (dev/test), same
-        # convention as DbSessionService's own dialect check. The intake
-        # graph will simply be unavailable in that mode; the rest of the
-        # app is unaffected.
-        from src.graphs.intake_graph import get_intake_graph
-        get_intake_graph()
     yield
 
 app = FastAPI(title="ERP Orchestrator API", lifespan=lifespan)
 
 logger = get_logger(__name__)
 
-# Effectively disabled under pytest for both the default and auth-specific
-# limits below - TestClient shares one fake IP across every test, so a
-# real per-minute limit would fail unrelated tests depending on run order,
-# not because of a real vulnerability. Real requests never carry
-# PYTEST_CURRENT_TEST.
 _TESTING = "pytest" in sys.modules
 AUTH_RATE_LIMIT = "10000/minute" if _TESTING else "5/minute"
 DEFAULT_RATE_LIMIT = "100000/minute" if _TESTING else "60/minute"
 
 limiter = Limiter(
     key_func=get_remote_address,
-    # Applies to every route that doesn't set its own more specific
-    # @limiter.limit(...) (auth's stricter AUTH_RATE_LIMIT below still
-    # wins there) - closes a real gap: LLM-calling endpoints (chat,
-    # project start, phase execution) cost real money per request and had
-    # no rate limit at all before this. IP-based, same as auth's limiting -
-    # not perfect for users sharing a NAT'd IP, but meaningfully protective
-    # against a runaway client or a leaked/stolen token being hammered.
     default_limits=[DEFAULT_RATE_LIMIT],
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-# Required for default_limits to actually apply to routes that don't have
-# their own @limiter.limit(...) - without this middleware, default_limits
-# is silently a no-op on undecorated routes (confirmed by testing: without
-# it, 70 rapid requests to an undecorated route all succeeded despite a
-# 60/minute default configured).
 app.add_middleware(SlowAPIMiddleware)
 
 app.add_middleware(
@@ -102,40 +77,17 @@ app.add_middleware(
 
 @app.middleware("http")
 async def security_headers_middleware(request: Request, call_next):
-    """Standard defensive headers on every response. Deliberately does NOT
-    set Content-Security-Policy - this app serves both its own frontend
-    (dist/) and FastAPI's built-in /docs (Swagger UI, which loads CDN
-    scripts and would likely break under a strict CSP), and there's no
-    browser available in the environment this was written in to verify a
-    CSP wouldn't also break the frontend's own asset loading. Shipping an
-    unverified CSP risks silently breaking the app in a way that's only
-    visible in a real browser - worse than not having one yet. Add it once
-    someone can click through the app in an actual browser to confirm it
-    doesn't break anything; a reasonable starting point is:
-    default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
-    font-src 'self' https://fonts.gstatic.com; img-src 'self' data:;
-    connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
-    (probably restricted to only the app's own routes, with /docs exempted)."""
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
-    # Safe to always send - browsers ignore HSTS on a plain-HTTP response,
-    # and Render terminates TLS at its edge so the browser-facing
-    # connection is HTTPS even though it's forwarded to this process as
-    # plain HTTP internally.
     response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
     return response
 
 
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
-    """Every request gets a correlation ID: generated if the caller didn't
-    send one, echoed back on X-Request-ID, and bound into every structlog
-    line emitted while handling this request (via contextvars, already wired
-    into the logger's processor chain - see src/utils/logger.py) so a
-    support request referencing an ID can be grepped straight out of logs."""
     request_id = request.headers.get("X-Request-ID", str(uuid_lib.uuid4()))
     request.state.request_id = request_id
     structlog.contextvars.clear_contextvars()
@@ -163,10 +115,6 @@ def _error_envelope(request: Request, status_code: int, message: str) -> Dict:
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
-    """Consistent JSON error shape for every HTTPException raised anywhere
-    in the app, instead of each endpoint's raise producing a differently
-    shaped body. detail is still whatever the endpoint set - only the
-    envelope around it is standardized."""
     return JSONResponse(
         status_code=exc.status_code,
         content=_error_envelope(request, exc.status_code, str(exc.detail)),
@@ -176,11 +124,6 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
-    """Last-resort handler for anything that isn't an HTTPException - an
-    unexpected bug, a third-party library error, etc. Logs the real
-    exception (with traceback) server-side, keyed by request_id, but the
-    client only ever sees a generic message - never a stack trace, a file
-    path, or an internal error string."""
     logger.error("Unhandled exception", error=str(exc), exc_info=True)
     return JSONResponse(
         status_code=500,
@@ -218,7 +161,6 @@ class ChatRequest(BaseModel):
 
 
 def extract_text(response) -> str:
-    """Normalize any LLM response to a string for frontend display."""
     if response is None:
         return "No response from LLM."
     if hasattr(response, "text"):
@@ -233,9 +175,6 @@ def extract_text(response) -> str:
     return str(response)
 
 def _derive_chat_title(message: str) -> str:
-    """Best-effort short title for an auto-created chat session, derived
-    from the user's first message. Never raises - falls back to a fixed
-    label if the message is empty or entirely whitespace."""
     words = message.strip().split()
     if not words:
         return "New chat"
@@ -254,6 +193,45 @@ PHASE_LABELS = {
     'training': 'Create training material',
 }
 
+# ---------------------------------------------------------------------------
+# Requirements intake - plain per-session state (no LangGraph)
+# ---------------------------------------------------------------------------
+# Replaces the earlier LangGraph/checkpointer-based intake flow. Same
+# observable behavior for the user: 4 fixed questions asked in order, then
+# a generated stakeholder questionnaire template, then pasted stakeholder
+# answers get structured into a formal requirements document. State now
+# lives as plain data in session.metadata['intake'], scoped by session_id
+# exactly like every other piece of per-session data in this app (there's
+# no separate DB connection/pool/checkpointer to keep in sync with it,
+# which is what caused the earlier intermittent bugs).
+
+INTAKE_QUESTIONS = [
+    {"key": "industry", "text": "What industry is the client in?"},
+    {"key": "company_size", "text": "Roughly how large is the organization (employee count or revenue range)?"},
+    {"key": "primary_goal", "text": "What's the primary business problem or goal driving this ERP initiative?"},
+    {"key": "scope_areas", "text": "Which business areas are in scope for this phase (e.g. Finance, Supply Chain, HR)?"},
+]
+
+MIN_STAKEHOLDER_ANSWER_LENGTH = 40
+
+
+def _get_intake_state(session) -> dict:
+    """Reads the intake sub-state out of session.metadata, defaulting to
+    a fresh not-started shape if this session has never begun intake."""
+    metadata = session.metadata or {}
+    return dict(metadata.get("intake") or {"stage": "not_started", "answers": {}})
+
+
+def _save_intake_state(session_id: str, intake_state: dict) -> None:
+    """Writes the intake sub-state back into session.metadata under the
+    'intake' key, leaving every other metadata key (e.g.
+    requirements_template_path) untouched."""
+    session = agent_memory.session_service.get_session(session_id)
+    metadata = dict(session.metadata or {})
+    metadata["intake"] = intake_state
+    agent_memory.session_service.update_session(session_id, {"metadata": metadata})
+
+
 def _next_action_for(session) -> Optional[Dict[str, Any]]:
     """Deterministic suggestion for the next guided action in a structured
     project - drives the frontend's action buttons instead of relying on
@@ -268,9 +246,6 @@ def _next_action_for(session) -> Optional[Dict[str, Any]]:
 
     if session.current_phase == 'requirements_gathering' and not has_requirements:
         if _intake_is_pending(session.session_id):
-            # Graph is waiting on the next question's answer, or on the
-            # user's pasted stakeholder answers - no button needed either
-            # way; the next plain message IS the response it's waiting for.
             return None
         if not _intake_is_complete(session.session_id):
             return {'label': 'Start requirements intake', 'agent_hint': 'start_intake'}
@@ -281,86 +256,113 @@ def _next_action_for(session) -> Optional[Dict[str, Any]]:
 
     return None
 
-def _intake_config(session_id: str) -> dict:
-    return {"configurable": {"thread_id": session_id}}
-
 
 def _intake_is_pending(session_id: str) -> bool:
-    """True if this session has a LangGraph intake flow paused waiting for
-    input. Returns False (not pending) if the intake graph isn't available
-    at all - e.g. under the SQLite dev/test default, which LangGraph's
-    Postgres checkpointer doesn't support. See lifespan() for the same
-    dialect check."""
-    if settings.database_url.startswith("sqlite"):
+    """True if this session has an intake in progress - either still
+    collecting the 4 questions, or waiting on the pasted stakeholder
+    answers."""
+    session = agent_memory.session_service.get_session(session_id)
+    if not session:
         return False
-    from src.graphs.intake_graph import get_intake_graph
-    snapshot = get_intake_graph().get_state(_intake_config(session_id))
-    return bool(snapshot.next)
+    state = _get_intake_state(session)
+    return state.get("stage") in ("collecting", "awaiting_stakeholder_answers")
 
 
 def _intake_is_complete(session_id: str) -> bool:
-    if settings.database_url.startswith("sqlite"):
-        return True  # nothing to offer if intake can't run at all
-    from src.graphs.intake_graph import get_intake_graph
-    snapshot = get_intake_graph().get_state(_intake_config(session_id))
-    return bool(snapshot.values) and not snapshot.next
+    """True once intake has run all the way through to structured
+    requirements being saved."""
+    session = agent_memory.session_service.get_session(session_id)
+    if not session:
+        return False
+    state = _get_intake_state(session)
+    return state.get("stage") == "complete"
 
 
 def _run_intake_step(session_id: str, user_input: Optional[str], resume: bool) -> Dict[str, Any]:
-    from src.graphs.intake_graph import get_intake_graph
-    from langgraph.types import Command
+    """Advances the intake flow by one step - either starting fresh
+    (resume=False, asks question 1) or supplying the answer to whatever
+    it's currently waiting on (resume=True). Returns a dict shaped like
+    an agent phase result so callers can treat it uniformly, same as the
+    old graph-backed version."""
+    session = agent_memory.session_service.get_session(session_id)
+    if not session:
+        return {'success': False, 'error': 'Session not found.'}
 
-    graph = get_intake_graph()
-    config = _intake_config(session_id)
+    if not resume:
+        state = {"stage": "collecting", "answers": {}}
+        _save_intake_state(session_id, state)
+        return {'success': True, 'answer': INTAKE_QUESTIONS[0]['text']}
 
-    if resume:
-        snapshot = graph.get_state(config)
-        logger.info({"event": "intake_pre_resume", "session_id": session_id,
-                     "next": snapshot.next, "answers": (snapshot.values or {}).get("answers")})
-        if snapshot.next == ('await_stakeholder_answers',) and (not user_input or len(user_input.strip()) < 40):
+    state = _get_intake_state(session)
+    stage = state.get("stage")
+
+    if stage == "collecting":
+        answers = dict(state.get("answers") or {})
+        pending_question = next((q for q in INTAKE_QUESTIONS if q["key"] not in answers), None)
+        if pending_question is None:
+            return {'success': False, 'error': 'Intake questions already answered; unexpected state.'}
+
+        answers[pending_question["key"]] = user_input
+        state["answers"] = answers
+
+        next_question = next((q for q in INTAKE_QUESTIONS if q["key"] not in answers), None)
+        if next_question is not None:
+            _save_intake_state(session_id, state)
+            return {'success': True, 'answer': next_question['text']}
+
+        # All four questions answered - generate the stakeholder
+        # questionnaire template.
+        result = requirements_agent.generate_requirements_template(
+            project_name=session.project_name,
+            module=session.module,
+            erp_system=session.erp_system,
+            context=answers,
+        )
+        if not result.get("success"):
+            return {'success': False, 'error': result.get('error', 'Failed to generate requirements template')}
+
+        state["stage"] = "awaiting_stakeholder_answers"
+        _save_intake_state(session_id, state)
+        return {
+            'success': True,
+            'answer': ("Thanks - I've put together a requirements questionnaire based on your answers. "
+                       "Download it, work through it with your stakeholders, then come back and paste "
+                       "their answers in so I can turn them into a formal requirements document."),
+            'document_path': result['document_path'],
+        }
+
+    if stage == "awaiting_stakeholder_answers":
+        if not user_input or len(user_input.strip()) < MIN_STAKEHOLDER_ANSWER_LENGTH:
             return {
                 'success': True,
                 'answer': "I don't see enough stakeholder input to work with yet. Please paste the "
                           "completed questionnaire answers as a message, and I'll take it from there.",
             }
 
-    try:
-        if resume:
-            result = graph.invoke(Command(resume=user_input), config=config)
-        else:
-            session = agent_memory.session_service.get_session(session_id)
-            result = graph.invoke({
-                "session_id": session_id,
-                "project_name": session.project_name,
-                "module": session.module,
-                "erp_system": session.erp_system,
-            }, config=config)
-    except Exception as e:
-        logger.error(f"Intake graph step failed: {e}")
-        return {'success': False, 'error': str(e)}
+        result = requirements_agent.gather_requirements(
+            session_id=session_id,
+            project_name=session.project_name,
+            module=session.module,
+            stakeholder_input=user_input,
+            erp_system=session.erp_system,
+        )
+        if not result.get("success"):
+            return {'success': False, 'error': result.get('error', 'Failed to structure requirements')}
 
-    logger.info({"event": "intake_post_invoke", "session_id": session_id,
-                 "has_interrupt": bool(result.get('__interrupt__')),
-                 "final_answer": result.get('final_answer')})
+        agent_memory.advance_phase(session_id, "process_mapping")
+        state["stage"] = "complete"
+        _save_intake_state(session_id, state)
+        summary = result.get('requirements', {}).get('executive_summary', 'Requirements captured.')
+        return {
+            'success': True,
+            'answer': f"Requirements structured and saved: {summary}",
+            'document_path': result.get('document_path'),
+        }
 
-    interrupts = result.get('__interrupt__')
-    if interrupts:
-        answer = result.get('final_answer') or interrupts[0].value
-        return {'success': True, 'answer': answer, 'document_path': result.get('document_path')}
+    return {'success': False, 'error': f"Intake already complete or in an unexpected stage: {stage}"}
 
-    return {
-        'success': True,
-        'answer': result.get('final_answer', 'Done.'),
-        'document_path': result.get('document_path'),
-    }
 
 def _get_owned_session(session_id: str, current_user: User):
-    """Fetch a session and verify it belongs to current_user. Sessions
-    created before per-user auth existed (user_id is None) are treated as
-    not owned by anyone and are therefore inaccessible via the API - not
-    silently reassigned to whichever user happens to ask first. Returns
-    404 (never 403) for both "doesn't exist" and "not yours", so the API
-    never confirms a session ID exists to someone who doesn't own it."""
     session = agent_memory.session_service.get_session(session_id)
     if not session or session.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -472,8 +474,6 @@ def delete_account(current_user: User = Depends(get_current_user),
 
 @app.get("/health")
 def health():
-    """Liveness check: is the process up and able to respond at all. Does
-    not touch the database or any external service - see /ready for that."""
     serpapi_installed = True
     try:
         import serpapi  # type: ignore
@@ -494,11 +494,6 @@ def health():
 
 @app.get("/ready")
 def ready():
-    """Readiness check: can this instance actually serve traffic right now -
-    specifically, is the database reachable. Distinct from /health because a
-    process can be alive (health=ok) while its database connection is down,
-    e.g. during a Postgres failover - a load balancer or orchestrator should
-    stop routing traffic in that case, which /health alone can't signal."""
     try:
         with db_engine.connect() as conn:
             conn.execute(text("SELECT 1"))
@@ -515,8 +510,6 @@ def ready():
 
 @app.get("/api/projects")
 def list_projects(include_archived: bool = False, current_user: User = Depends(get_current_user)):
-    """List the current user's projects, most recently updated first.
-    Archived projects are hidden unless include_archived=true."""
     session_ids = agent_memory.session_service.list_sessions_for_user(
         current_user.id, include_archived=include_archived
     )
@@ -549,9 +542,6 @@ def rename_project(session_id: str, req: ProjectRename, current_user: User = Dep
 
 @app.delete("/api/projects/{session_id}")
 def archive_project(session_id: str, current_user: User = Depends(get_current_user)):
-    """Archives (soft-deletes) a conversation - hides it from the default
-    list without destroying the underlying data. There is currently no
-    unarchive/restore endpoint; add one if that turns out to be needed."""
     _get_owned_session(session_id, current_user)
     archived = agent_memory.session_service.archive_session(session_id)
     if not archived:
@@ -561,9 +551,6 @@ def archive_project(session_id: str, current_user: User = Depends(get_current_us
 
 @app.delete("/api/projects/{session_id}/permanent")
 def delete_project_permanently(session_id: str, current_user: User = Depends(get_current_user)):
-    """Permanently deletes a session and its data - distinct from
-    archive_project, which only hides it from the default list.
-    Irreversible."""
     _get_owned_session(session_id, current_user)
     deleted = agent_memory.session_service.delete_session(session_id)
     if not deleted:
@@ -625,13 +612,6 @@ _PHASES_WITH_DOCUMENTS = [
 
 
 def _collect_session_documents(session_id: str) -> List[Dict[str, str]]:
-    """Collect every generated document for a session, across all phases
-    whose output included one, plus any documents stored directly in
-    session metadata (e.g. the requirements questionnaire template, which
-    isn't tied to a completed phase - see _handle_intake_message). Most
-    phases store a single 'document_path'; training stores multiple named
-    documents under 'documents'. Process mapping stores one document per
-    process name."""
     documents = []
 
     for phase in _PHASES_WITH_DOCUMENTS:
@@ -640,8 +620,6 @@ def _collect_session_documents(session_id: str) -> List[Dict[str, str]]:
             continue
 
         if phase == 'process_mapping':
-            # process_maps is keyed by process name (multiple maps possible),
-            # unlike every other phase's flat {'document_path': ...} shape.
             for process_name, process_data in output.items():
                 if isinstance(process_data, dict) and process_data.get('document_path'):
                     documents.append({'phase': phase, 'label': process_name, 'path': process_data['document_path']})
@@ -685,12 +663,6 @@ def get_messages(session_id: str, current_user: User = Depends(get_current_user)
 def download_document(session_id: str, filename: str, current_user: User = Depends(get_current_user)):
     _get_owned_session(session_id, current_user)
 
-    # Whitelist match only: the requested filename must exactly match the
-    # basename of a document already known to belong to this session. The
-    # client-supplied filename is never resolved against the filesystem
-    # directly - only a server-known path is ever opened - so a crafted
-    # filename like "../../etc/passwd" simply won't match anything and
-    # fails with 404, regardless of what's requested.
     docs = _collect_session_documents(session_id)
     match = next((d for d in docs if os.path.basename(d['path']) == filename), None)
     if not match:
@@ -720,11 +692,6 @@ def _chat_response(answer: str, llm_mode: str, success: bool = True, session_id:
     }
 
 def classify_intent(llm_instance, message: str, has_session: bool) -> ChatIntentDecision:
-    """Classify the user's chat message into a known action. Falls back
-    to ASK_QUESTION on any failure - an unclear or misclassified message
-    should never accidentally trigger a workflow action. Takes the
-    already-resolved llm_instance rather than fetching its own, so a
-    single chat request only ever resolves the LLM client once."""
     prompt = f"""Classify this user message into exactly one intent.
 
 Message: "{message}"
@@ -756,8 +723,6 @@ Default to ask_question whenever the message is ambiguous, conversational, or in
 def chat(req: ChatRequest, current_user: User = Depends(get_current_user)):
     logger.info({"event": "Chat request received", "message": req.message, "session_id": req.session_id})
 
-    # A session_id in the request must belong to this user - checked once,
-    # up front, so every branch below can trust req.session_id is theirs.
     if req.session_id:
         _get_owned_session(req.session_id, current_user)
 
@@ -774,13 +739,13 @@ def chat(req: ChatRequest, current_user: User = Depends(get_current_user)):
         agent_memory.session_service.add_to_conversation(req.session_id, role="assistant", content=answer)
         return _chat_response(answer, llm_mode=llm_mode, session_id=req.session_id)
 
-    # Explicit agent_hint always wins - it's a direct instruction from the
-    # caller, not something that needs classifying
     if req.agent_hint and req.session_id:
-        if req.agent_hint.lower() == 'requirements':
-            session = agent_memory.session_service.get_session(req.session_id)
-            if not session:
-                return _chat_response("Session not found.", llm_mode=llm_mode, success=False)
+        session = agent_memory.session_service.get_session(req.session_id)
+        if not session:
+            return _chat_response("Session not found.", llm_mode=llm_mode, success=False)
+        hint = req.agent_hint.lower()
+
+        if hint == 'requirements':
             res = requirements_agent.gather_requirements(
                 session_id=req.session_id,
                 project_name=session.project_name,
@@ -789,7 +754,36 @@ def chat(req: ChatRequest, current_user: User = Depends(get_current_user)):
                 erp_system=session.erp_system
             )
             summary = res.get('requirements', {}).get('executive_summary', 'No summary available.')
-            return _chat_response(f"Requirements gathered: {summary}", llm_mode=llm_mode)
+            return _chat_response(f"Requirements gathered: {summary}", llm_mode=llm_mode, session_id=req.session_id)
+
+        if hint == 'start_intake':
+            res = _run_intake_step(req.session_id, None, resume=False)
+            if not res.get('success'):
+                return _chat_response(res.get('error', 'Intake failed.'), llm_mode=llm_mode,
+                                      success=False, session_id=req.session_id)
+            answer = res['answer']
+            agent_memory.session_service.add_to_conversation(req.session_id, role="user", content=req.message)
+            agent_memory.session_service.add_to_conversation(req.session_id, role="assistant", content=answer)
+            return _chat_response(answer, llm_mode=llm_mode, session_id=req.session_id)
+
+        agent_hint_phase_map = {
+            'process_mapping': orchestrator.execute_process_mapping_phase,
+            'solution_design': orchestrator.execute_solution_design_phase,
+            'qa_testing': orchestrator.execute_qa_testing_phase,
+            'uat_testing': orchestrator.execute_uat_testing_phase,
+            'training': orchestrator.execute_training_phase,
+        }
+        if hint in agent_hint_phase_map:
+            result = agent_hint_phase_map[hint](session_id=req.session_id)
+            if result.get('success'):
+                answer = f"Phase '{hint}' executed successfully."
+                agent_memory.session_service.add_to_conversation(req.session_id, role="user", content=req.message)
+                agent_memory.session_service.add_to_conversation(req.session_id, role="assistant", content=answer)
+                return _chat_response(answer, llm_mode=llm_mode, session_id=req.session_id)
+            else:
+                return _chat_response(f"Failed to execute phase '{hint}': {result.get('error', 'Unknown error')}",
+                                      llm_mode=llm_mode, success=False, session_id=req.session_id)
+        # Unrecognized hint falls through to intent classification below.
 
     decision = classify_intent(llm_instance, req.message, has_session=bool(req.session_id))
     logger.info({"event": "Intent classified", "intent": decision.intent.value})
@@ -848,16 +842,8 @@ def chat(req: ChatRequest, current_user: User = Depends(get_current_user)):
         else:
             return _chat_response("Failed to generate training materials.", llm_mode=llm_mode, success=False)
 
-    # ASK_QUESTION (default) - info retrieval + LLM synthesis, with a
-    # plain conversational fallback when there's nothing to retrieve
-    # (e.g. "thanks", small talk) rather than a robotic error string
     session_id = req.session_id
     if session_id is None:
-        # A casual question with no active project still deserves to be
-        # saved and shown in the sidebar, same as every other intent
-        # branch already does (see START_PROJECT, GENERATE_TRAINING
-        # above) - otherwise plain Q&A chats vanish on refresh and never
-        # appear in "your conversations".
         title = _derive_chat_title(req.message)
         session_id = agent_memory.create_project(project_name=title, module='FI', user_id=current_user.id, is_casual=True)
 
@@ -888,26 +874,10 @@ def chat(req: ChatRequest, current_user: User = Depends(get_current_user)):
 
 
 def _sse(event: str, data: dict) -> str:
-    """Format one Server-Sent Event. Every event carries a JSON `data` line -
-    even short ones - so the frontend has one consistent parse path
-    regardless of event type."""
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
 def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Optional[str]):
-    """Generator of SSE-formatted events for one chat turn. Mirrors chat()'s
-    branching exactly (same intents, same agent calls) but emits progress
-    events around each step instead of returning a single JSON blob at the
-    end - this is what actually addresses the spec's "don't show an empty
-    screen while the backend works" requirement for multi-second/multi-phase
-    operations. Internal reasoning (prompts, raw LLM chain-of-thought) is
-    never emitted - only short, user-safe status strings, exactly like the
-    "agent activity" UI the roadmap describes.
-
-    Ownership of req.session_id is verified by the caller (the endpoint
-    function) before this generator is even constructed, so every branch
-    here can trust it - same pattern as chat() itself.
-    """
     def ev(event_type, **data):
         if request_id:
             data['request_id'] = request_id
@@ -1032,9 +1002,6 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
             yield ev('agent_started', agent=decision.phase, message=f"Running {decision.phase.replace('_', ' ')} phase")
             phase_kwargs = {'session_id': req.session_id}
             if decision.phase == 'requirements':
-                # The only phase with a required (non-optional) extra
-                # argument - the user's message IS the stakeholder input
-                # for a requirements-gathering phase.
                 phase_kwargs['stakeholder_input'] = req.message
             result = phase_map[decision.phase](**phase_kwargs)
             if result.get('success'):
@@ -1078,17 +1045,8 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
                 yield ev('error', message='Failed to generate training materials.')
             return
 
-        # ASK_QUESTION (default) - this is the one branch where token-level
-        # streaming actually happens, since it's the only path whose LLM
-        # call produces free-form prose rather than a short fixed
-        # confirmation string.
         session_id = req.session_id
         if session_id is None:
-            # A casual question with no active project still deserves to be
-            # saved and shown in the sidebar, same as every other intent
-            # branch already does (see START_PROJECT, GENERATE_TRAINING
-            # above) - otherwise plain Q&A chats vanish on refresh and never
-            # appear in "your conversations".
             title = _derive_chat_title(req.message)
             session_id = agent_memory.create_project(project_name=title, module='FI', user_id=current_user.id, is_casual=True)
 
@@ -1124,9 +1082,6 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
                 fallback = "I found some information, but I had trouble summarizing it."
                 full_answer_parts.append(fallback)
                 yield ev('text_delta', text=fallback)
-            # else: a partial answer already reached the client - see the
-            # docstring on generate_content_stream for why this can't
-            # transparently retry on another tier mid-stream.
 
         final_answer = "".join(full_answer_parts)
         agent_memory.session_service.add_to_conversation(session_id, role="user", content=req.message)
@@ -1145,10 +1100,6 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
 
 @app.post("/api/chat/stream")
 def chat_stream(req: ChatRequest, request: Request, current_user: User = Depends(get_current_user)):
-    """Server-Sent Events version of /api/chat. Same intents and same agent
-    calls as /api/chat (which stays exactly as it was, for any client that
-    prefers a single JSON response) - this just exposes the same work as a
-    progressive event stream, per the roadmap's streaming-chat phase."""
     if req.session_id:
         _get_owned_session(req.session_id, current_user)
 
@@ -1162,8 +1113,6 @@ def chat_stream(req: ChatRequest, request: Request, current_user: User = Depends
 
 @app.get("/")
 def get_ui():
-    """Serves the built React frontend (frontend/dist, from `npm run build`
-    - see frontend/README.md)."""
     try:
         with open('frontend/dist/index.html', 'r', encoding='utf-8') as f:
             html = f.read()
