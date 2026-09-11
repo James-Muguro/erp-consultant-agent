@@ -19,7 +19,6 @@ from src.db.models import (
     ProjectIssue, ReviewAction, TraceLink,
 )
 
-
 def sync_requirements_from_structured(session_id: str, structured_requirements: Dict[str, Any]) -> List[str]:
     """Converts the existing structured_requirements dict (as produced by
     RequirementsDocument.to_legacy_dict()) into real RequirementItemRecord
@@ -186,5 +185,115 @@ def get_project_health(session_id: str) -> Dict[str, Any]:
             "open_issues_total": len(issues),
             "open_issues_by_severity": issues_by_severity,
         }
+    finally:
+        db.close()
+
+def sync_process_steps_from_structured(session_id: str, process_name: str,
+                                        structured_process: Dict[str, Any]) -> List[str]:
+    """Converts a ProcessMap's steps into real ProcessStepRecord rows.
+    requirement_id is left null here - process_mapping_agent's current
+    output doesn't identify which specific requirement drove which step,
+    and fabricating that link would violate the 'deterministic validation,
+    not LLM assumption' principle. Wire this once the agent/schema
+    reports it explicitly."""
+    db = SessionLocal()
+    created_ids = []
+    try:
+        for step in structured_process.get("steps", []) or []:
+            sid = uuid.uuid4().hex
+            db.add(ProcessStepRecord(
+                id=sid,
+                session_id=session_id,
+                process_name=process_name,
+                step_number=step.get("number", len(created_ids) + 1),
+                name=step.get("name", ""),
+                description=step.get("description"),
+                responsible_role=step.get("responsible_role"),
+            ))
+            created_ids.append(sid)
+        db.commit()
+    finally:
+        db.close()
+    return created_ids
+
+
+def get_process_steps(session_id: str, process_name: Optional[str] = None) -> List[Dict[str, Any]]:
+    db = SessionLocal()
+    try:
+        q = db.query(ProcessStepRecord).filter(ProcessStepRecord.session_id == session_id)
+        if process_name:
+            q = q.filter(ProcessStepRecord.process_name == process_name)
+        rows = q.order_by(ProcessStepRecord.process_name, ProcessStepRecord.step_number).all()
+        return [{
+            "id": r.id, "process_name": r.process_name, "step_number": r.step_number,
+            "name": r.name, "description": r.description,
+            "responsible_role": r.responsible_role, "requirement_id": r.requirement_id,
+        } for r in rows]
+    finally:
+        db.close()
+
+
+def sync_solution_decisions_from_structured(session_id: str, structured_design: Dict[str, Any]) -> List[str]:
+    """Converts a SolutionDesign's configurations and customizations into
+    real SolutionDecision rows. requirement_id is left null for the same
+    reason as process steps above - not fabricated without an explicit
+    model-reported link."""
+    db = SessionLocal()
+    created_ids = []
+    try:
+        for config in structured_design.get("configurations", []) or []:
+            did = uuid.uuid4().hex
+            db.add(SolutionDecision(
+                id=did,
+                session_id=session_id,
+                decision_type="module_config",
+                component=config.get("component"),
+                description=config.get("description", ""),
+                rationale=None,
+            ))
+            created_ids.append(did)
+
+        for custom in structured_design.get("customizations", []) or []:
+            did = uuid.uuid4().hex
+            db.add(SolutionDecision(
+                id=did,
+                session_id=session_id,
+                decision_type="customization",
+                component=custom.get("component"),
+                description=custom.get("description", ""),
+                rationale=custom.get("justification"),
+            ))
+            created_ids.append(did)
+
+        for integ in structured_design.get("integrations", []) or []:
+            did = uuid.uuid4().hex
+            db.add(SolutionDecision(
+                id=did,
+                session_id=session_id,
+                decision_type="integration",
+                component=integ.get("name"),
+                description=integ.get("description", ""),
+                rationale=None,
+            ))
+            created_ids.append(did)
+
+        db.commit()
+    finally:
+        db.close()
+    return created_ids
+
+
+def get_solution_decisions(session_id: str, decision_type: Optional[str] = None) -> List[Dict[str, Any]]:
+    db = SessionLocal()
+    try:
+        q = db.query(SolutionDecision).filter(SolutionDecision.session_id == session_id)
+        if decision_type:
+            q = q.filter(SolutionDecision.decision_type == decision_type)
+        rows = q.order_by(SolutionDecision.created_at).all()
+        return [{
+            "id": r.id, "decision_type": r.decision_type, "component": r.component,
+            "description": r.description, "rationale": r.rationale,
+            "requirement_id": r.requirement_id, "status": r.status,
+        } for r in rows]
     finally:
         db.close()
