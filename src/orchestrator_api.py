@@ -710,6 +710,20 @@ def download_document(session_id: str, filename: str, current_user: User = Depen
         headers={"Content-Disposition": f'attachment; filename="{record.filename}"'},
     )
 
+@app.get("/api/projects/{session_id}/process-steps")
+def list_process_steps(session_id: str, process_name: Optional[str] = None,
+                        current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
+    return {"session_id": session_id,
+            "process_steps": project_intelligence.get_process_steps(session_id, process_name)}
+
+
+@app.get("/api/projects/{session_id}/solution-decisions")
+def list_solution_decisions(session_id: str, decision_type: Optional[str] = None,
+                             current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
+    return {"session_id": session_id,
+            "solution_decisions": project_intelligence.get_solution_decisions(session_id, decision_type)}
 
 # ---------------------------------------------------------------------------
 # Chat
