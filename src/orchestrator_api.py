@@ -559,6 +559,44 @@ def delete_project_permanently(session_id: str, current_user: User = Depends(get
     return {"session_id": session_id, "deleted": True}
 
 
+from src.services import project_intelligence
+
+
+class ReviewActionRequest(BaseModel):
+    object_type: str
+    object_id: str
+    action: str  # approved, rejected, corrected
+    note: Optional[str] = None
+
+
+@app.get("/api/projects/{session_id}/requirements")
+def list_requirements(session_id: str, current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
+    return {"session_id": session_id, "requirements": project_intelligence.get_requirements(session_id)}
+
+
+@app.post("/api/projects/{session_id}/review")
+def submit_review_action(session_id: str, req: ReviewActionRequest,
+                          current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
+    action_id = project_intelligence.record_review_action(
+        session_id, current_user.id, req.object_type, req.object_id, req.action, req.note
+    )
+    return {"action_id": action_id, "success": True}
+
+
+@app.get("/api/projects/{session_id}/issues")
+def list_issues(session_id: str, status: Optional[str] = "open",
+                 current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
+    return {"session_id": session_id, "issues": project_intelligence.get_issues(session_id, status)}
+
+
+@app.get("/api/projects/{session_id}/health")
+def project_health(session_id: str, current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
+    return project_intelligence.get_project_health(session_id)
+
 @app.post("/api/feedback")
 def submit_feedback(req: FeedbackRequest, current_user: User = Depends(get_current_user),
                      db: Session = Depends(get_db)):
