@@ -135,3 +135,111 @@ class ProjectMemory(Base):
     last_accessed = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False,
                          default=lambda: datetime.now(timezone.utc), index=True)
+
+import uuid as _uuid_intel
+
+
+class RequirementItemRecord(Base):
+    """Structured, identifiable requirement objects - the 'requirements
+    intelligence' layer. Coexists with the existing JSON blob stored on
+    SessionState/SessionRecord; this table is what makes requirements
+    queryable, reviewable, and traceable instead of only living inside a
+    generated document."""
+    __tablename__ = "requirement_items"
+
+    id = Column(String, primary_key=True)
+    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=False, index=True)
+    category = Column(String, nullable=False)
+    description = Column(Text, nullable=False)
+    priority = Column(String, nullable=False, default="Medium")
+    req_type = Column(String, nullable=False, default="Functional")
+    acceptance_criteria = Column(Text, nullable=True)
+    status = Column(String, nullable=False, default="draft")  # draft, approved, rejected
+    source_excerpt = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc),
+                         onupdate=lambda: datetime.now(timezone.utc))
+
+
+class ProcessStepRecord(Base):
+    """Structural representation of business process steps, linkable back
+    to the requirement(s) they implement."""
+    __tablename__ = "process_steps"
+
+    id = Column(String, primary_key=True)
+    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=False, index=True)
+    process_name = Column(String, nullable=False)
+    step_number = Column(Integer, nullable=False)
+    name = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    responsible_role = Column(String, nullable=True)
+    requirement_id = Column(String, ForeignKey("requirement_items.id"), nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class SolutionDecision(Base):
+    """ERP/module/config/customization/integration decisions as
+    structured objects with rationale, linkable to the requirement(s)
+    that drove them."""
+    __tablename__ = "solution_decisions"
+
+    id = Column(String, primary_key=True)
+    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=False, index=True)
+    decision_type = Column(String, nullable=False)  # module_config, customization, integration, erp_selection
+    component = Column(String, nullable=True)
+    description = Column(Text, nullable=False)
+    rationale = Column(Text, nullable=True)
+    requirement_id = Column(String, ForeignKey("requirement_items.id"), nullable=True, index=True)
+    status = Column(String, nullable=False, default="proposed")  # proposed, approved, rejected
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class ProjectIssue(Base):
+    """First-class exceptions: contradictions, missing info, coverage
+    gaps, high-risk decisions - visible until a consultant resolves them,
+    instead of being silently absorbed into an incomplete output."""
+    __tablename__ = "project_issues"
+
+    id = Column(String, primary_key=True)
+    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=False, index=True)
+    issue_type = Column(String, nullable=False)  # contradiction, missing_info, coverage_gap, high_risk_decision
+    severity = Column(String, nullable=False, default="medium")  # low, medium, high
+    description = Column(Text, nullable=False)
+    related_object_type = Column(String, nullable=True)
+    related_object_id = Column(String, nullable=True)
+    status = Column(String, nullable=False, default="open")  # open, resolved, dismissed
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class ReviewAction(Base):
+    """Consultant corrections, approvals, rejections, overrides -
+    captured as structured, queryable knowledge instead of being lost in
+    chat history or hand-edited documents."""
+    __tablename__ = "review_actions"
+
+    id = Column(String, primary_key=True)
+    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=False, index=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    object_type = Column(String, nullable=False)  # requirement, solution_decision, process_step
+    object_id = Column(String, nullable=False)
+    action = Column(String, nullable=False)  # approved, rejected, corrected
+    note = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class TraceLink(Base):
+    """Generic traceability edge between any two project objects (e.g. a
+    QA test case covering a requirement). One flexible table instead of a
+    bespoke join table per object-type pair - powers coverage analysis
+    and gap detection later without a schema change."""
+    __tablename__ = "trace_links"
+
+    id = Column(String, primary_key=True)
+    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=False, index=True)
+    source_type = Column(String, nullable=False)
+    source_id = Column(String, nullable=False)
+    target_type = Column(String, nullable=False)
+    target_id = Column(String, nullable=False)
+    relationship = Column(String, nullable=False, default="covers")  # covers, derives_from, conflicts_with
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
