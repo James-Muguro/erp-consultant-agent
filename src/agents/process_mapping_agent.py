@@ -117,6 +117,9 @@ class ProcessMappingAgent:
             except ValidationError as e:
                 self.logger.error(f"Schema validation failed, falling back to heuristic parsing: {e}")
                 structured_process = self._parse_process_map(process_map_text)
+
+            from src.services import project_intelligence
+            project_intelligence.sync_process_steps_from_structured(session_id, process_name, structured_process)
             
             session = agent_memory.session_service.get_session(session_id)
             project_name = session.project_name if session else "ERP Project"
