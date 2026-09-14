@@ -83,6 +83,25 @@ class Settings(BaseSettings):
     # (postgresql+psycopg2://user:pass@host:5432/dbname).
     database_url: str = Field(default="sqlite:///output/erp_agent.db")
 
+    # Object storage for uploaded project documents (S3-compatible - AWS S3,
+    # Cloudflare R2, MinIO, etc.). All optional so the app still starts
+    # without them configured - file upload endpoints return a clear 503
+    # if used before these are set, rather than the whole app refusing to
+    # start (unlike jwt_secret_key, this is a feature someone may simply
+    # not have set up yet, not a security-critical value everyone needs).
+    s3_bucket_name: Optional[str] = Field(default=None)
+    s3_access_key_id: Optional[str] = Field(default=None)
+    s3_secret_access_key: Optional[str] = Field(default=None)
+    s3_region: str = Field(default="auto")
+    # Set for R2/MinIO/any non-AWS S3-compatible endpoint; leave unset for
+    # real AWS S3 (boto3 resolves the endpoint from s3_region instead).
+    s3_endpoint_url: Optional[str] = Field(default=None)
+    max_upload_size_mb: int = Field(default=15, gt=0)
+
+    @property
+    def object_storage_configured(self) -> bool:
+        return bool(self.s3_bucket_name and self.s3_access_key_id and self.s3_secret_access_key)
+
     # API security
     api_auth_key: Optional[str] = Field(
         default=None,

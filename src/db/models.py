@@ -105,6 +105,32 @@ class GeneratedDocument(Base):
     created_at = Column(DateTime(timezone=True), nullable=False,
                          default=lambda: datetime.now(timezone.utc))
 
+class ProjectDocument(Base):
+    """Metadata for a consultant-uploaded project document (distinct from
+    GeneratedDocument above, which is AI-generated deliverables). The
+    actual file bytes live in object storage (see
+    src/storage/object_storage.py), not here and not on local disk -
+    Render's disk is ephemeral, so this table only stores a pointer
+    (storage_key) plus enough metadata to list, download, and delete the
+    file. extracted_text_chars records how much text was pulled out and
+    fed into project_memories (see src/tools/document_extractor.py) - 0
+    means extraction found nothing usable (e.g. a scanned/image-only PDF),
+    which the API surfaces so the consultant knows the upload succeeded
+    but isn't yet searchable content."""
+    __tablename__ = "project_documents"
+
+    id = Column(String, primary_key=True)
+    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=False, index=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    filename = Column(String, nullable=False)
+    storage_key = Column(String, nullable=False, unique=True)
+    content_type = Column(String, nullable=False)
+    size_bytes = Column(Integer, nullable=False)
+    extracted_text_chars = Column(Integer, nullable=False, default=0)
+    uploaded_at = Column(DateTime(timezone=True), nullable=False,
+                          default=lambda: datetime.now(timezone.utc), index=True)
+
+
 class ProjectMemory(Base):
     """Per-project agent knowledge: seeded templates, patterns the agents
     generate as they work, lessons learned at project completion, and
@@ -150,6 +176,7 @@ class RequirementItemRecord(Base):
     id = Column(String, primary_key=True)
     session_id = Column(String, ForeignKey("sessions.session_id"), nullable=False, index=True)
     category = Column(String, nullable=False)
+    external_code = Column(String, nullable=True, index=True)  # model-assigned ID e.g. "REQ-001", for LLM-referenceable linking
     description = Column(Text, nullable=False)
     priority = Column(String, nullable=False, default="Medium")
     req_type = Column(String, nullable=False, default="Functional")

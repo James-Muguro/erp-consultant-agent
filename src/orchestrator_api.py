@@ -7,7 +7,7 @@ import sys
 import json
 
 from fastapi import FastAPI, HTTPException, Depends, Request, UploadFile, File
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -40,9 +40,13 @@ from src.auth.schemas import (
 )
 from src.auth.security import create_access_token
 from src.auth import service as auth_service
-from src.db.base import engine as db_engine
+from src.db.base import engine as db_engine, SessionLocal
 from src.db.models import User, Feedback, SessionRecord
 from src.utils.model_selection import TaskCategory
+from src.db.models import ProjectDocument
+from src.storage import object_storage
+from src.tools.document_extractor import extract_text as extract_document_text, UnsupportedFileType, SUPPORTED_EXTENSIONS
+from src.storage.object_storage import ObjectStorageNotConfigured, ObjectStorageError
 
 from contextlib import asynccontextmanager
 
@@ -709,6 +713,180 @@ def download_document(session_id: str, filename: str, current_user: User = Depen
         media_type=record.content_type,
         headers={"Content-Disposition": f'attachment; filename="{record.filename}"'},
     )
+
+
+@app.post("/api/projects/{session_id}/uploads")
+async def upload_project_document(
+    session_id: str,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+):
+    """Uploads a consultant-provided project document. The file is stored
+    in object storage (not on local disk or in Postgres - see
+    src/storage/object_storage.py), its text is extracted where possible,
+    and that extracted text is fed into this project's own memory store
+    (project_memories) so agents can recall it in later phases - the
+    concrete link between 'consultant provides context' and 'agents use
+    relevant knowledge across the project lifecycle'."""
+    _get_owned_session(session_id, current_user)
+
+    if not settings.object_storage_configured:
+        raise HTTPException(
+            status_code=503,
+            detail="File upload isn't available yet - object storage isn't configured on this server.",
+        )
+
+    content = await file.read()
+    size_mb = len(content) / (1024 * 1024)
+    if size_mb > settings.max_upload_size_mb:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File is {size_mb:.1f}MB, which exceeds the {settings.max_upload_size_mb}MB limit.",
+        )
+
+    try:
+        extracted = extract_document_text(file.filename, content)
+    except UnsupportedFileType as e:
+        raise HTTPException(status_code=415, detail=str(e))
+
+    doc_id = uuid_lib.uuid4().hex
+    storage_key = object_storage.make_storage_key(session_id, doc_id, file.filename)
+
+    try:
+        object_storage.upload_bytes(
+            storage_key, content, file.content_type or "application/octet-stream"
+        )
+    except ObjectStorageError as e:
+        raise HTTPException(status_code=502, detail=f"Upload to storage failed: {e}")
+
+    db = SessionLocal()
+    try:
+        record = ProjectDocument(
+            id=doc_id,
+            session_id=session_id,
+            user_id=current_user.id,
+            filename=file.filename,
+            storage_key=storage_key,
+            content_type=file.content_type or "application/octet-stream",
+            size_bytes=len(content),
+            extracted_text_chars=len(extracted),
+        )
+        db.add(record)
+        db.commit()
+    finally:
+        db.close()
+
+    if extracted:
+        agent_memory.remember(
+            session_id,
+            key=f"upload_{doc_id}",
+            content=extracted,
+            category="uploaded_document",
+            tags=["uploaded", file.filename.rsplit(".", 1)[-1].lower()],
+            importance=1.0,
+        )
+
+    return {
+        "id": doc_id,
+        "filename": file.filename,
+        "size_bytes": len(content),
+        "extracted_text_chars": len(extracted),
+    }
+
+
+@app.get("/api/projects/{session_id}/uploads")
+def list_project_documents(session_id: str, current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
+
+    db = SessionLocal()
+    try:
+        records = (
+            db.query(ProjectDocument)
+            .filter(ProjectDocument.session_id == session_id)
+            .order_by(ProjectDocument.uploaded_at.desc())
+            .all()
+        )
+        return {
+            "session_id": session_id,
+            "documents": [
+                {
+                    "id": r.id,
+                    "filename": r.filename,
+                    "content_type": r.content_type,
+                    "size_bytes": r.size_bytes,
+                    "extracted_text_chars": r.extracted_text_chars,
+                    "uploaded_at": r.uploaded_at.isoformat(),
+                }
+                for r in records
+            ],
+        }
+    finally:
+        db.close()
+
+
+@app.get("/api/projects/{session_id}/uploads/{document_id}/download")
+def download_project_document(session_id: str, document_id: str, current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
+
+    db = SessionLocal()
+    try:
+        record = (
+            db.query(ProjectDocument)
+            .filter(ProjectDocument.session_id == session_id, ProjectDocument.id == document_id)
+            .first()
+        )
+    finally:
+        db.close()
+
+    if not record:
+        raise HTTPException(status_code=404, detail="Document not found for this session")
+
+    try:
+        content = object_storage.download_bytes(record.storage_key)
+    except ObjectStorageError as e:
+        raise HTTPException(status_code=502, detail=f"Download from storage failed: {e}")
+
+    return Response(
+        content=content,
+        media_type=record.content_type,
+        headers={"Content-Disposition": f'attachment; filename="{record.filename}"'},
+    )
+
+
+@app.delete("/api/projects/{session_id}/uploads/{document_id}")
+def delete_project_document(session_id: str, document_id: str, current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
+
+    db = SessionLocal()
+    try:
+        record = (
+            db.query(ProjectDocument)
+            .filter(ProjectDocument.session_id == session_id, ProjectDocument.id == document_id)
+            .first()
+        )
+        if not record:
+            raise HTTPException(status_code=404, detail="Document not found for this session")
+
+        storage_key = record.storage_key
+        db.delete(record)
+        db.commit()
+    finally:
+        db.close()
+
+    try:
+        object_storage.delete_object(storage_key)
+    except ObjectStorageError as e:
+        # The DB row is already gone (consultant's list view is correct);
+        # log this rather than surface a confusing error for a delete that
+        # mostly succeeded. An orphaned object in storage is a cheap,
+        # recoverable cleanup problem, not a correctness problem for the app.
+        logger.warning("Failed to delete object from storage after DB row removed",
+                        storage_key=storage_key, error=str(e))
+
+    agent_memory.project_memory.delete_memory(session_id, f"upload_{document_id}")
+
+    return {"id": document_id, "deleted": True}
+
 
 @app.get("/api/projects/{session_id}/process-steps")
 def list_process_steps(session_id: str, process_name: Optional[str] = None,
