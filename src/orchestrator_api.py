@@ -564,6 +564,7 @@ def delete_project_permanently(session_id: str, current_user: User = Depends(get
 
 
 from src.services import project_intelligence
+from src.services import consistency_checker
 
 
 class ReviewActionRequest(BaseModel):
@@ -600,6 +601,19 @@ def list_issues(session_id: str, status: Optional[str] = "open",
 def project_health(session_id: str, current_user: User = Depends(get_current_user)):
     _get_owned_session(session_id, current_user)
     return project_intelligence.get_project_health(session_id)
+
+
+@app.post("/api/projects/{session_id}/consistency-check")
+def run_consistency_check(session_id: str, current_user: User = Depends(get_current_user)):
+    """Runs the deterministic cross-document consistency checks (see
+    src/services/consistency_checker.py - no LLM calls, plain rule-based
+    comparisons) and records any findings as project issues. Safe to call
+    on demand; not auto-triggered on every phase completion yet - wire that
+    once the current small rule set has been exercised against real
+    project data."""
+    _get_owned_session(session_id, current_user)
+    findings = consistency_checker.run_consistency_checks(session_id)
+    return {"session_id": session_id, "findings_count": len(findings), "findings": findings}
 
 @app.post("/api/feedback")
 def submit_feedback(req: FeedbackRequest, current_user: User = Depends(get_current_user),
