@@ -234,12 +234,15 @@ def get_process_steps(session_id: str, process_name: Optional[str] = None) -> Li
 
 
 def sync_solution_decisions_from_structured(session_id: str, structured_design: Dict[str, Any]) -> List[str]:
-    """Converts a SolutionDesign's configurations and customizations into
-    real SolutionDecision rows. requirement_id is left null for the same
-    reason as process steps above - not fabricated without an explicit
-    model-reported link."""
+    """Converts a SolutionDesign's configurations, customizations, and
+    integrations into real SolutionDecision rows, resolving each item's
+    self-reported related_requirement_ids into validated TraceLinks - a
+    code that doesn't match a real requirement is never fabricated into
+    a link; it's filed as a ProjectIssue instead (see
+    resolve_requirement_codes)."""
     db = SessionLocal()
     created_ids = []
+    pending_links = []  # (decision_id, codes) - resolved after commit so IDs exist
     try:
         for config in structured_design.get("configurations", []) or []:
             did = uuid.uuid4().hex
@@ -252,6 +255,7 @@ def sync_solution_decisions_from_structured(session_id: str, structured_design: 
                 rationale=None,
             ))
             created_ids.append(did)
+            pending_links.append((did, "solution_decision", config.get("related_requirement_ids") or []))
 
         for custom in structured_design.get("customizations", []) or []:
             did = uuid.uuid4().hex
@@ -264,6 +268,7 @@ def sync_solution_decisions_from_structured(session_id: str, structured_design: 
                 rationale=custom.get("justification"),
             ))
             created_ids.append(did)
+            pending_links.append((did, "solution_decision", custom.get("related_requirement_ids") or []))
 
         for integ in structured_design.get("integrations", []) or []:
             did = uuid.uuid4().hex
@@ -276,10 +281,16 @@ def sync_solution_decisions_from_structured(session_id: str, structured_design: 
                 rationale=None,
             ))
             created_ids.append(did)
+            pending_links.append((did, "solution_decision", integ.get("related_requirement_ids") or []))
 
         db.commit()
     finally:
         db.close()
+
+    for decision_id, source_type, codes in pending_links:
+        if codes:
+            link_requirements(session_id, source_type, decision_id, codes)
+
     return created_ids
 
 

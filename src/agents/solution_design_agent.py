@@ -302,7 +302,7 @@ Important: Prioritize standard ERP functionality over customizations. Only recom
         for category, reqs in func_reqs.items():
             summary_parts.append(f"\n{category}:")
             for req in reqs[:5]:  # Top 5 per category
-                summary_parts.append(f"- {req.get('description', '')} (Priority: {req.get('priority', 'Medium')})")
+                summary_parts.append(f"- [{req.get('id', 'REQ-XXX')}] {req.get('description', '')} (Priority: {req.get('priority', 'Medium')})")
         
         # Integration requirements
         int_reqs = requirements.get('integration_requirements', [])

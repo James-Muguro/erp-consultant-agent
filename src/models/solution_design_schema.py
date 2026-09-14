@@ -68,3 +68,35 @@ class SolutionDesign(BaseModel):
             item["name"]: item["value"] for item in data.pop("technical_specs")
         }
         return data
+
+class ConfigurationItem(BaseModel):
+    component: str
+    description: str = ""
+    steps: List[str] = Field(default_factory=list)
+    related_requirement_ids: List[str] = Field(
+        default_factory=list,
+        description="Requirement ID codes (e.g. 'REQ-001') from the provided requirement list that this configuration addresses. Leave empty if none clearly apply - never guess."
+    )
+
+
+class IntegrationItem(BaseModel):
+    name: str
+    type: str = "Real-time"
+    source: str = ""
+    target: str = ""
+    description: str = ""
+    related_requirement_ids: List[str] = Field(
+        default_factory=list,
+        description="Requirement ID codes (e.g. 'REQ-001') this integration addresses. Leave empty if none clearly apply - never guess."
+    )
+
+
+class CustomizationItem(BaseModel):
+    type: str
+    component: str
+    description: str = ""
+    justification: str = ""
+    related_requirement_ids: List[str] = Field(
+        default_factory=list,
+        description="Requirement ID codes (e.g. 'REQ-001') this customization addresses. Leave empty if none clearly apply - never guess."
+    )
