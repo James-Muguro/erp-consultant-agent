@@ -22,12 +22,15 @@ class TestCase(BaseModel):
     steps: List[str] = Field(default_factory=list)
     test_data: List[TestDataItem] = Field(default_factory=list)
     expected_result: str = ""
+    related_requirement_ids: List[str] = Field(
+        default_factory=list,
+        description="Requirement ID codes (e.g. 'REQ-001') from the provided requirement list that this test case validates. Leave empty if none clearly apply - never guess."
+    )
 
     def to_legacy_dict(self) -> dict:
         data = self.model_dump()
         data["test_data"] = {item["key"]: item["value"] for item in data.pop("test_data")}
         return data
-
 
 class TestCasesDocument(BaseModel):
     test_cases: List[TestCase] = Field(default_factory=list)

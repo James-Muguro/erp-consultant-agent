@@ -19,6 +19,10 @@ class UserManualStep(BaseModel):
     instructions: str = ""
     fields: List[UserManualField] = Field(default_factory=list)
     tips: List[str] = Field(default_factory=list)
+    related_requirement_ids: List[str] = Field(
+        default_factory=list,
+        description="Requirement ID codes (e.g. 'REQ-001') from the provided requirement list that this training step covers. Leave empty if none clearly apply - never guess."
+    )
 class UserManual(BaseModel):
     steps: List[UserManualStep] = Field(default_factory=list)
     tips: List[str] = Field(default_factory=list)

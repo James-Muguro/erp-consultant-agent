@@ -270,3 +270,26 @@ class TraceLink(Base):
     target_id = Column(String, nullable=False)
     relationship = Column(String, nullable=False, default="covers")  # covers, derives_from, conflicts_with
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+class TestCaseRecord(Base):
+    """Structured QA/UAT test cases, linkable to the requirements they validate."""
+    __tablename__ = "test_case_records"
+
+    id = Column(String, primary_key=True)
+    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=False, index=True)
+    test_type = Column(String, nullable=False)  # QA or UAT
+    external_code = Column(String, nullable=True)  # e.g. "TC-001"
+    scenario = Column(String, nullable=False)
+    priority = Column(String, nullable=False, default="Medium")
+    expected_result = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+class TrainingStepRecord(Base):
+    """Structured training manual steps, linkable to the requirements they cover."""
+    __tablename__ = "training_step_records"
+
+    id = Column(String, primary_key=True)
+    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=False, index=True)
+    title = Column(String, nullable=False)
+    instructions = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
