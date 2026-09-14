@@ -297,3 +297,85 @@ def get_solution_decisions(session_id: str, decision_type: Optional[str] = None)
         } for r in rows]
     finally:
         db.close()
+
+def sync_requirements_from_structured(session_id: str, structured_requirements: Dict[str, Any]) -> List[str]:
+    db = SessionLocal()
+    created_ids = []
+    try:
+        functional = structured_requirements.get("functional_requirements", {}) or {}
+        for category, reqs in functional.items():
+            for req in reqs:
+                rid = uuid.uuid4().hex
+                db.add(RequirementItemRecord(
+                    id=rid,
+                    session_id=session_id,
+                    category=category,
+                    description=req.get("description", ""),
+                    priority=req.get("priority", "Medium"),
+                    req_type=req.get("type", "Functional"),
+                    acceptance_criteria=req.get("acceptance_criteria"),
+                    external_code=req.get("id"),
+                ))
+                created_ids.append(rid)
+
+        for bucket, category_label in (
+            ("technical_requirements", "Technical"),
+            ("integration_requirements", "Integration"),
+            ("reporting_requirements", "Reporting"),
+        ):
+            for req in structured_requirements.get(bucket, []) or []:
+                desc = req.get("description", req) if isinstance(req, dict) else req
+                rid = uuid.uuid4().hex
+                db.add(RequirementItemRecord(
+                    id=rid,
+                    session_id=session_id,
+                    category=category_label,
+                    description=desc,
+                    priority=req.get("priority", "Medium") if isinstance(req, dict) else "Medium",
+                    req_type=category_label,
+                    external_code=req.get("id") if isinstance(req, dict) else None,
+                ))
+                created_ids.append(rid)
+
+        db.commit()
+    finally:
+        db.close()
+    return created_ids
+
+
+def resolve_requirement_codes(session_id: str, codes: List[str]) -> Dict[str, str]:
+    """Maps model-reported requirement codes (e.g. 'REQ-001') to real
+    RequirementItemRecord UUIDs - the deterministic validation step.
+    Codes that don't match any stored requirement are silently excluded
+    from the result (never fabricated) and logged as a ProjectIssue so
+    the mismatch is visible instead of disappearing."""
+    if not codes:
+        return {}
+    db = SessionLocal()
+    try:
+        rows = db.query(RequirementItemRecord).filter(
+            RequirementItemRecord.session_id == session_id,
+            RequirementItemRecord.external_code.in_(codes),
+        ).all()
+        resolved = {r.external_code: r.id for r in rows}
+        unresolved = set(codes) - set(resolved.keys())
+        for code in unresolved:
+            create_issue(
+                session_id, "missing_info",
+                f"Referenced requirement code '{code}' does not match any stored requirement.",
+                severity="low",
+            )
+        return resolved
+    finally:
+        db.close()
+
+
+def link_requirements(session_id: str, source_type: str, source_id: str,
+                       requirement_codes: List[str]) -> List[str]:
+    """Resolves requirement codes and creates 'covers' TraceLinks for
+    each valid match. Returns the list of TraceLink IDs created."""
+    resolved = resolve_requirement_codes(session_id, requirement_codes)
+    return [
+        add_trace_link(session_id, source_type, source_id, "requirement", req_uuid)
+        for req_uuid in resolved.values()
+    ]

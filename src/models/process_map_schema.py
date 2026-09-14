@@ -13,6 +13,10 @@ class ProcessStep(BaseModel):
     description: str = ""
     transaction: str = ""
     responsible_role: str = ""
+    related_requirement_ids: List[str] = Field(
+        default_factory=list,
+        description="Requirement ID codes (e.g. 'REQ-001') from the provided requirement list that this step implements. Leave empty if none clearly apply - never guess."
+    )
 
 
 class ProcessMap(BaseModel):
@@ -24,3 +28,4 @@ class ProcessMap(BaseModel):
     integration_points: List[str] = Field(default_factory=list)
     exceptions: List[str] = Field(default_factory=list)
     improvements: List[str] = Field(default_factory=list)
+

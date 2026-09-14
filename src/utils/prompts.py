@@ -90,6 +90,15 @@ Relevant Requirements:
 Current (As-Is) Process:
 {current_state}
 
+CRITICAL SCOPE RULE: This process map represents the ongoing BUSINESS
+PROCESS itself (e.g. "receive goods", "post invoice", "reconcile bank
+statement") - the day-to-day operational steps a business user performs
+in the ERP system once it is live. It is NOT an ERP implementation
+project plan. Do NOT include implementation-lifecycle activities such as
+testing, UAT, training, data migration, go-live, or deployment as
+process steps - those belong to later project phases, not this business
+process.
+
 Generate detailed process maps including roles, responsibilities, steps,
 and decision points, specific to this process and these requirements.
 Identify gaps or potential conflicts in the current process design.

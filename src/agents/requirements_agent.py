@@ -111,6 +111,9 @@ class RequirementsAgent:
                 self.logger.error(f"Schema validation failed, falling back to heuristic parsing: {e}")
                 structured_requirements = self._parse_requirements(requirements_text)
 
+            from src.utils.text_sanitize import clean_text
+            structured_requirements = clean_text(structured_requirements)
+
             from src.services import project_intelligence
             project_intelligence.sync_requirements_from_structured(session_id, structured_requirements)
 

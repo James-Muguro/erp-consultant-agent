@@ -118,8 +118,15 @@ class ProcessMappingAgent:
                 self.logger.error(f"Schema validation failed, falling back to heuristic parsing: {e}")
                 structured_process = self._parse_process_map(process_map_text)
 
+            from src.utils.text_sanitize import clean_text
+            structured_process = clean_text(structured_process)
+
             from src.services import project_intelligence
-            project_intelligence.sync_process_steps_from_structured(session_id, process_name, structured_process)
+            step_ids = project_intelligence.sync_process_steps_from_structured(session_id, process_name, structured_process)
+            for step_id, step in zip(step_ids, structured_process.get("steps", []) or []):
+                codes = step.get("related_requirement_ids") or []
+                if codes:
+                    project_intelligence.link_requirements(session_id, "process_step", step_id, codes)
             
             session = agent_memory.session_service.get_session(session_id)
             project_name = session.project_name if session else "ERP Project"
@@ -348,7 +355,7 @@ Please provide a detailed, structured process map that can be used for ERP imple
             summary_parts.append("Key Functional Requirements:")
             for category, reqs in func_reqs.items():
                 for req in reqs[:3]:  # Limit to top 3 per category
-                    summary_parts.append(f"- {req.get('description', '')}")
+                    summary_parts.append(f"- [{req.get('id', 'REQ-XXX')}] {req.get('description', '')}")
         
         # Integration requirements
         int_reqs = requirements.get('integration_requirements', [])

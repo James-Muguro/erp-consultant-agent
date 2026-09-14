@@ -118,6 +118,9 @@ class SolutionDesignAgent:
                 self.logger.error(f"Schema validation failed, falling back to heuristic parsing: {e}")
                 structured_design = self._parse_design(design_text)
 
+            from src.utils.text_sanitize import clean_text
+            structured_design = clean_text(structured_design)
+
             from src.services import project_intelligence
             project_intelligence.sync_solution_decisions_from_structured(session_id, structured_design)
             

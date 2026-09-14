@@ -104,7 +104,10 @@ class TrainingAgent:
             except ValidationError as e:
                 self.logger.error(f"Schema validation failed, falling back to heuristic parsing: {e}")
                 structured_materials = self._parse_training_materials(training_text)
-            
+
+            from src.utils.text_sanitize import clean_text
+            structured_materials = clean_text(structured_materials)
+
             # Get project info
             session = agent_memory.session_service.get_session(session_id)
             module = session.module if session else "ERP"
