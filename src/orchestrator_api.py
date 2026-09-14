@@ -917,6 +917,18 @@ def list_solution_decisions(session_id: str, decision_type: Optional[str] = None
     return {"session_id": session_id,
             "solution_decisions": project_intelligence.get_solution_decisions(session_id, decision_type)}
 
+@app.get("/api/projects/{session_id}/test-cases")
+def list_test_cases(session_id: str, test_type: Optional[str] = None,
+                     current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
+    return {"session_id": session_id, "test_cases": project_intelligence.get_test_cases(session_id, test_type)}
+
+
+@app.get("/api/projects/{session_id}/training-steps")
+def list_training_steps(session_id: str, current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
+    return {"session_id": session_id, "training_steps": project_intelligence.get_training_steps(session_id)}
+
 # ---------------------------------------------------------------------------
 # Chat
 # ---------------------------------------------------------------------------

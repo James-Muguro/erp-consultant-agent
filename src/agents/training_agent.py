@@ -108,6 +108,9 @@ class TrainingAgent:
             from src.utils.text_sanitize import clean_text
             structured_materials = clean_text(structured_materials)
 
+            from src.services import project_intelligence
+            project_intelligence.sync_training_steps_from_structured(session_id, structured_materials)
+
             # Get project info
             session = agent_memory.session_service.get_session(session_id)
             module = session.module if session else "ERP"

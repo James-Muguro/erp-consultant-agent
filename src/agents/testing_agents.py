@@ -108,6 +108,9 @@ class QATestingAgent:
 
             from src.utils.text_sanitize import clean_text
             structured_test_cases = clean_text(structured_test_cases)
+
+            from src.services import project_intelligence
+            project_intelligence.sync_test_cases_from_structured(session_id, "QA", structured_test_cases)
             
             # Get project info
             session = agent_memory.session_service.get_session(session_id)
@@ -220,6 +223,7 @@ Generate comprehensive, well-structured test cases with clear steps and expected
             summary_parts.append("\nKey Configurations:")
             for config in configs[:5]:
                 summary_parts.append(f"- {config.get('component', '')}")
+        summary_parts.append("\nNote: reference requirement codes (e.g. 'REQ-001') where applicable in related_requirement_ids.")
         
         integrations = design.get('integrations', [])
         if integrations:
@@ -374,6 +378,9 @@ class UATTestingAgent:
 
             from src.utils.text_sanitize import clean_text
             structured_scenarios = clean_text(structured_scenarios)
+
+            from src.services import project_intelligence
+            project_intelligence.sync_test_cases_from_structured(session_id, "UAT", structured_scenarios)
 
             # Get project info
             session = agent_memory.session_service.get_session(session_id)

@@ -15,8 +15,14 @@ from typing import Dict, List, Any, Optional
 
 from src.db.base import SessionLocal
 from src.db.models import (
-    RequirementItemRecord, ProcessStepRecord, SolutionDecision,
-    ProjectIssue, ReviewAction, TraceLink,
+    RequirementItemRecord,
+    ProcessStepRecord,
+    SolutionDecision,
+    TestCaseRecord,
+    TrainingStepRecord,
+    ProjectIssue,
+    ReviewAction,
+    TraceLink,
 )
 
 def sync_requirements_from_structured(session_id: str, structured_requirements: Dict[str, Any]) -> List[str]:
@@ -390,3 +396,85 @@ def link_requirements(session_id: str, source_type: str, source_id: str,
         add_trace_link(session_id, source_type, source_id, "requirement", req_uuid)
         for req_uuid in resolved.values()
     ]
+
+def sync_test_cases_from_structured(session_id: str, test_type: str,
+                                     structured_test_cases: List[Dict[str, Any]]) -> List[str]:
+    db = SessionLocal()
+    created_ids = []
+    pending_links = []
+    try:
+        for tc in structured_test_cases:
+            tid = uuid.uuid4().hex
+            db.add(TestCaseRecord(
+                id=tid,
+                session_id=session_id,
+                test_type=test_type,
+                external_code=tc.get("id"),
+                scenario=tc.get("scenario", ""),
+                priority=tc.get("priority", "Medium"),
+                expected_result=tc.get("expected_result"),
+            ))
+            created_ids.append(tid)
+            pending_links.append((tid, tc.get("related_requirement_ids") or []))
+        db.commit()
+    finally:
+        db.close()
+
+    for tc_id, codes in pending_links:
+        if codes:
+            link_requirements(session_id, "test_case", tc_id, codes)
+
+    return created_ids
+
+
+def sync_training_steps_from_structured(session_id: str, structured_materials: Dict[str, Any]) -> List[str]:
+    db = SessionLocal()
+    created_ids = []
+    pending_links = []
+    try:
+        steps = (structured_materials.get("user_manual") or {}).get("steps", [])
+        for step in steps:
+            sid = uuid.uuid4().hex
+            db.add(TrainingStepRecord(
+                id=sid,
+                session_id=session_id,
+                title=step.get("title", ""),
+                instructions=step.get("instructions"),
+            ))
+            created_ids.append(sid)
+            pending_links.append((sid, step.get("related_requirement_ids") or []))
+        db.commit()
+    finally:
+        db.close()
+
+    for step_id, codes in pending_links:
+        if codes:
+            link_requirements(session_id, "training_step", step_id, codes)
+
+    return created_ids
+
+
+def get_test_cases(session_id: str, test_type: Optional[str] = None) -> List[Dict[str, Any]]:
+    db = SessionLocal()
+    try:
+        q = db.query(TestCaseRecord).filter(TestCaseRecord.session_id == session_id)
+        if test_type:
+            q = q.filter(TestCaseRecord.test_type == test_type)
+        rows = q.order_by(TestCaseRecord.created_at).all()
+        return [{
+            "id": r.id, "test_type": r.test_type, "external_code": r.external_code,
+            "scenario": r.scenario, "priority": r.priority, "expected_result": r.expected_result,
+        } for r in rows]
+    finally:
+        db.close()
+
+
+def get_training_steps(session_id: str) -> List[Dict[str, Any]]:
+    db = SessionLocal()
+    try:
+        rows = db.query(TrainingStepRecord).filter(
+            TrainingStepRecord.session_id == session_id
+        ).order_by(TrainingStepRecord.created_at).all()
+        return [{"id": r.id, "title": r.title, "instructions": r.instructions} for r in rows]
+    finally:
+        db.close()
