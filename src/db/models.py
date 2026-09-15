@@ -78,7 +78,7 @@ class Feedback(Base):
 
     id = Column(String, primary_key=True)
     user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
-    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=True, index=True)
+    session_id = Column(String, ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=True, index=True)
     rating = Column(Integer, nullable=True)  # 1-5, optional
     comment = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False,
@@ -95,7 +95,7 @@ class GeneratedDocument(Base):
     __tablename__ = "generated_documents"
 
     id = Column(String, primary_key=True)
-    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=False, index=True)
+    session_id = Column(String, ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=False, index=True)
     phase = Column(String, nullable=False)
     label = Column(String, nullable=False)
     filename = Column(String, nullable=False)
@@ -174,7 +174,7 @@ class RequirementItemRecord(Base):
     __tablename__ = "requirement_items"
 
     id = Column(String, primary_key=True)
-    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=False, index=True)
+    session_id = Column(String, ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=False, index=True)
     category = Column(String, nullable=False)
     external_code = Column(String, nullable=True, index=True)  # model-assigned ID e.g. "REQ-001", for LLM-referenceable linking
     description = Column(Text, nullable=False)
@@ -194,13 +194,13 @@ class ProcessStepRecord(Base):
     __tablename__ = "process_steps"
 
     id = Column(String, primary_key=True)
-    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=False, index=True)
+    session_id = Column(String, ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=False, index=True)
     process_name = Column(String, nullable=False)
     step_number = Column(Integer, nullable=False)
     name = Column(String, nullable=False)
     description = Column(Text, nullable=True)
     responsible_role = Column(String, nullable=True)
-    requirement_id = Column(String, ForeignKey("requirement_items.id"), nullable=True, index=True)
+    requirement_id = Column(String, ForeignKey("requirement_items.id", ondelete="SET NULL"), nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
@@ -211,12 +211,12 @@ class SolutionDecision(Base):
     __tablename__ = "solution_decisions"
 
     id = Column(String, primary_key=True)
-    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=False, index=True)
+    session_id = Column(String, ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=False, index=True)
     decision_type = Column(String, nullable=False)  # module_config, customization, integration, erp_selection
     component = Column(String, nullable=True)
     description = Column(Text, nullable=False)
     rationale = Column(Text, nullable=True)
-    requirement_id = Column(String, ForeignKey("requirement_items.id"), nullable=True, index=True)
+    requirement_id = Column(String, ForeignKey("requirement_items.id", ondelete="SET NULL"), nullable=True, index=True)
     status = Column(String, nullable=False, default="proposed")  # proposed, approved, rejected
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
@@ -228,7 +228,7 @@ class ProjectIssue(Base):
     __tablename__ = "project_issues"
 
     id = Column(String, primary_key=True)
-    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=False, index=True)
+    session_id = Column(String, ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=False, index=True)
     issue_type = Column(String, nullable=False)  # contradiction, missing_info, coverage_gap, high_risk_decision
     severity = Column(String, nullable=False, default="medium")  # low, medium, high
     description = Column(Text, nullable=False)
@@ -246,7 +246,7 @@ class ReviewAction(Base):
     __tablename__ = "review_actions"
 
     id = Column(String, primary_key=True)
-    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=False, index=True)
+    session_id = Column(String, ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=False, index=True)
     user_id = Column(String, ForeignKey("users.id"), nullable=False)
     object_type = Column(String, nullable=False)  # requirement, solution_decision, process_step
     object_id = Column(String, nullable=False)
@@ -263,7 +263,7 @@ class TraceLink(Base):
     __tablename__ = "trace_links"
 
     id = Column(String, primary_key=True)
-    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=False, index=True)
+    session_id = Column(String, ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=False, index=True)
     source_type = Column(String, nullable=False)
     source_id = Column(String, nullable=False)
     target_type = Column(String, nullable=False)
@@ -276,7 +276,7 @@ class TestCaseRecord(Base):
     __tablename__ = "test_case_records"
 
     id = Column(String, primary_key=True)
-    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=False, index=True)
+    session_id = Column(String, ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=False, index=True)
     test_type = Column(String, nullable=False)  # QA or UAT
     external_code = Column(String, nullable=True)  # e.g. "TC-001"
     scenario = Column(String, nullable=False)
@@ -289,7 +289,7 @@ class TrainingStepRecord(Base):
     __tablename__ = "training_step_records"
 
     id = Column(String, primary_key=True)
-    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=False, index=True)
+    session_id = Column(String, ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=False, index=True)
     title = Column(String, nullable=False)
     instructions = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))

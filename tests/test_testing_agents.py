@@ -5,7 +5,9 @@ the bug found and fixed in Stage 1b, where real Gemini output was
 previously discarded and replaced with hardcoded generic scenarios.
 """
 from unittest.mock import Mock
+
 from src.agents.testing_agents import QATestingAgent, UATTestingAgent
+from src.memory import agent_memory
 
 
 SAMPLE_TEST_CASES_JSON = """{
@@ -35,23 +37,32 @@ def test_qa_generate_test_cases_success():
     agent = QATestingAgent()
     agent.model = mock_model_instance
 
-    result = agent.generate_test_cases(
-        session_id="test_qa_session",
-        solution_design={"configurations": [], "integrations": []},
+    session_id = agent_memory.create_project(
+        project_name="QA Test",
         module="MM",
-        scope="comprehensive"
     )
 
-    assert result['success'] is True
-    assert len(result['test_cases']) == 1
-    assert result['test_cases'][0]['scenario'] == "Create and approve Purchase Order"
-    assert result['test_cases'][0]['test_data'] == {"vendor_id": "VEND-001"}
+    try:
+        result = agent.generate_test_cases(
+            session_id=session_id,
+            solution_design={"configurations": [], "integrations": []},
+            module="MM",
+            scope="comprehensive",
+        )
+
+        assert result["success"] is True
+        assert len(result["test_cases"]) == 1
+        assert result["test_cases"][0]["scenario"] == "Create and approve Purchase Order"
+        assert result["test_cases"][0]["test_data"] == {"vendor_id": "VEND-001"}
+    finally:
+        agent_memory.session_service.delete_session(session_id)
 
 
 def test_uat_generate_scenarios_uses_real_llm_output_not_generic_fallback():
     """This is the regression guard for the Stage 1b bug: UAT scenarios
     must come from the actual Gemini response, not the hardcoded
-    'Log into the system / Navigate to the module' placeholder."""
+    'Log into the system / Navigate to the module' placeholder.
+    """
     mock_response = Mock()
     mock_response.text = SAMPLE_TEST_CASES_JSON
 
@@ -61,15 +72,29 @@ def test_uat_generate_scenarios_uses_real_llm_output_not_generic_fallback():
     agent = UATTestingAgent()
     agent.model = mock_model_instance
 
-    result = agent.generate_uat_scenarios(
-        session_id="test_uat_session",
-        business_processes={"Procure to Pay": {"structured": {"steps": [{"name": "Create PO"}]}}},
-        user_roles=["Procurement Buyer"]
+    session_id = agent_memory.create_project(
+        project_name="UAT Test",
+        module="MM",
     )
 
-    assert result['success'] is True
-    scenarios = result['uat_scenarios']
-    assert len(scenarios) == 1
-    # This is the real Gemini-derived scenario, not the generic placeholder
-    assert scenarios[0]['scenario'] == "Create and approve Purchase Order"
-    assert "Log into the system" not in scenarios[0]['steps']
+    try:
+        result = agent.generate_uat_scenarios(
+            session_id=session_id,
+            business_processes={
+                "Procure to Pay": {
+                    "structured": {
+                        "steps": [{"name": "Create PO"}]
+                    }
+                }
+            },
+            user_roles=["Procurement Buyer"],
+        )
+
+        assert result["success"] is True
+        scenarios = result["uat_scenarios"]
+        assert len(scenarios) == 1
+        # This is the real Gemini-derived scenario, not the generic placeholder
+        assert scenarios[0]["scenario"] == "Create and approve Purchase Order"
+        assert "Log into the system" not in scenarios[0]["steps"]
+    finally:
+        agent_memory.session_service.delete_session(session_id)

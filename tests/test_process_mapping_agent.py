@@ -3,7 +3,9 @@ Unit test for Process Mapping Agent - covers the schema-validated
 happy path added in Stage 1.
 """
 from unittest.mock import Mock
+
 from src.agents.process_mapping_agent import ProcessMappingAgent
+from src.memory import agent_memory
 
 
 def test_map_process_success():
@@ -28,15 +30,30 @@ def test_map_process_success():
     agent = ProcessMappingAgent()
     agent.model = mock_model_instance
 
-    result = agent.map_process(
-        session_id="test_process_mapping_session",
-        process_name="Procure to Pay",
-        requirements={"module": "MM", "functional_requirements": {}, "integration_requirements": []},
-        current_state="Manual PO creation"
+    session_id = agent_memory.create_project(
+        project_name="Process Mapping Test",
+        module="MM",
     )
 
-    assert result['success'] is True
-    steps = result['process_map']['steps']
-    assert len(steps) == 2
-    assert steps[0]['name'] == "Create Purchase Requisition"
-    assert result['process_map']['roles'] == ["Procurement Buyer", "Finance Manager"]
+    try:
+        result = agent.map_process(
+            session_id=session_id,
+            process_name="Procure to Pay",
+            requirements={
+                "module": "MM",
+                "functional_requirements": {},
+                "integration_requirements": [],
+            },
+            current_state="Manual PO creation",
+        )
+
+        assert result["success"] is True
+        steps = result["process_map"]["steps"]
+        assert len(steps) == 2
+        assert steps[0]["name"] == "Create Purchase Requisition"
+        assert result["process_map"]["roles"] == [
+            "Procurement Buyer",
+            "Finance Manager",
+        ]
+    finally:
+        agent_memory.session_service.delete_session(session_id)

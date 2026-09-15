@@ -4,7 +4,9 @@ happy path added in Stage 1, including the master_data/technical_specs
 dict-reshaping in to_legacy_dict().
 """
 from unittest.mock import Mock
+
 from src.agents.solution_design_agent import SolutionDesignAgent
+from src.memory import agent_memory
 
 
 def test_design_solution_success():
@@ -37,16 +39,31 @@ def test_design_solution_success():
     agent = SolutionDesignAgent()
     agent.model = mock_model_instance
 
-    result = agent.design_solution(
-        session_id="test_solution_design_session",
-        requirements={"module": "MM", "functional_requirements": {}, "integration_requirements": []},
-        process_maps={},
-        erp_system="SAP S/4HANA"
+    session_id = agent_memory.create_project(
+        project_name="Solution Design Test",
+        module="MM",
+        erp_system="SAP S/4HANA",
     )
 
-    assert result['success'] is True
-    design = result['design']
-    assert len(design['configurations']) == 1
-    # Confirm the arbitrary-key dict reshaping worked correctly
-    assert design['master_data'] == {"Vendor Master": "Standard vendor master with tax fields."}
-    assert design['technical_specs'] == {"Uptime SLA": "99.9%"}
+    try:
+        result = agent.design_solution(
+            session_id=session_id,
+            requirements={
+                "module": "MM",
+                "functional_requirements": {},
+                "integration_requirements": [],
+            },
+            process_maps={},
+            erp_system="SAP S/4HANA",
+        )
+
+        assert result["success"] is True
+        design = result["design"]
+        assert len(design["configurations"]) == 1
+        # Confirm the arbitrary-key dict reshaping worked correctly
+        assert design["master_data"] == {
+            "Vendor Master": "Standard vendor master with tax fields."
+        }
+        assert design["technical_specs"] == {"Uptime SLA": "99.9%"}
+    finally:
+        agent_memory.session_service.delete_session(session_id)
