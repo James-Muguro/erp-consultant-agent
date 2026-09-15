@@ -27,8 +27,28 @@ if settings.database_url.startswith("sqlite"):
     if db_path and db_path != ":memory:":
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
-engine = create_engine(settings.database_url, connect_args=_connect_args, future=True)
+engine = create_engine(
+    settings.database_url,
+    connect_args=_connect_args,
+    future=True,
+    pool_pre_ping=True,  # avoids "server closed the connection unexpectedly" against
+                         # Neon/serverless Postgres, which can drop idle connections -
+                         # this checks liveness before handing out a pooled connection
+                         # instead of failing the request that happens to get a dead one
+)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+
+from sqlalchemy import event
+
+if engine.dialect.name == "sqlite":
+    # SQLite ignores foreign keys unless explicitly told to enforce them -
+    # without this, FK bugs like broken cascading deletes pass silently in
+    # local/test runs and only surface in production against real Postgres.
+    @event.listens_for(engine, "connect")
+    def _enable_sqlite_foreign_keys(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 
 
 def init_db() -> None:
