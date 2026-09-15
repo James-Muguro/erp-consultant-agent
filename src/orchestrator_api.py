@@ -929,6 +929,11 @@ def list_training_steps(session_id: str, current_user: User = Depends(get_curren
     _get_owned_session(session_id, current_user)
     return {"session_id": session_id, "training_steps": project_intelligence.get_training_steps(session_id)}
 
+
+@app.get("/api/projects/{session_id}/coverage-gaps")
+def coverage_gaps(session_id: str, current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
+    return {"session_id": session_id, **project_intelligence.get_coverage_gaps(session_id)}
 # ---------------------------------------------------------------------------
 # Chat
 # ---------------------------------------------------------------------------

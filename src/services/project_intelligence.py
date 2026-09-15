@@ -184,12 +184,16 @@ def get_project_health(session_id: str) -> Dict[str, Any]:
         total = len(requirements)
         covered = sum(1 for r in requirements if r.id in covered_ids)
 
+        gaps = get_coverage_gaps(session_id)
+
         return {
             "requirements_total": total,
             "requirements_by_status": req_by_status,
             "requirements_coverage_pct": round((covered / total * 100), 1) if total else 0.0,
             "open_issues_total": len(issues),
             "open_issues_by_severity": issues_by_severity,
+            "uncovered_requirements_count": len(gaps["uncovered_requirements"]),
+            "untested_requirements_count": len(gaps["untested_requirements"]),
         }
     finally:
         db.close()
@@ -476,5 +480,55 @@ def get_training_steps(session_id: str) -> List[Dict[str, Any]]:
             TrainingStepRecord.session_id == session_id
         ).order_by(TrainingStepRecord.created_at).all()
         return [{"id": r.id, "title": r.title, "instructions": r.instructions} for r in rows]
+    finally:
+        db.close()
+
+def get_coverage_gaps(session_id: str) -> Dict[str, List[Dict[str, Any]]]:
+    """Identifies objects with zero downstream trace-link coverage -
+    the concrete 'gaps' the brief asks for, computed deterministically
+    from real TraceLink rows rather than inferred by an LLM.
+
+    Two directions of gap are checked:
+    - Requirements with no downstream coverage at all (never referenced
+      by any process step, solution decision, test case, or training
+      step) - these are requirements nobody has acted on yet.
+    - Requirements with functional/technical coverage but no QA/UAT
+      test case referencing them - a specific, high-value gap since an
+      untested requirement is a real delivery risk.
+    """
+    db = SessionLocal()
+    try:
+        requirements = db.query(RequirementItemRecord).filter(
+            RequirementItemRecord.session_id == session_id
+        ).all()
+
+        links = db.query(TraceLink).filter(
+            TraceLink.session_id == session_id,
+            TraceLink.relationship == "covers",
+        ).all()
+
+        covered_req_ids = {l.target_id for l in links if l.target_type == "requirement"}
+        # Which requirement IDs are covered specifically by a test_case source
+        tested_req_ids = {
+            l.target_id for l in links
+            if l.target_type == "requirement" and l.source_type == "test_case"
+        }
+
+        uncovered = [
+            {"id": r.id, "external_code": r.external_code, "category": r.category,
+             "description": r.description, "priority": r.priority}
+            for r in requirements if r.id not in covered_req_ids
+        ]
+
+        untested = [
+            {"id": r.id, "external_code": r.external_code, "category": r.category,
+             "description": r.description, "priority": r.priority}
+            for r in requirements if r.id not in tested_req_ids
+        ]
+
+        return {
+            "uncovered_requirements": uncovered,
+            "untested_requirements": untested,
+        }
     finally:
         db.close()
