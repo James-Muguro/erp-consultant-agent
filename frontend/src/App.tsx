@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
+import { MessageSquare, LayoutGrid } from "lucide-react";
 import { useAuth } from "./context/AuthContext";
 import { LoginPage } from "./pages/LoginPage";
 import { Sidebar } from "./components/Sidebar";
 import { ChatPanel } from "./components/ChatPanel";
 import { NewProjectModal } from "./components/NewProjectModal";
+import { ProjectWorkspace } from "./components/workspace/ProjectWorkspace";
 import { useChat } from "./hooks/useChat";
 import { api } from "./api/client";
 import type { ProjectSummary } from "./types";
+
+type MainView = "workspace" | "chat";
 
 function ChatApp() {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -14,6 +18,7 @@ function ChatApp() {
   const [showNewProject, setShowNewProject] = useState(false);
   const [loadingProjects, setLoadingProjects] = useState(true);
   const [showArchived, setShowArchived] = useState(false);
+  const [mainView, setMainView] = useState<MainView>("workspace");
 
   const refreshProjects = useCallback(async () => {
     const { projects } = await api.listProjects(showArchived);
@@ -36,6 +41,7 @@ function ChatApp() {
 
   async function selectProject(sessionId: string) {
     setActiveSessionId(sessionId);
+    setMainView("workspace");
     chat.reset();
     const { messages } = await api.getMessages(sessionId);
     chat.loadHistory(
@@ -49,6 +55,7 @@ function ChatApp() {
   }
   function newChat() {
     setActiveSessionId(null);
+    setMainView("chat");
     chat.reset();
   }
 
@@ -56,6 +63,7 @@ function ChatApp() {
     const { session_id, next_action } = await api.startProject(name, "General", erpSystem || undefined);
     await refreshProjects();
     setActiveSessionId(session_id);
+    setMainView("chat");
     chat.reset();
     if (next_action) {
       chat.loadHistory([
@@ -116,15 +124,43 @@ async function renameProject(sessionId: string, newName: string) {
             Loading your projects…
           </div>
         ) : (
-          <ChatPanel
-            sessionId={activeSessionId}
-            messages={chat.messages}
-            activity={chat.activity}
-            sending={chat.sending}
-            streamError={chat.streamError}
-            onSend={chat.send}
-            onStop={chat.stop}
-          />
+          <>
+            {activeSessionId && (
+              <div className="flex shrink-0 gap-1 border-b border-border bg-surface px-4 py-2">
+                <button
+                  onClick={() => setMainView("workspace")}
+                  className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors ${
+                    mainView === "workspace" ? "bg-accent-soft text-accent-strong" : "text-ink-muted hover:bg-paper"
+                  }`}
+                >
+                  <LayoutGrid size={14} />
+                  Workspace
+                </button>
+                <button
+                  onClick={() => setMainView("chat")}
+                  className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors ${
+                    mainView === "chat" ? "bg-accent-soft text-accent-strong" : "text-ink-muted hover:bg-paper"
+                  }`}
+                >
+                  <MessageSquare size={14} />
+                  Chat
+                </button>
+              </div>
+            )}
+            {activeSessionId && mainView === "workspace" ? (
+              <ProjectWorkspace sessionId={activeSessionId} />
+            ) : (
+              <ChatPanel
+                sessionId={activeSessionId}
+                messages={chat.messages}
+                activity={chat.activity}
+                sending={chat.sending}
+                streamError={chat.streamError}
+                onSend={chat.send}
+                onStop={chat.stop}
+              />
+            )}
+          </>
         )}
       </main>
 

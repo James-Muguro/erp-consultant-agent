@@ -79,3 +79,83 @@ export interface ApiErrorBody {
     request_id: string | null;
   };
 }
+
+// --- Project intelligence types ---
+
+export type ReviewStatus = "draft" | "approved" | "rejected";
+
+export interface RequirementItem {
+  id: string;
+  category: string;
+  description: string;
+  priority: string | null;
+  type: string | null;
+  acceptance_criteria: string | null;
+  status: ReviewStatus;
+}
+
+export interface ProcessStep {
+  id: string;
+  process_name: string;
+  step_number: number;
+  name: string;
+  description: string | null;
+  responsible_role: string | null;
+  requirement_id: string | null;
+}
+
+export interface SolutionDecision {
+  id: string;
+  decision_type: string;
+  component: string | null;
+  description: string;
+  rationale: string | null;
+  requirement_id: string | null;
+  status: ReviewStatus;
+}
+
+export interface TestCase {
+  id: string;
+  test_type: string;
+  external_code: string | null;
+  scenario: string;
+  priority: string | null;
+  expected_result: string | null;
+}
+
+export interface TrainingStep {
+  id: string;
+  title: string;
+  instructions: string | null;
+}
+
+export type IssueSeverity = "low" | "medium" | "high";
+
+export interface ProjectIssue {
+  id: string;
+  issue_type: string;
+  severity: IssueSeverity;
+  description: string;
+  status: string;
+  related_object_type: string | null;
+  related_object_id: string | null;
+}
+
+export interface ProjectHealth {
+  requirements_total: number;
+  requirements_by_status: Record<string, number>;
+  requirements_coverage_pct: number;
+  open_issues_total: number;
+  open_issues_by_severity: Record<string, number>;
+}
+
+export interface UploadedDocument {
+  id: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  extracted_text_chars: number;
+  uploaded_at: string;
+}
+
+export type ReviewAction = "approved" | "rejected" | "corrected";

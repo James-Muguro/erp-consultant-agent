@@ -5,6 +5,15 @@ import type {
   NextAction,
   ProjectStatus,
   ProjectSummary,
+  RequirementItem,
+  ProcessStep,
+  SolutionDecision,
+  TestCase,
+  TrainingStep,
+  ProjectIssue,
+  ProjectHealth,
+  UploadedDocument,
+  ReviewAction,
   User,
 } from "../types";
 import { parseSseChunk } from "./sse";
@@ -188,6 +197,123 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ session_id: sessionId, rating, comment }),
     });
+  },
+
+  // --- Project intelligence ---
+
+  async getRequirements(sessionId: string) {
+    return request<{ session_id: string; requirements: RequirementItem[] }>(
+      `/api/projects/${sessionId}/requirements`,
+    );
+  },
+
+  async getProcessSteps(sessionId: string) {
+    return request<{ session_id: string; process_steps: ProcessStep[] }>(
+      `/api/projects/${sessionId}/process-steps`,
+    );
+  },
+
+  async getSolutionDecisions(sessionId: string) {
+    return request<{ session_id: string; solution_decisions: SolutionDecision[] }>(
+      `/api/projects/${sessionId}/solution-decisions`,
+    );
+  },
+
+  async getTestCases(sessionId: string) {
+    return request<{ session_id: string; test_cases: TestCase[] }>(
+      `/api/projects/${sessionId}/test-cases`,
+    );
+  },
+
+  async getTrainingSteps(sessionId: string) {
+    return request<{ session_id: string; training_steps: TrainingStep[] }>(
+      `/api/projects/${sessionId}/training-steps`,
+    );
+  },
+
+  async getIssues(sessionId: string, status: string | null = "open") {
+    const qs = status ? `?status=${encodeURIComponent(status)}` : "?status=";
+    return request<{ session_id: string; issues: ProjectIssue[] }>(
+      `/api/projects/${sessionId}/issues${qs}`,
+    );
+  },
+
+  async getProjectHealth(sessionId: string) {
+    return request<ProjectHealth>(`/api/projects/${sessionId}/health`);
+  },
+
+  async submitReviewAction(
+    sessionId: string,
+    objectType: string,
+    objectId: string,
+    action: ReviewAction,
+    note?: string,
+  ) {
+    return request<{ action_id: string; success: boolean }>(`/api/projects/${sessionId}/review`, {
+      method: "POST",
+      body: JSON.stringify({ object_type: objectType, object_id: objectId, action, note }),
+    });
+  },
+
+  async runConsistencyCheck(sessionId: string) {
+    return request<{ session_id: string; findings_count: number; findings: unknown[] }>(
+      `/api/projects/${sessionId}/consistency-check`,
+      { method: "POST" },
+    );
+  },
+
+  // --- Uploaded project documents ---
+
+  async listUploads(sessionId: string) {
+    return request<{ session_id: string; documents: UploadedDocument[] }>(
+      `/api/projects/${sessionId}/uploads`,
+    );
+  },
+
+  async uploadDocument(sessionId: string, file: File) {
+    const token = getToken();
+    const form = new FormData();
+    form.append("file", file);
+    const res = await fetch(`/api/projects/${sessionId}/uploads`, {
+      method: "POST",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: form,
+    });
+    if (!res.ok) {
+      let msg = `Upload failed (${res.status})`;
+      try {
+        const body = (await res.json()) as ApiErrorBody;
+        if (body?.error?.message) msg = body.error.message;
+      } catch {
+        /* generic message stands */
+      }
+      throw new ApiError(res.status, msg, res.headers.get("X-Request-ID"));
+    }
+    return (await res.json()) as { id: string; filename: string; size_bytes: number; extracted_text_chars: number };
+  },
+
+  async downloadUpload(sessionId: string, documentId: string, filename: string) {
+    const token = getToken();
+    const res = await fetch(`/api/projects/${sessionId}/uploads/${documentId}/download`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) throw new ApiError(res.status, "Could not download document", null);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  },
+
+  async deleteUpload(sessionId: string, documentId: string) {
+    return request<{ id: string; deleted: boolean }>(
+      `/api/projects/${sessionId}/uploads/${documentId}`,
+      { method: "DELETE" },
+    );
   },
 
   /**
