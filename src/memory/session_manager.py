@@ -480,13 +480,31 @@ class DbSessionService(InMemorySessionService):
             db.close()
 
     def delete_session(self, session_id: str) -> bool:
-        from src.db.models import SessionRecord, ProjectMemory, Feedback
+        from src.db.models import SessionRecord, ProjectMemory, Feedback, ProjectDocument
+        from src.storage import object_storage
 
         db = self._db_session_factory()
         try:
             record = db.get(SessionRecord, session_id)
             if record is None:
                 return False
+
+            storage_keys = [
+                row.storage_key
+                for row in db.query(ProjectDocument.storage_key)
+                .filter(ProjectDocument.session_id == session_id)
+                .all()
+            ]
+
+            for storage_key in storage_keys:
+                try:
+                    object_storage.delete_object(storage_key)
+                except Exception:
+                    self.logger.exception(
+                        "Failed to delete project document from object storage",
+                        session_id=session_id,
+                        storage_key=storage_key,
+                    )
 
             db.query(ProjectMemory).filter(
                 ProjectMemory.session_id == session_id
