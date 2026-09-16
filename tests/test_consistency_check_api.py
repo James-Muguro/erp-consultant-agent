@@ -42,7 +42,7 @@ def test_consistency_check_finds_and_returns_a_real_contradiction():
     db = SessionLocal()
     db.add(SolutionDecision(
         id=uuid.uuid4().hex, session_id=session_id, decision_type='erp_selection',
-        component='core', description='Recommend Oracle Fusion for this deployment',
+        component='core', lineage_id=uuid.uuid4().hex, description='Recommend Oracle Fusion for this deployment',
     ))
     db.commit()
     db.close()

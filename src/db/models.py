@@ -175,6 +175,9 @@ class RequirementItemRecord(Base):
 
     id = Column(String, primary_key=True)
     session_id = Column(String, ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=False, index=True)
+    lineage_id = Column(String, nullable=False, index=True)  # stable across all versions of "the same" requirement
+    version = Column(Integer, nullable=False, default=1)
+    is_current = Column(Boolean, nullable=False, default=True)
     category = Column(String, nullable=False)
     external_code = Column(String, nullable=True, index=True)  # model-assigned ID e.g. "REQ-001", for LLM-referenceable linking
     description = Column(Text, nullable=False)
@@ -212,6 +215,10 @@ class SolutionDecision(Base):
 
     id = Column(String, primary_key=True)
     session_id = Column(String, ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=False, index=True)
+    lineage_id = Column(String, nullable=False, index=True)
+    version = Column(Integer, nullable=False, default=1)
+    is_current = Column(Boolean, nullable=False, default=True)
+    stage = Column(String, nullable=False, default="proposed")  # proposed | actual - the platform's core distinction
     decision_type = Column(String, nullable=False)  # module_config, customization, integration, erp_selection
     component = Column(String, nullable=True)
     description = Column(Text, nullable=False)

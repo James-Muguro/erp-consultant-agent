@@ -163,6 +163,10 @@ class ChatRequest(BaseModel):
     agent_hint: Optional[str] = None
     prefer_web: Optional[bool] = False
 
+class SolutionActualRequest(BaseModel):
+    description: str
+    component: Optional[str] = None
+    rationale: Optional[str] = None
 
 def extract_text(response) -> str:
     if response is None:
@@ -575,9 +579,13 @@ class ReviewActionRequest(BaseModel):
 
 
 @app.get("/api/projects/{session_id}/requirements")
-def list_requirements(session_id: str, current_user: User = Depends(get_current_user)):
+def list_requirements(session_id: str, include_history: bool = False,
+                       current_user: User = Depends(get_current_user)):
     _get_owned_session(session_id, current_user)
-    return {"session_id": session_id, "requirements": project_intelligence.get_requirements(session_id)}
+    return {
+        "session_id": session_id,
+        "requirements": project_intelligence.get_requirements(session_id, include_history=include_history),
+    }
 
 
 @app.post("/api/projects/{session_id}/review")
@@ -912,10 +920,15 @@ def list_process_steps(session_id: str, process_name: Optional[str] = None,
 
 @app.get("/api/projects/{session_id}/solution-decisions")
 def list_solution_decisions(session_id: str, decision_type: Optional[str] = None,
+                             stage: Optional[str] = None, include_history: bool = False,
                              current_user: User = Depends(get_current_user)):
     _get_owned_session(session_id, current_user)
-    return {"session_id": session_id,
-            "solution_decisions": project_intelligence.get_solution_decisions(session_id, decision_type)}
+    return {
+        "session_id": session_id,
+        "solution_decisions": project_intelligence.get_solution_decisions(
+            session_id, decision_type, stage=stage, include_history=include_history
+        ),
+    }
 
 @app.get("/api/projects/{session_id}/test-cases")
 def list_test_cases(session_id: str, test_type: Optional[str] = None,
@@ -934,6 +947,48 @@ def list_training_steps(session_id: str, current_user: User = Depends(get_curren
 def coverage_gaps(session_id: str, current_user: User = Depends(get_current_user)):
     _get_owned_session(session_id, current_user)
     return {"session_id": session_id, **project_intelligence.get_coverage_gaps(session_id)}
+
+class RequirementReviseRequest(BaseModel):
+    description: Optional[str] = None
+    priority: Optional[str] = None
+    category: Optional[str] = None
+    acceptance_criteria: Optional[str] = None
+
+
+@app.post("/api/projects/{session_id}/requirements/{requirement_id}/revise")
+def revise_requirement(session_id: str, requirement_id: str, req: RequirementReviseRequest,
+                        current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
+    try:
+        new_id = project_intelligence.revise_requirement(session_id, requirement_id, req.model_dump(exclude_none=True))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"new_requirement_id": new_id}
+
+
+@app.get("/api/projects/{session_id}/requirements/{lineage_id}/history")
+def requirement_history(session_id: str, lineage_id: str, current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
+    return {"history": project_intelligence.get_requirement_history(session_id, lineage_id)}
+
+
+@app.post("/api/projects/{session_id}/solution-decisions/{decision_id}/actual")
+def record_actual_solution(session_id: str, decision_id: str, req: SolutionActualRequest,
+                            current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
+    try:
+        new_id = project_intelligence.record_actual_solution(
+            session_id, decision_id, req.description, req.component, req.rationale
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"new_decision_id": new_id}
+
+
+@app.get("/api/projects/{session_id}/solution-decisions/{lineage_id}/history")
+def solution_decision_history(session_id: str, lineage_id: str, current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
+    return {"history": project_intelligence.get_solution_decision_history(session_id, lineage_id)}
 # ---------------------------------------------------------------------------
 # Chat
 # ---------------------------------------------------------------------------

@@ -20,8 +20,13 @@ def _add_decision(session_id, decision_type, component, description, rationale=N
     try:
         import uuid
         d = SolutionDecision(
-            id=uuid.uuid4().hex, session_id=session_id, decision_type=decision_type,
-            component=component, description=description, rationale=rationale,
+            id=uuid.uuid4().hex,
+            session_id=session_id,
+            lineage_id=uuid.uuid4().hex,
+            decision_type=decision_type,
+            component=component,
+            description=description,
+            rationale=rationale,
         )
         db.add(d)
         db.commit()

@@ -39,6 +39,7 @@ def sync_requirements_from_structured(session_id: str, structured_requirements: 
                 db.add(RequirementItemRecord(
                     id=rid,
                     session_id=session_id,
+                    lineage_id=rid, version=1, is_current=True,
                     category=category,
                     description=req.get("description", ""),
                     priority=req.get("priority", "Medium"),
@@ -58,6 +59,7 @@ def sync_requirements_from_structured(session_id: str, structured_requirements: 
                 db.add(RequirementItemRecord(
                     id=rid,
                     session_id=session_id,
+                    lineage_id=rid, version=1, is_current=True,
                     category=category_label,
                     description=desc,
                     priority=req.get("priority", "Medium") if isinstance(req, dict) else "Medium",
@@ -71,16 +73,18 @@ def sync_requirements_from_structured(session_id: str, structured_requirements: 
     return created_ids
 
 
-def get_requirements(session_id: str) -> List[Dict[str, Any]]:
+def get_requirements(session_id: str, include_history: bool = False) -> List[Dict[str, Any]]:
     db = SessionLocal()
     try:
-        rows = db.query(RequirementItemRecord).filter(
-            RequirementItemRecord.session_id == session_id
-        ).order_by(RequirementItemRecord.category, RequirementItemRecord.created_at).all()
+        q = db.query(RequirementItemRecord).filter(RequirementItemRecord.session_id == session_id)
+        if not include_history:
+            q = q.filter(RequirementItemRecord.is_current.is_(True))
+        rows = q.order_by(RequirementItemRecord.category, RequirementItemRecord.created_at).all()
         return [{
-            "id": r.id, "category": r.category, "description": r.description,
-            "priority": r.priority, "type": r.req_type,
-            "acceptance_criteria": r.acceptance_criteria, "status": r.status,
+            "id": r.id, "lineage_id": r.lineage_id, "version": r.version, "is_current": r.is_current,
+            "category": r.category, "description": r.description, "priority": r.priority,
+            "type": r.req_type, "acceptance_criteria": r.acceptance_criteria,
+            "status": r.status, "external_code": r.external_code,
         } for r in rows]
     finally:
         db.close()
@@ -164,7 +168,8 @@ def get_project_health(session_id: str) -> Dict[str, Any]:
     db = SessionLocal()
     try:
         requirements = db.query(RequirementItemRecord).filter(
-            RequirementItemRecord.session_id == session_id).all()
+            RequirementItemRecord.session_id == session_id
+        ).filter(RequirementItemRecord.is_current.is_(True)).all()
         issues = db.query(ProjectIssue).filter(
             ProjectIssue.session_id == session_id, ProjectIssue.status == "open").all()
         covered_ids = {
@@ -259,6 +264,7 @@ def sync_solution_decisions_from_structured(session_id: str, structured_design: 
             db.add(SolutionDecision(
                 id=did,
                 session_id=session_id,
+                lineage_id=did, version=1, is_current=True, stage="proposed",
                 decision_type="module_config",
                 component=config.get("component"),
                 description=config.get("description", ""),
@@ -272,6 +278,7 @@ def sync_solution_decisions_from_structured(session_id: str, structured_design: 
             db.add(SolutionDecision(
                 id=did,
                 session_id=session_id,
+                lineage_id=did, version=1, is_current=True, stage="proposed",
                 decision_type="customization",
                 component=custom.get("component"),
                 description=custom.get("description", ""),
@@ -285,6 +292,7 @@ def sync_solution_decisions_from_structured(session_id: str, structured_design: 
             db.add(SolutionDecision(
                 id=did,
                 session_id=session_id,
+                lineage_id=did, version=1, is_current=True, stage="proposed",
                 decision_type="integration",
                 component=integ.get("name"),
                 description=integ.get("description", ""),
@@ -304,15 +312,21 @@ def sync_solution_decisions_from_structured(session_id: str, structured_design: 
     return created_ids
 
 
-def get_solution_decisions(session_id: str, decision_type: Optional[str] = None) -> List[Dict[str, Any]]:
+def get_solution_decisions(session_id: str, decision_type: Optional[str] = None,
+                            stage: Optional[str] = None, include_history: bool = False) -> List[Dict[str, Any]]:
     db = SessionLocal()
     try:
         q = db.query(SolutionDecision).filter(SolutionDecision.session_id == session_id)
         if decision_type:
             q = q.filter(SolutionDecision.decision_type == decision_type)
+        if stage:
+            q = q.filter(SolutionDecision.stage == stage)
+        if not include_history:
+            q = q.filter(SolutionDecision.is_current.is_(True))
         rows = q.order_by(SolutionDecision.created_at).all()
         return [{
-            "id": r.id, "decision_type": r.decision_type, "component": r.component,
+            "id": r.id, "lineage_id": r.lineage_id, "version": r.version, "is_current": r.is_current,
+            "stage": r.stage, "decision_type": r.decision_type, "component": r.component,
             "description": r.description, "rationale": r.rationale,
             "requirement_id": r.requirement_id, "status": r.status,
         } for r in rows]
@@ -330,6 +344,7 @@ def sync_requirements_from_structured(session_id: str, structured_requirements: 
                 db.add(RequirementItemRecord(
                     id=rid,
                     session_id=session_id,
+                    lineage_id=rid, version=1, is_current=True,
                     category=category,
                     description=req.get("description", ""),
                     priority=req.get("priority", "Medium"),
@@ -350,6 +365,7 @@ def sync_requirements_from_structured(session_id: str, structured_requirements: 
                 db.add(RequirementItemRecord(
                     id=rid,
                     session_id=session_id,
+                    lineage_id=rid, version=1, is_current=True,
                     category=category_label,
                     description=desc,
                     priority=req.get("priority", "Medium") if isinstance(req, dict) else "Medium",
@@ -500,7 +516,7 @@ def get_coverage_gaps(session_id: str) -> Dict[str, List[Dict[str, Any]]]:
     try:
         requirements = db.query(RequirementItemRecord).filter(
             RequirementItemRecord.session_id == session_id
-        ).all()
+        ).filter(RequirementItemRecord.is_current.is_(True)).all()
 
         links = db.query(TraceLink).filter(
             TraceLink.session_id == session_id,
@@ -530,5 +546,95 @@ def get_coverage_gaps(session_id: str) -> Dict[str, List[Dict[str, Any]]]:
             "uncovered_requirements": uncovered,
             "untested_requirements": untested,
         }
+    finally:
+        db.close()
+
+
+def revise_requirement(session_id: str, requirement_id: str, updates: Dict[str, Any]) -> str:
+    """Creates a new version of a requirement instead of mutating it -
+    the append-only history the platform's change-tracking model
+    depends on. A revised requirement returns to 'draft' status - the
+    prior approval applied to the superseded version, not this one."""
+    db = SessionLocal()
+    try:
+        current = db.get(RequirementItemRecord, requirement_id)
+        if not current or current.session_id != session_id:
+            raise ValueError("Requirement not found for this session")
+
+        new_id = uuid.uuid4().hex
+        db.add(RequirementItemRecord(
+            id=new_id, session_id=session_id, lineage_id=current.lineage_id,
+            version=current.version + 1, is_current=True, status="draft",
+            category=updates.get("category", current.category),
+            description=updates.get("description", current.description),
+            priority=updates.get("priority", current.priority),
+            req_type=updates.get("req_type", current.req_type),
+            acceptance_criteria=updates.get("acceptance_criteria", current.acceptance_criteria),
+            external_code=current.external_code,
+        ))
+        current.is_current = False
+        db.commit()
+        return new_id
+    finally:
+        db.close()
+
+
+def get_requirement_history(session_id: str, lineage_id: str) -> List[Dict[str, Any]]:
+    db = SessionLocal()
+    try:
+        rows = db.query(RequirementItemRecord).filter(
+            RequirementItemRecord.session_id == session_id,
+            RequirementItemRecord.lineage_id == lineage_id,
+        ).order_by(RequirementItemRecord.version).all()
+        return [{
+            "id": r.id, "version": r.version, "is_current": r.is_current,
+            "description": r.description, "priority": r.priority,
+            "status": r.status, "created_at": r.created_at.isoformat(),
+        } for r in rows]
+    finally:
+        db.close()
+
+
+def record_actual_solution(session_id: str, decision_id: str, description: str,
+                            component: Optional[str] = None, rationale: Optional[str] = None) -> str:
+    """Records what was ACTUALLY implemented for a solution decision,
+    distinct from what was originally proposed - creates a new version
+    in the same lineage rather than overwriting the proposal, so the
+    original design remains visible in history."""
+    db = SessionLocal()
+    try:
+        current = db.get(SolutionDecision, decision_id)
+        if not current or current.session_id != session_id:
+            raise ValueError("Solution decision not found for this session")
+
+        new_id = uuid.uuid4().hex
+        db.add(SolutionDecision(
+            id=new_id, session_id=session_id, lineage_id=current.lineage_id,
+            version=current.version + 1, is_current=True, stage="actual",
+            decision_type=current.decision_type,
+            component=component or current.component,
+            description=description,
+            rationale=rationale or current.rationale,
+            requirement_id=current.requirement_id,
+        ))
+        current.is_current = False
+        db.commit()
+        return new_id
+    finally:
+        db.close()
+
+
+def get_solution_decision_history(session_id: str, lineage_id: str) -> List[Dict[str, Any]]:
+    db = SessionLocal()
+    try:
+        rows = db.query(SolutionDecision).filter(
+            SolutionDecision.session_id == session_id,
+            SolutionDecision.lineage_id == lineage_id,
+        ).order_by(SolutionDecision.version).all()
+        return [{
+            "id": r.id, "version": r.version, "is_current": r.is_current, "stage": r.stage,
+            "component": r.component, "description": r.description, "rationale": r.rationale,
+            "created_at": r.created_at.isoformat(),
+        } for r in rows]
     finally:
         db.close()
