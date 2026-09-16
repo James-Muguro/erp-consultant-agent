@@ -24,7 +24,7 @@ export function IssuesList({ sessionId }: { sessionId: string }) {
         </h4>
         <button
           onClick={() => setShowAll((v) => !v)}
-          className="text-xs text-accent-strong hover:underline"
+          className="-m-2 rounded-md p-2 text-xs text-accent-strong hover:underline"
         >
           {showAll ? "Show open only" : "Show all"}
         </button>

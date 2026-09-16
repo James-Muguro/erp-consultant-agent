@@ -55,11 +55,11 @@ export function UploadsPanel({ sessionId }: { sessionId: string }) {
 
   return (
     <div>
-      <div className="mb-4 flex items-center justify-between">
+      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <p className="text-sm text-ink-muted">
           Upload project documents (PDF, DOCX, TXT, MD) for agents to reference in later phases.
         </p>
-        <label className="flex shrink-0 cursor-pointer items-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-strong">
+        <label className="flex shrink-0 cursor-pointer items-center justify-center gap-2 rounded-md bg-accent px-3 py-2.5 text-sm font-medium text-white transition-colors hover:bg-accent-strong sm:py-2">
           <Upload size={14} />
           {uploading ? "Uploading…" : "Upload"}
           <input
@@ -73,7 +73,7 @@ export function UploadsPanel({ sessionId }: { sessionId: string }) {
         </label>
       </div>
 
-      {error && <p className="mb-3 rounded-md bg-danger-soft px-3 py-1.5 text-xs text-danger">{error}</p>}
+      {error && <p role="alert" className="mb-3 rounded-md bg-danger-soft px-3 py-1.5 text-xs text-danger">{error}</p>}
 
       {loading ? (
         <p className="text-sm text-ink-faint">Loading documents…</p>
@@ -101,17 +101,17 @@ export function UploadsPanel({ sessionId }: { sessionId: string }) {
               <div className="flex shrink-0 gap-1">
                 <button
                   onClick={() => api.downloadUpload(sessionId, doc.id, doc.filename)}
-                  title="Download"
-                  className="rounded-sm p-1.5 text-ink-faint hover:bg-paper hover:text-ink"
+                  aria-label={`Download ${doc.filename}`}
+                  className="rounded-md p-2.5 text-ink-faint hover:bg-paper hover:text-ink"
                 >
-                  <Download size={14} />
+                  <Download size={15} />
                 </button>
                 <button
                   onClick={() => handleDelete(doc.id)}
-                  title="Delete"
-                  className="rounded-sm p-1.5 text-ink-faint hover:bg-danger-soft hover:text-danger"
+                  aria-label={`Delete ${doc.filename}`}
+                  className="rounded-md p-2.5 text-ink-faint hover:bg-danger-soft hover:text-danger"
                 >
-                  <Trash2 size={14} />
+                  <Trash2 size={15} />
                 </button>
               </div>
             </li>

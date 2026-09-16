@@ -42,7 +42,8 @@ export function LoginPage() {
             <button
               type="button"
               onClick={() => setMode("login")}
-              className={`flex-1 rounded-sm py-1.5 text-sm transition-colors ${
+              aria-pressed={mode === "login"}
+              className={`flex-1 rounded-sm py-2 text-sm transition-colors ${
                 mode === "login" ? "bg-surface font-medium text-ink shadow-sm" : "text-ink-muted"
               }`}
             >
@@ -51,7 +52,8 @@ export function LoginPage() {
             <button
               type="button"
               onClick={() => setMode("signup")}
-              className={`flex-1 rounded-sm py-1.5 text-sm transition-colors ${
+              aria-pressed={mode === "signup"}
+              className={`flex-1 rounded-sm py-2 text-sm transition-colors ${
                 mode === "signup" ? "bg-surface font-medium text-ink shadow-sm" : "text-ink-muted"
               }`}
             >
@@ -70,7 +72,7 @@ export function LoginPage() {
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-ink outline-none focus:border-accent"
+                className="w-full rounded-md border border-border bg-surface px-3 py-2.5 text-base text-ink outline-none focus:border-accent sm:text-sm"
                 placeholder="you@company.com"
               />
             </div>
@@ -85,13 +87,13 @@ export function LoginPage() {
                 minLength={8}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-ink outline-none focus:border-accent"
+                className="w-full rounded-md border border-border bg-surface px-3 py-2.5 text-base text-ink outline-none focus:border-accent sm:text-sm"
                 placeholder="At least 8 characters"
               />
             </div>
 
             {error && (
-              <p className="rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">{error}</p>
+              <p role="alert" className="rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">{error}</p>
             )}
 
             <button

@@ -68,18 +68,18 @@ export function SolutionDecisionsList({ sessionId }: { sessionId: string }) {
                         <button
                           onClick={() => act(d.id, "approved")}
                           disabled={actingOn === d.id}
-                          title="Approve"
-                          className="rounded-sm p-1 text-ink-faint hover:bg-accent-soft hover:text-accent-strong disabled:opacity-50"
+                          aria-label="Approve solution decision"
+                          className="rounded-md p-2 text-ink-faint hover:bg-accent-soft hover:text-accent-strong disabled:opacity-50"
                         >
-                          <Check size={15} />
+                          <Check size={16} />
                         </button>
                         <button
                           onClick={() => act(d.id, "rejected")}
                           disabled={actingOn === d.id}
-                          title="Reject"
-                          className="rounded-sm p-1 text-ink-faint hover:bg-danger-soft hover:text-danger disabled:opacity-50"
+                          aria-label="Reject solution decision"
+                          className="rounded-md p-2 text-ink-faint hover:bg-danger-soft hover:text-danger disabled:opacity-50"
                         >
-                          <X size={15} />
+                          <X size={16} />
                         </button>
                       </div>
                     )}

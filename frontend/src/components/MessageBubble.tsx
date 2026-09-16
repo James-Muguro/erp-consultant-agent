@@ -19,7 +19,7 @@ export function MessageBubble({
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div
-        className={`max-w-[75ch] rounded-md px-4 py-2.5 text-sm leading-relaxed ${
+        className={`max-w-[88%] rounded-md px-4 py-2.5 text-sm leading-relaxed sm:max-w-[75ch] ${
           isUser
             ? "bg-accent text-white"
             : message.error
@@ -43,7 +43,7 @@ export function MessageBubble({
               <button
                 key={doc.filename}
                 onClick={() => sessionId && api.downloadDocument(sessionId, doc.filename)}
-                className="flex items-center gap-1.5 rounded-md border border-border bg-paper px-2 py-1 text-xs text-ink-muted transition-colors hover:border-accent hover:text-accent"
+                className="flex items-center gap-1.5 rounded-md border border-border bg-paper px-2.5 py-1.5 text-xs text-ink-muted transition-colors hover:border-accent hover:text-accent"
               >
                 <FileText size={12} />
                 {doc.label}

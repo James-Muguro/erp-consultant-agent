@@ -147,6 +147,22 @@ export interface ProjectHealth {
   requirements_coverage_pct: number;
   open_issues_total: number;
   open_issues_by_severity: Record<string, number>;
+  uncovered_requirements_count?: number;
+  untested_requirements_count?: number;
+}
+
+export interface CoverageGapRequirement {
+  id: string;
+  external_code: string | null;
+  category: string;
+  description: string;
+  priority: string | null;
+}
+
+export interface CoverageGaps {
+  session_id: string;
+  uncovered_requirements: CoverageGapRequirement[];
+  untested_requirements: CoverageGapRequirement[];
 }
 
 export interface UploadedDocument {

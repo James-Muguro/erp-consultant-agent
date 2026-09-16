@@ -12,6 +12,7 @@ import type {
   TrainingStep,
   ProjectIssue,
   ProjectHealth,
+  CoverageGaps,
   UploadedDocument,
   ReviewAction,
   User,
@@ -240,6 +241,10 @@ export const api = {
 
   async getProjectHealth(sessionId: string) {
     return request<ProjectHealth>(`/api/projects/${sessionId}/health`);
+  },
+
+  async getCoverageGaps(sessionId: string) {
+    return request<CoverageGaps>(`/api/projects/${sessionId}/coverage-gaps`);
   },
 
   async submitReviewAction(

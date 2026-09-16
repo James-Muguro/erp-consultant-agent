@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { MessageSquare, LayoutGrid } from "lucide-react";
+import { MessageSquare, LayoutGrid, Menu } from "lucide-react";
 import { useAuth } from "./context/AuthContext";
 import { LoginPage } from "./pages/LoginPage";
 import { Sidebar } from "./components/Sidebar";
@@ -19,6 +19,7 @@ function ChatApp() {
   const [loadingProjects, setLoadingProjects] = useState(true);
   const [showArchived, setShowArchived] = useState(false);
   const [mainView, setMainView] = useState<MainView>("workspace");
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const refreshProjects = useCallback(async () => {
     const { projects } = await api.listProjects(showArchived);
@@ -104,8 +105,10 @@ async function renameProject(sessionId: string, newName: string) {
     await refreshProjects();
   }
 
+  const activeProject = projects.find((p) => p.session_id === activeSessionId);
+
   return (
-    <div className="flex h-screen flex-col bg-paper md:flex-row">
+    <div className="flex h-screen bg-paper">
       <Sidebar
         projects={projects}
         activeSessionId={activeSessionId}
@@ -117,52 +120,73 @@ async function renameProject(sessionId: string, newName: string) {
         onDelete={deleteProject}
         showArchived={showArchived}
         onToggleArchived={() => setShowArchived((current) => !current)}
-        />
-      <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-        {loadingProjects ? (
-          <div className="flex flex-1 items-center justify-center text-sm text-ink-faint">
-            Loading your projects…
-          </div>
-        ) : (
-          <>
-            {activeSessionId && (
-              <div className="flex shrink-0 gap-1 border-b border-border bg-surface px-4 py-2">
-                <button
-                  onClick={() => setMainView("workspace")}
-                  className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors ${
-                    mainView === "workspace" ? "bg-accent-soft text-accent-strong" : "text-ink-muted hover:bg-paper"
-                  }`}
-                >
-                  <LayoutGrid size={14} />
-                  Workspace
-                </button>
-                <button
-                  onClick={() => setMainView("chat")}
-                  className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors ${
-                    mainView === "chat" ? "bg-accent-soft text-accent-strong" : "text-ink-muted hover:bg-paper"
-                  }`}
-                >
-                  <MessageSquare size={14} />
-                  Chat
-                </button>
-              </div>
-            )}
-            {activeSessionId && mainView === "workspace" ? (
-              <ProjectWorkspace sessionId={activeSessionId} />
-            ) : (
-              <ChatPanel
-                sessionId={activeSessionId}
-                messages={chat.messages}
-                activity={chat.activity}
-                sending={chat.sending}
-                streamError={chat.streamError}
-                onSend={chat.send}
-                onStop={chat.stop}
-              />
-            )}
-          </>
-        )}
-      </main>
+        isOpen={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
+      />
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        {/* Mobile-only header: the sidebar is an off-canvas drawer below
+            the md breakpoint, so this is the only way to reach it there,
+            and it keeps the current project visible without needing the
+            drawer open. */}
+        <header className="safe-top flex shrink-0 items-center gap-2 border-b border-border bg-surface px-3 py-2.5 md:hidden">
+          <button
+            onClick={() => setSidebarOpen(true)}
+            aria-label="Open menu"
+            className="rounded-md p-2 text-ink-muted hover:bg-paper hover:text-ink"
+          >
+            <Menu size={20} />
+          </button>
+          <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink">
+            {activeProject ? activeProject.project_name : "ERP Consultant AI"}
+          </span>
+        </header>
+
+        <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {loadingProjects ? (
+            <div className="flex flex-1 items-center justify-center text-sm text-ink-faint">
+              Loading your projects…
+            </div>
+          ) : (
+            <>
+              {activeSessionId && (
+                <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-border bg-surface px-3 py-2 md:px-4">
+                  <button
+                    onClick={() => setMainView("workspace")}
+                    className={`flex shrink-0 items-center gap-1.5 rounded-md px-3 py-2 text-sm transition-colors md:py-1.5 ${
+                      mainView === "workspace" ? "bg-accent-soft text-accent-strong" : "text-ink-muted hover:bg-paper"
+                    }`}
+                  >
+                    <LayoutGrid size={14} />
+                    Workspace
+                  </button>
+                  <button
+                    onClick={() => setMainView("chat")}
+                    className={`flex shrink-0 items-center gap-1.5 rounded-md px-3 py-2 text-sm transition-colors md:py-1.5 ${
+                      mainView === "chat" ? "bg-accent-soft text-accent-strong" : "text-ink-muted hover:bg-paper"
+                    }`}
+                  >
+                    <MessageSquare size={14} />
+                    Chat
+                  </button>
+                </div>
+              )}
+              {activeSessionId && mainView === "workspace" ? (
+                <ProjectWorkspace sessionId={activeSessionId} />
+              ) : (
+                <ChatPanel
+                  sessionId={activeSessionId}
+                  messages={chat.messages}
+                  activity={chat.activity}
+                  sending={chat.sending}
+                  streamError={chat.streamError}
+                  onSend={chat.send}
+                  onStop={chat.stop}
+                />
+              )}
+            </>
+          )}
+        </main>
+      </div>
 
       {showNewProject && (
         <NewProjectModal onClose={() => setShowNewProject(false)} onCreate={createProject} />

@@ -1,5 +1,5 @@
-import { useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { Archive, ChevronDown, LogOut, MessageSquarePlus, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { Archive, ChevronDown, LogOut, MessageSquarePlus, Pencil, Plus, Search, Trash2, X } from "lucide-react";
 import type { ProjectSummary } from "../types";
 import { useAuth } from "../context/AuthContext";
 
@@ -14,6 +14,8 @@ export function Sidebar({
   onDelete,
   showArchived,
   onToggleArchived,
+  isOpen,
+  onClose,
 }: {
   projects: ProjectSummary[];
   activeSessionId: string | null;
@@ -25,6 +27,10 @@ export function Sidebar({
   onDelete: (sessionId: string) => void;
   showArchived: boolean;
   onToggleArchived: () => void;
+  /** Controls the off-canvas drawer below the md breakpoint. Ignored at
+   * md and above, where the sidebar is always visible as a static rail. */
+  isOpen: boolean;
+  onClose: () => void;
 }) {
   const { user, logout, updateAccountSettings, uploadProfilePicture, changePassword, deleteAccount } = useAuth();
   const [query, setQuery] = useState("");
@@ -39,6 +45,32 @@ export function Sidebar({
   const [newPassword, setNewPassword] = useState("");
   const [profileError, setProfileError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+
+  // Close the mobile drawer on Escape, matching standard dialog/drawer
+  // keyboard behavior.
+  useEffect(() => {
+    if (!isOpen) return;
+    function handleKey(e: globalThis.KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [isOpen, onClose]);
+
+  function selectAndClose(sessionId: string) {
+    onSelect(sessionId);
+    onClose();
+  }
+
+  function newChatAndClose() {
+    onNewChat();
+    onClose();
+  }
+
+  function newProjectAndClose() {
+    onNewProject();
+    onClose();
+  }
 
   const filtered = useMemo(() => {
     if (!query.trim()) return projects;
@@ -115,26 +147,50 @@ export function Sidebar({
   }
 
   return (
-    <aside className="flex max-h-[45vh] w-full shrink-0 flex-col border-b border-border bg-surface md:h-full md:max-h-none md:w-72 md:border-b-0 md:border-r">
+    <>
+      {/* Backdrop - mobile/tablet only, sits behind the drawer, closes it on tap */}
+      {isOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-ink/30 md:hidden"
+          onClick={onClose}
+          aria-hidden="true"
+        />
+      )}
+      <aside
+        role="navigation"
+        aria-label="Projects"
+        className={`safe-top safe-bottom fixed inset-y-0 left-0 z-50 flex w-[85vw] max-w-80 -translate-x-full flex-col bg-surface shadow-lg transition-transform duration-200 ease-out md:static md:z-auto md:h-full md:w-72 md:max-w-none md:translate-x-0 md:border-r md:border-border md:shadow-none ${
+          isOpen ? "translate-x-0" : ""
+        }`}
+      >
       <div className="border-b border-border p-4">
-        <h1 className="font-display text-lg text-ink">ERP Consultant AI</h1>
+        <div className="flex items-center justify-between">
+          <h1 className="font-display text-lg text-ink">ERP Consultant AI</h1>
+          <button
+            onClick={onClose}
+            aria-label="Close menu"
+            className="rounded-md p-2 text-ink-faint hover:bg-paper hover:text-ink md:hidden"
+          >
+            <X size={18} />
+          </button>
+        </div>
         <button
-          onClick={onNewChat}
-          className="mt-3 flex w-full items-center justify-center gap-2 rounded-md bg-accent py-2 text-sm font-medium text-white transition-colors hover:bg-accent-strong"
+          onClick={newChatAndClose}
+          className="mt-3 flex w-full items-center justify-center gap-2 rounded-md bg-accent py-2.5 text-sm font-medium text-white transition-colors hover:bg-accent-strong"
         >
           <MessageSquarePlus size={15} />
           New chat
         </button>
         <button
-          onClick={onNewProject}
-          className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-border py-1.5 text-xs font-medium text-ink-muted transition-colors hover:border-accent hover:text-accent"
+          onClick={newProjectAndClose}
+          className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-border py-2 text-xs font-medium text-ink-muted transition-colors hover:border-accent hover:text-accent"
         >
           <Plus size={13} />
           New project (structured)
         </button>
         <button
           onClick={onToggleArchived}
-          className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-border py-1.5 text-xs font-medium text-ink-muted transition-colors hover:border-accent hover:text-accent"
+          className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-border py-2 text-xs font-medium text-ink-muted transition-colors hover:border-accent hover:text-accent"
         >
           <Archive size={13} />
           {showArchived ? "Hide archived" : "Show archived"}
@@ -142,12 +198,13 @@ export function Sidebar({
       </div>
 
       <div className="border-b border-border p-3">
-        <div className="flex items-center gap-2 rounded-md border border-border bg-paper px-2.5 py-1.5">
+        <div className="flex items-center gap-2 rounded-md border border-border bg-paper px-2.5 py-2">
           <Search size={14} className="shrink-0 text-ink-faint" />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search projects"
+            aria-label="Search projects"
             className="w-full bg-transparent text-sm text-ink outline-none placeholder:text-ink-faint"
           />
         </div>
@@ -176,30 +233,30 @@ export function Sidebar({
                   />
                 ) : (
                   <button
-                    onClick={() => onSelect(project.session_id)}
-                    className={`w-full rounded-md px-3 py-2 text-left text-sm transition-colors ${
+                    onClick={() => selectAndClose(project.session_id)}
+                    className={`w-full rounded-md px-3 py-2.5 text-left text-sm transition-colors ${
                       project.session_id === activeSessionId
                         ? "bg-accent-soft text-accent-strong"
                         : "text-ink hover:bg-paper"
                     }`}
                   >
-                    <span className="block truncate pr-12 font-medium">{project.project_name}</span>
+                    <span className="block truncate pr-16 font-medium">{project.project_name}</span>
                     {!project.is_casual && (
-                      <span className="block truncate pr-12 text-xs text-ink-faint">
+                      <span className="block truncate pr-16 text-xs text-ink-faint">
                         {project.module} · {project.current_phase.replace(/_/g, " ")}
                       </span>
                     )}
                   </button>
                 )}
                 {!isEditing && (
-                  <div className="absolute right-1.5 top-1.5 hidden gap-1 group-hover:flex">
+                  <div className="absolute right-1 top-1 flex gap-0.5 opacity-100 md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100">
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
                         startEditing(project.session_id, project.project_name);
                       }}
-                      title="Rename"
-                      className="rounded-sm p-1 text-ink-faint hover:bg-surface hover:text-ink"
+                      aria-label={`Rename ${project.project_name}`}
+                      className="rounded-md p-2 text-ink-faint hover:bg-surface hover:text-ink"
                     >
                       <Pencil size={13} />
                     </button>
@@ -208,8 +265,8 @@ export function Sidebar({
                         e.stopPropagation();
                         onArchive(project.session_id);
                       }}
-                      title="Archive"
-                      className="rounded-sm p-1 text-ink-faint hover:bg-surface hover:text-ink"
+                      aria-label={`Archive ${project.project_name}`}
+                      className="rounded-md p-2 text-ink-faint hover:bg-surface hover:text-ink"
                     >
                       <Archive size={13} />
                     </button>
@@ -218,8 +275,8 @@ export function Sidebar({
                         e.stopPropagation();
                         onDelete(project.session_id);
                       }}
-                      title="Delete"
-                      className="rounded-sm p-1 text-ink-faint hover:bg-surface hover:text-danger"
+                      aria-label={`Delete ${project.project_name}`}
+                      className="rounded-md p-2 text-ink-faint hover:bg-surface hover:text-danger"
                     >
                       <Trash2 size={13} />
                     </button>
@@ -327,20 +384,22 @@ export function Sidebar({
         )}
         <button
           onClick={() => setProfileOpen((open) => !open)}
-          title="Profile"
-          className="flex w-full items-center justify-between gap-2 rounded-md p-1 text-left hover:bg-paper"
+          aria-label="Profile menu"
+          aria-expanded={profileOpen}
+          className="flex w-full items-center justify-between gap-2 rounded-md p-2 text-left hover:bg-paper"
         >
           <span className="flex min-w-0 items-center gap-2">
             {user?.profile_picture_url ? (
-              <img src={user.profile_picture_url} alt="" className="h-7 w-7 shrink-0 rounded-full object-cover" />
+              <img src={user.profile_picture_url} alt="" className="h-8 w-8 shrink-0 rounded-full object-cover" />
             ) : (
-              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent-soft text-[10px] font-semibold text-accent-strong">{initials}</span>
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent-soft text-[10px] font-semibold text-accent-strong">{initials}</span>
             )}
             <span className="truncate text-xs text-ink-muted">{displayName}</span>
           </span>
           <ChevronDown size={15} className={`shrink-0 text-ink-faint transition-transform ${profileOpen ? "rotate-180" : ""}`} />
         </button>
       </div>
-    </aside>
+      </aside>
+    </>
   );
 }

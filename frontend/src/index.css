@@ -48,6 +48,14 @@
   }
 }
 
+/* Safe-area support for notched/home-indicator devices (iOS Safari,
+   Android gesture nav) - applied where content sits at the physical
+   edge of the screen (drawer sides, bottom composer, bottom sheets). */
+.safe-top { padding-top: env(safe-area-inset-top); }
+.safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
+.safe-left { padding-left: env(safe-area-inset-left); }
+.safe-right { padding-right: env(safe-area-inset-right); }
+
 /* Minimal typography for markdown-rendered assistant messages - avoids
    pulling in a full typography plugin for a handful of chat-bubble tags. */
 .prose-chat p { margin: 0 0 0.6em; }
