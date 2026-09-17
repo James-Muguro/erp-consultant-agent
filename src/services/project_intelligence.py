@@ -219,6 +219,9 @@ def sync_process_steps_from_structured(session_id: str, process_name: str,
             db.add(ProcessStepRecord(
                 id=sid,
                 session_id=session_id,
+                lineage_id=sid,
+                version=1,
+                is_current=True,
                 process_name=process_name,
                 step_number=step.get("number", len(created_ids) + 1),
                 name=step.get("name", ""),
@@ -232,21 +235,24 @@ def sync_process_steps_from_structured(session_id: str, process_name: str,
     return created_ids
 
 
-def get_process_steps(session_id: str, process_name: Optional[str] = None) -> List[Dict[str, Any]]:
+def get_process_steps(session_id: str, process_name: Optional[str] = None,
+                       include_history: bool = False) -> List[Dict[str, Any]]:
     db = SessionLocal()
     try:
         q = db.query(ProcessStepRecord).filter(ProcessStepRecord.session_id == session_id)
         if process_name:
             q = q.filter(ProcessStepRecord.process_name == process_name)
+        if not include_history:
+            q = q.filter(ProcessStepRecord.is_current.is_(True))
         rows = q.order_by(ProcessStepRecord.process_name, ProcessStepRecord.step_number).all()
         return [{
-            "id": r.id, "process_name": r.process_name, "step_number": r.step_number,
+            "id": r.id, "lineage_id": r.lineage_id, "version": r.version, "is_current": r.is_current,
+            "process_name": r.process_name, "step_number": r.step_number,
             "name": r.name, "description": r.description,
             "responsible_role": r.responsible_role, "requirement_id": r.requirement_id,
         } for r in rows]
     finally:
         db.close()
-
 
 def sync_solution_decisions_from_structured(session_id: str, structured_design: Dict[str, Any]) -> List[str]:
     """Converts a SolutionDesign's configurations, customizations, and
@@ -635,6 +641,50 @@ def get_solution_decision_history(session_id: str, lineage_id: str) -> List[Dict
             "id": r.id, "version": r.version, "is_current": r.is_current, "stage": r.stage,
             "component": r.component, "description": r.description, "rationale": r.rationale,
             "created_at": r.created_at.isoformat(),
+        } for r in rows]
+    finally:
+        db.close()
+
+def revise_process_step(session_id: str, step_id: str, updates: Dict[str, Any]) -> str:
+    """Creates a new version of a process step instead of mutating it -
+    e.g. when a solution change (record_actual_solution) requires the
+    business process itself to change. Preserves the original step in
+    full history rather than silently overwriting it."""
+    db = SessionLocal()
+    try:
+        current = db.get(ProcessStepRecord, step_id)
+        if not current or current.session_id != session_id:
+            raise ValueError("Process step not found for this session")
+
+        new_id = uuid.uuid4().hex
+        db.add(ProcessStepRecord(
+            id=new_id, session_id=session_id, lineage_id=current.lineage_id,
+            version=current.version + 1, is_current=True,
+            process_name=current.process_name,
+            step_number=updates.get("step_number", current.step_number),
+            name=updates.get("name", current.name),
+            description=updates.get("description", current.description),
+            responsible_role=updates.get("responsible_role", current.responsible_role),
+            requirement_id=current.requirement_id,
+        ))
+        current.is_current = False
+        db.commit()
+        return new_id
+    finally:
+        db.close()
+
+
+def get_process_step_history(session_id: str, lineage_id: str) -> List[Dict[str, Any]]:
+    db = SessionLocal()
+    try:
+        rows = db.query(ProcessStepRecord).filter(
+            ProcessStepRecord.session_id == session_id,
+            ProcessStepRecord.lineage_id == lineage_id,
+        ).order_by(ProcessStepRecord.version).all()
+        return [{
+            "id": r.id, "version": r.version, "is_current": r.is_current,
+            "name": r.name, "description": r.description,
+            "responsible_role": r.responsible_role, "created_at": r.created_at.isoformat(),
         } for r in rows]
     finally:
         db.close()

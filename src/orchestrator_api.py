@@ -168,6 +168,12 @@ class SolutionActualRequest(BaseModel):
     component: Optional[str] = None
     rationale: Optional[str] = None
 
+class ProcessStepReviseRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    responsible_role: Optional[str] = None
+    step_number: Optional[int] = None
+
 def extract_text(response) -> str:
     if response is None:
         return "No response from LLM."
@@ -911,11 +917,11 @@ def delete_project_document(session_id: str, document_id: str, current_user: Use
 
 
 @app.get("/api/projects/{session_id}/process-steps")
-def list_process_steps(session_id: str, process_name: Optional[str] = None,
+def list_process_steps(session_id: str, process_name: Optional[str] = None, include_history: bool = False,
                         current_user: User = Depends(get_current_user)):
     _get_owned_session(session_id, current_user)
     return {"session_id": session_id,
-            "process_steps": project_intelligence.get_process_steps(session_id, process_name)}
+            "process_steps": project_intelligence.get_process_steps(session_id, process_name, include_history)}
 
 
 @app.get("/api/projects/{session_id}/solution-decisions")
@@ -931,7 +937,7 @@ def list_solution_decisions(session_id: str, decision_type: Optional[str] = None
     }
 
 @app.get("/api/projects/{session_id}/test-cases")
-def list_test_cases(session_id: str, test_type: Optional[str] = None,
+def list_test_cases(session_id: str, test_type: Optional[str] = None, include_history: bool = False,
                      current_user: User = Depends(get_current_user)):
     _get_owned_session(session_id, current_user)
     return {"session_id": session_id, "test_cases": project_intelligence.get_test_cases(session_id, test_type)}
@@ -989,6 +995,23 @@ def record_actual_solution(session_id: str, decision_id: str, req: SolutionActua
 def solution_decision_history(session_id: str, lineage_id: str, current_user: User = Depends(get_current_user)):
     _get_owned_session(session_id, current_user)
     return {"history": project_intelligence.get_solution_decision_history(session_id, lineage_id)}
+
+
+@app.post("/api/projects/{session_id}/process-steps/{step_id}/revise")
+def revise_process_step(session_id: str, step_id: str, req: ProcessStepReviseRequest,
+                         current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
+    try:
+        new_id = project_intelligence.revise_process_step(session_id, step_id, req.model_dump(exclude_none=True))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"new_step_id": new_id}
+
+
+@app.get("/api/projects/{session_id}/process-steps/{lineage_id}/history")
+def process_step_history(session_id: str, lineage_id: str, current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
+    return {"history": project_intelligence.get_process_step_history(session_id, lineage_id)}
 # ---------------------------------------------------------------------------
 # Chat
 # ---------------------------------------------------------------------------

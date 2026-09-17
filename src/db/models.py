@@ -198,6 +198,9 @@ class ProcessStepRecord(Base):
 
     id = Column(String, primary_key=True)
     session_id = Column(String, ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=False, index=True)
+    lineage_id = Column(String, nullable=False, index=True)
+    version = Column(Integer, nullable=False, default=1)
+    is_current = Column(Boolean, nullable=False, default=True)
     process_name = Column(String, nullable=False)
     step_number = Column(Integer, nullable=False)
     name = Column(String, nullable=False)
