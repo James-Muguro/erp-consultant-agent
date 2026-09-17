@@ -1012,6 +1012,25 @@ def revise_process_step(session_id: str, step_id: str, req: ProcessStepReviseReq
 def process_step_history(session_id: str, lineage_id: str, current_user: User = Depends(get_current_user)):
     _get_owned_session(session_id, current_user)
     return {"history": project_intelligence.get_process_step_history(session_id, lineage_id)}
+
+class TestFailureRequest(BaseModel):
+    classification: str  # defect, unclear_requirement, changed_requirement, data_issue, integration_issue, environment_issue, other
+    description: str
+
+
+@app.post("/api/projects/{session_id}/test-cases/{test_case_id}/report-failure")
+def report_test_failure(session_id: str, test_case_id: str, req: TestFailureRequest,
+                         current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
+    issue_id = project_intelligence.record_test_failure(session_id, test_case_id, req.classification, req.description)
+    return {"issue_id": issue_id}
+
+
+@app.get("/api/projects/{session_id}/test-failures")
+def list_test_failures(session_id: str, classification: Optional[str] = None,
+                        current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
+    return {"test_failures": project_intelligence.get_test_failures(session_id, classification)}
 # ---------------------------------------------------------------------------
 # Chat
 # ---------------------------------------------------------------------------

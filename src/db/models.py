@@ -244,6 +244,8 @@ class ProjectIssue(Base):
     description = Column(Text, nullable=False)
     related_object_type = Column(String, nullable=True)
     related_object_id = Column(String, nullable=True)
+    test_case_id = Column(String, ForeignKey("test_case_records.id", ondelete="SET NULL"), nullable=True, index=True)
+    classification = Column(String, nullable=True)  # defect, unclear_requirement, changed_requirement, data_issue, integration_issue, environment_issue, other
     status = Column(String, nullable=False, default="open")  # open, resolved, dismissed
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     resolved_at = Column(DateTime(timezone=True), nullable=True)

@@ -428,6 +428,7 @@ def sync_test_cases_from_structured(session_id: str, test_type: str,
     db = SessionLocal()
     created_ids = []
     pending_links = []
+    pending_failures = []
     try:
         for tc in structured_test_cases:
             tid = uuid.uuid4().hex
@@ -442,6 +443,8 @@ def sync_test_cases_from_structured(session_id: str, test_type: str,
             ))
             created_ids.append(tid)
             pending_links.append((tid, tc.get("related_requirement_ids") or []))
+            if tc.get("execution_status") == "failed":
+                pending_failures.append((tid, tc))
         db.commit()
     finally:
         db.close()
@@ -450,7 +453,60 @@ def sync_test_cases_from_structured(session_id: str, test_type: str,
         if codes:
             link_requirements(session_id, "test_case", tc_id, codes)
 
+    for tc_id, tc in pending_failures:
+        record_test_failure(
+            session_id, tc_id,
+            classification=tc.get("failure_classification") or "other",
+            description=tc.get("failure_description") or f"Test case '{tc.get('scenario', tc_id)}' failed.",
+        )
+
     return created_ids
+
+
+def record_test_failure(session_id: str, test_case_id: str, classification: str, description: str) -> str:
+    """Records a test failure as a first-class ProjectIssue rather than
+    a pass/fail checkbox - the platform's core principle that testing
+    generates project knowledge. Severity is derived from classification:
+    a defect or changed requirement is high-impact (blocks the affected
+    requirement's delivery); everything else defaults to medium."""
+    valid_classifications = {
+        "defect", "unclear_requirement", "changed_requirement",
+        "data_issue", "integration_issue", "environment_issue", "other",
+    }
+    if classification not in valid_classifications:
+        classification = "other"
+
+    severity = "high" if classification in ("defect", "changed_requirement") else "medium"
+
+    db = SessionLocal()
+    try:
+        iid = uuid.uuid4().hex
+        db.add(ProjectIssue(
+            id=iid, session_id=session_id, issue_type="test_failure", severity=severity,
+            description=description, related_object_type="test_case", related_object_id=test_case_id,
+            test_case_id=test_case_id, classification=classification,
+        ))
+        db.commit()
+        return iid
+    finally:
+        db.close()
+
+
+def get_test_failures(session_id: str, classification: Optional[str] = None) -> List[Dict[str, Any]]:
+    db = SessionLocal()
+    try:
+        q = db.query(ProjectIssue).filter(
+            ProjectIssue.session_id == session_id, ProjectIssue.issue_type == "test_failure"
+        )
+        if classification:
+            q = q.filter(ProjectIssue.classification == classification)
+        rows = q.order_by(ProjectIssue.created_at.desc()).all()
+        return [{
+            "id": r.id, "test_case_id": r.test_case_id, "classification": r.classification,
+            "severity": r.severity, "description": r.description, "status": r.status,
+        } for r in rows]
+    finally:
+        db.close()
 
 
 def sync_training_steps_from_structured(session_id: str, structured_materials: Dict[str, Any]) -> List[str]:
