@@ -305,3 +305,29 @@ class TrainingStepRecord(Base):
     title = Column(String, nullable=False)
     instructions = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+class SolutionBaseline(Base):
+    """A named, point-in-time snapshot of 'the solution actually delivered'
+    - the brief's critical 'final validated solution' concept. Creating a
+    new baseline never deletes an old one (is_active flips the prior one
+    off) - full baseline history stays queryable, matching the platform's
+    history-over-overwrite principle."""
+    __tablename__ = "solution_baselines"
+
+    id = Column(String, primary_key=True)
+    session_id = Column(String, ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=False, index=True)
+    label = Column(String, nullable=False)  # e.g. "Go-Live Baseline", "UAT Baseline"
+    notes = Column(Text, nullable=True)
+    created_by = Column(String, ForeignKey("users.id"), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class SolutionBaselineItem(Base):
+    """One (decision lineage -> specific version) pin within a baseline -
+    the actual snapshot content."""
+    __tablename__ = "solution_baseline_items"
+
+    id = Column(String, primary_key=True)
+    baseline_id = Column(String, ForeignKey("solution_baselines.id", ondelete="CASCADE"), nullable=False, index=True)
+    solution_decision_id = Column(String, ForeignKey("solution_decisions.id", ondelete="CASCADE"), nullable=False)

@@ -1031,6 +1031,37 @@ def list_test_failures(session_id: str, classification: Optional[str] = None,
                         current_user: User = Depends(get_current_user)):
     _get_owned_session(session_id, current_user)
     return {"test_failures": project_intelligence.get_test_failures(session_id, classification)}
+
+class BaselineCreateRequest(BaseModel):
+    label: str
+    notes: Optional[str] = None
+    decision_ids: Optional[List[str]] = None
+
+
+@app.post("/api/projects/{session_id}/baselines")
+def create_baseline(session_id: str, req: BaselineCreateRequest,
+                     current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
+    baseline_id = project_intelligence.create_baseline(
+        session_id, current_user.id, req.label, req.notes, req.decision_ids
+    )
+    return {"baseline_id": baseline_id}
+
+
+@app.get("/api/projects/{session_id}/baselines")
+def list_baselines(session_id: str, current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
+    return {"baselines": project_intelligence.get_baselines(session_id)}
+
+
+@app.get("/api/projects/{session_id}/baselines/active")
+def active_baseline(session_id: str, current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
+    baseline = project_intelligence.get_active_baseline(session_id)
+    if not baseline:
+        raise HTTPException(status_code=404, detail="No active baseline for this project")
+    return baseline
+
 # ---------------------------------------------------------------------------
 # Chat
 # ---------------------------------------------------------------------------

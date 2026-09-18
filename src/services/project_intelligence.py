@@ -21,6 +21,8 @@ from src.db.models import (
     TestCaseRecord,
     TrainingStepRecord,
     ProjectIssue,
+    SolutionBaseline, 
+    SolutionBaselineItem,
     ReviewAction,
     TraceLink,
 )
@@ -199,6 +201,7 @@ def get_project_health(session_id: str) -> Dict[str, Any]:
             "open_issues_by_severity": issues_by_severity,
             "uncovered_requirements_count": len(gaps["uncovered_requirements"]),
             "untested_requirements_count": len(gaps["untested_requirements"]),
+            "has_active_baseline": get_active_baseline(session_id) is not None,
         }
     finally:
         db.close()
@@ -741,6 +744,81 @@ def get_process_step_history(session_id: str, lineage_id: str) -> List[Dict[str,
             "id": r.id, "version": r.version, "is_current": r.is_current,
             "name": r.name, "description": r.description,
             "responsible_role": r.responsible_role, "created_at": r.created_at.isoformat(),
+        } for r in rows]
+    finally:
+        db.close()
+
+def create_baseline(session_id: str, user_id: str, label: str, notes: Optional[str] = None,
+                     decision_ids: Optional[List[str]] = None) -> str:
+    """Snapshots 'the solution actually delivered' as of now. Defaults to
+    every currently-active solution decision in the session if no
+    explicit decision_ids are given - the common case of 'baseline
+    whatever is live right now'. Deactivates any prior active baseline
+    (kept, not deleted - full baseline history remains queryable)."""
+    db = SessionLocal()
+    try:
+        if decision_ids is None:
+            current_decisions = db.query(SolutionDecision).filter(
+                SolutionDecision.session_id == session_id,
+                SolutionDecision.is_current.is_(True),
+            ).all()
+            decision_ids = [d.id for d in current_decisions]
+
+        db.query(SolutionBaseline).filter(
+            SolutionBaseline.session_id == session_id, SolutionBaseline.is_active.is_(True)
+        ).update({"is_active": False})
+
+        baseline_id = uuid.uuid4().hex
+        db.add(SolutionBaseline(
+            id=baseline_id, session_id=session_id, label=label, notes=notes,
+            created_by=user_id, is_active=True,
+        ))
+        for decision_id in decision_ids:
+            db.add(SolutionBaselineItem(
+                id=uuid.uuid4().hex, baseline_id=baseline_id, solution_decision_id=decision_id,
+            ))
+        db.commit()
+        return baseline_id
+    finally:
+        db.close()
+
+
+def get_active_baseline(session_id: str) -> Optional[Dict[str, Any]]:
+    db = SessionLocal()
+    try:
+        baseline = db.query(SolutionBaseline).filter(
+            SolutionBaseline.session_id == session_id, SolutionBaseline.is_active.is_(True)
+        ).first()
+        if not baseline:
+            return None
+
+        items = db.query(SolutionBaselineItem).filter(
+            SolutionBaselineItem.baseline_id == baseline.id
+        ).all()
+        decision_ids = [i.solution_decision_id for i in items]
+        decisions = db.query(SolutionDecision).filter(SolutionDecision.id.in_(decision_ids)).all() if decision_ids else []
+
+        return {
+            "id": baseline.id, "label": baseline.label, "notes": baseline.notes,
+            "created_at": baseline.created_at.isoformat(),
+            "decisions": [{
+                "id": d.id, "decision_type": d.decision_type, "component": d.component,
+                "description": d.description, "stage": d.stage, "version": d.version,
+            } for d in decisions],
+        }
+    finally:
+        db.close()
+
+
+def get_baselines(session_id: str) -> List[Dict[str, Any]]:
+    db = SessionLocal()
+    try:
+        rows = db.query(SolutionBaseline).filter(
+            SolutionBaseline.session_id == session_id
+        ).order_by(SolutionBaseline.created_at.desc()).all()
+        return [{
+            "id": r.id, "label": r.label, "notes": r.notes,
+            "is_active": r.is_active, "created_at": r.created_at.isoformat(),
         } for r in rows]
     finally:
         db.close()
