@@ -516,5 +516,125 @@ class DocumentGenerator:
         return filepath
 
 
+    # ------------------------------------------------------------------
+    # Consolidated project status report (client-ready deliverable)
+    # ------------------------------------------------------------------
+
+    def generate_project_report(self, session_id: str) -> str:
+        """Assembles the current state of the project - across every phase
+        - into a single, professional document a consultant can hand to a
+        client for review or sign-off. Deliberately pulls from the same
+        structured-data query functions the API and frontend use
+        (src/services/project_intelligence.py), not a re-derivation of
+        that logic - this is a formatting layer over existing data, not a
+        second source of truth for it."""
+        from src.memory import session_service
+        from src.services import project_intelligence
+
+        session = session_service.get_session(session_id)
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+
+        requirements = project_intelligence.get_requirements(session_id)
+        process_steps = project_intelligence.get_process_steps(session_id)
+        solution_decisions = project_intelligence.get_solution_decisions(session_id)
+        test_cases = project_intelligence.get_test_cases(session_id)
+        training_steps = project_intelligence.get_training_steps(session_id)
+        open_issues = project_intelligence.get_issues(session_id, status="open")
+        health = project_intelligence.get_project_health(session_id)
+        gaps = project_intelligence.get_coverage_gaps(session_id)
+
+        doc = self._new_document("Project Status Report", session.project_name)
+
+        self._add_info_table(doc, [
+            ("Project Name", session.project_name),
+            ("ERP System", session.erp_system),
+            ("Module", session.module),
+            ("Current Phase", session.current_phase.replace('_', ' ').title()),
+            ("Report Date", datetime.now().strftime('%Y-%m-%d')),
+            ("Requirement Coverage", f"{health.get('requirements_coverage_pct', 0)}%"),
+        ])
+
+        doc.add_heading("Executive Summary", level=1)
+        status_line = (
+            f"{health.get('requirements_total', 0)} requirements captured, "
+            f"{health.get('requirements_coverage_pct', 0)}% with downstream coverage. "
+            f"{health.get('open_issues_total', 0)} open item(s) require attention."
+        )
+        doc.add_paragraph(status_line)
+
+        doc.add_heading("Requirements", level=1)
+        by_category: Dict[str, List[Dict]] = {}
+        for r in requirements:
+            by_category.setdefault(r['category'], []).append(r)
+        if not by_category:
+            doc.add_paragraph("No requirements captured yet.", style='Intense Quote')
+        for category, items in by_category.items():
+            doc.add_heading(category, level=2)
+            self._add_data_table(doc, ["Description", "Priority", "Status"], [
+                [r['description'], r.get('priority') or '-', r['status']] for r in items
+            ])
+
+        doc.add_heading("Process Steps", level=1)
+        by_process: Dict[str, List[Dict]] = {}
+        for s in process_steps:
+            by_process.setdefault(s['process_name'], []).append(s)
+        if not by_process:
+            doc.add_paragraph("No process steps captured yet.", style='Intense Quote')
+        for process_name, steps in by_process.items():
+            doc.add_heading(process_name, level=2)
+            ordered = sorted(steps, key=lambda s: s['step_number'])
+            self._add_data_table(doc, ["#", "Step", "Responsible Role"], [
+                [s['step_number'], s['name'], s.get('responsible_role') or '-'] for s in ordered
+            ])
+
+        doc.add_heading("Solution Decisions", level=1)
+        by_type: Dict[str, List[Dict]] = {}
+        for d in solution_decisions:
+            by_type.setdefault(d['decision_type'], []).append(d)
+        if not by_type:
+            doc.add_paragraph("No solution decisions recorded yet.", style='Intense Quote')
+        for decision_type, decisions in by_type.items():
+            doc.add_heading(decision_type.replace('_', ' ').title(), level=2)
+            self._add_data_table(doc, ["Component", "Description", "Rationale", "Status"], [
+                [d.get('component') or '-', d['description'], d.get('rationale') or '-', d['status']]
+                for d in decisions
+            ])
+
+        doc.add_heading("Testing & Training", level=1)
+        self._add_data_table(doc, ["Metric", "Count"], [
+            ["QA test cases", sum(1 for t in test_cases if t['test_type'] == 'QA')],
+            ["UAT test cases", sum(1 for t in test_cases if t['test_type'] != 'QA')],
+            ["Training steps", len(training_steps)],
+        ])
+
+        doc.add_heading("Coverage Gaps", level=1)
+        doc.add_heading("Requirements with no downstream coverage", level=2)
+        self._add_bullet_list(doc, [r['description'] for r in gaps.get('uncovered_requirements', [])])
+        doc.add_heading("Requirements with no test coverage", level=2)
+        self._add_bullet_list(doc, [r['description'] for r in gaps.get('untested_requirements', [])])
+
+        doc.add_heading("Open Items for Review", level=1)
+        if open_issues:
+            self._add_data_table(doc, ["Type", "Severity", "Description"], [
+                [i['issue_type'].replace('_', ' '), i['severity'], i['description']] for i in open_issues
+            ])
+        else:
+            doc.add_paragraph("No open items.")
+
+        doc.add_heading("Sign-off", level=1)
+        self._add_data_table(doc, ["Role", "Name", "Signature", "Date"], [
+            ["Business Owner", "", "", ""],
+            ["Project Manager", "", "", ""],
+            ["Consulting Lead", "", "", ""],
+        ])
+
+        filepath = self._save(doc, "project_report", session.project_name, session_id=session_id,
+                               phase="project_report", label="Project Status Report")
+        self.logger.log_tool_usage("generate_project_report", {'project': session.project_name},
+                                    f"Report saved to {filepath}")
+        return filepath
+
+
 # Global document generator instance
 doc_generator = DocumentGenerator()

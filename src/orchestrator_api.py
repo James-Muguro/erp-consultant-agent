@@ -46,6 +46,7 @@ from src.utils.model_selection import TaskCategory
 from src.db.models import ProjectDocument
 from src.storage import object_storage
 from src.tools.document_extractor import extract_text as extract_document_text, UnsupportedFileType, SUPPORTED_EXTENSIONS
+from src.tools.document_generator import doc_generator
 from src.storage.object_storage import ObjectStorageNotConfigured, ObjectStorageError
 
 from contextlib import asynccontextmanager
@@ -710,6 +711,23 @@ def list_documents(session_id: str, current_user: User = Depends(get_current_use
             for d in docs
         ]
     }
+
+
+@app.post("/api/projects/{session_id}/report")
+def generate_project_report(session_id: str, current_user: User = Depends(get_current_user)):
+    """Generates a consolidated, client-ready Project Status Report from
+    the project's current structured data (requirements, process steps,
+    solution decisions, testing/training coverage, open issues) and saves
+    it as a downloadable document - the same durable storage and
+    list/download endpoints every other generated document already uses,
+    so it shows up in GET /documents immediately, no separate download
+    path needed."""
+    _get_owned_session(session_id, current_user)
+    try:
+        filepath = doc_generator.generate_project_report(session_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"session_id": session_id, "filename": os.path.basename(filepath)}
 
 @app.get("/api/projects/{session_id}/messages")
 def get_messages(session_id: str, current_user: User = Depends(get_current_user)):
