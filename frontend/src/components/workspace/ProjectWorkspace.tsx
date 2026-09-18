@@ -6,8 +6,9 @@ import { SolutionDecisionsList } from "./SolutionDecisionsList";
 import { TestingTrainingList } from "./TestingTrainingList";
 import { IssuesList } from "./IssuesList";
 import { UploadsPanel } from "./UploadsPanel";
+import { DeliverablesPanel } from "./DeliverablesPanel";
 
-type Tab = "overview" | "requirements" | "process" | "solution" | "testing" | "issues" | "documents";
+type Tab = "overview" | "requirements" | "process" | "solution" | "testing" | "issues" | "deliverables" | "documents";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -16,7 +17,8 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "solution", label: "Solution decisions" },
   { id: "testing", label: "Testing & training" },
   { id: "issues", label: "Issues" },
-  { id: "documents", label: "Documents" },
+  { id: "deliverables", label: "Deliverables" },
+  { id: "documents", label: "Uploads" },
 ];
 
 export function ProjectWorkspace({ sessionId }: { sessionId: string }) {
@@ -52,6 +54,7 @@ export function ProjectWorkspace({ sessionId }: { sessionId: string }) {
           {tab === "solution" && <SolutionDecisionsList sessionId={sessionId} />}
           {tab === "testing" && <TestingTrainingList sessionId={sessionId} />}
           {tab === "issues" && <IssuesList sessionId={sessionId} />}
+          {tab === "deliverables" && <DeliverablesPanel sessionId={sessionId} />}
           {tab === "documents" && <UploadsPanel sessionId={sessionId} />}
         </div>
       </div>

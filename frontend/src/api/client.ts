@@ -193,6 +193,13 @@ export const api = {
     URL.revokeObjectURL(url);
   },
 
+  async generateProjectReport(sessionId: string) {
+    return request<{ session_id: string; filename: string }>(
+      `/api/projects/${sessionId}/report`,
+      { method: "POST" },
+    );
+  },
+
   async submitFeedback(sessionId: string | null, rating: number | null, comment: string) {
     return request<{ success: boolean }>("/api/feedback", {
       method: "POST",
