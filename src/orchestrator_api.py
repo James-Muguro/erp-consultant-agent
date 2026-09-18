@@ -956,9 +956,19 @@ def list_solution_decisions(session_id: str, decision_type: Optional[str] = None
 
 @app.get("/api/projects/{session_id}/test-cases")
 def list_test_cases(session_id: str, test_type: Optional[str] = None, include_history: bool = False,
+                     needs_retest: Optional[bool] = None,
                      current_user: User = Depends(get_current_user)):
     _get_owned_session(session_id, current_user)
-    return {"session_id": session_id, "test_cases": project_intelligence.get_test_cases(session_id, test_type)}
+    return {"session_id": session_id, "test_cases": project_intelligence.get_test_cases(session_id, test_type, needs_retest)}
+
+
+@app.post("/api/projects/{session_id}/test-cases/{test_case_id}/mark-retested")
+def mark_test_case_retested(session_id: str, test_case_id: str, current_user: User = Depends(get_current_user)):
+    _get_owned_session(session_id, current_user)
+    ok = project_intelligence.mark_test_case_retested(session_id, test_case_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Test case not found for this session")
+    return {"success": True}
 
 
 @app.get("/api/projects/{session_id}/training-steps")

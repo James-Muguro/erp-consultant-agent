@@ -539,17 +539,34 @@ def sync_training_steps_from_structured(session_id: str, structured_materials: D
     return created_ids
 
 
-def get_test_cases(session_id: str, test_type: Optional[str] = None) -> List[Dict[str, Any]]:
+def get_test_cases(session_id: str, test_type: Optional[str] = None,
+                    needs_retest: Optional[bool] = None) -> List[Dict[str, Any]]:
     db = SessionLocal()
     try:
         q = db.query(TestCaseRecord).filter(TestCaseRecord.session_id == session_id)
         if test_type:
             q = q.filter(TestCaseRecord.test_type == test_type)
+        if needs_retest is not None:
+            q = q.filter(TestCaseRecord.needs_retest.is_(needs_retest))
         rows = q.order_by(TestCaseRecord.created_at).all()
         return [{
             "id": r.id, "test_type": r.test_type, "external_code": r.external_code,
             "scenario": r.scenario, "priority": r.priority, "expected_result": r.expected_result,
+            "needs_retest": r.needs_retest,
         } for r in rows]
+    finally:
+        db.close()
+
+
+def mark_test_case_retested(session_id: str, test_case_id: str) -> bool:
+    db = SessionLocal()
+    try:
+        tc = db.get(TestCaseRecord, test_case_id)
+        if not tc or tc.session_id != session_id:
+            return False
+        tc.needs_retest = False
+        db.commit()
+        return True
     finally:
         db.close()
 
@@ -615,6 +632,45 @@ def get_coverage_gaps(session_id: str) -> Dict[str, List[Dict[str, Any]]]:
         db.close()
 
 
+def _propagate_requirement_change(db, session_id: str, old_requirement_id: str, new_requirement_id: str,
+                                   change_summary: str) -> int:
+    """When a requirement changes, its existing coverage (trace links)
+    still describes real work done against the OLD version - that work
+    isn't invalidated, but it does need re-confirming against the new
+    version. This carries every incoming 'covers' link forward to the
+    new requirement row (so coverage/gap analysis, which only looks at
+    is_current rows, doesn't wrongly report the revised requirement as
+    newly uncovered), flags every test case among them as needing
+    retest, and files a visible issue. Returns the number of test cases
+    flagged."""
+    incoming_links = db.query(TraceLink).filter(
+        TraceLink.session_id == session_id,
+        TraceLink.target_type == "requirement",
+        TraceLink.target_id == old_requirement_id,
+        TraceLink.relationship == "covers",
+    ).all()
+
+    flagged_count = 0
+    for link in incoming_links:
+        db.add(TraceLink(
+            id=uuid.uuid4().hex, session_id=session_id,
+            source_type=link.source_type, source_id=link.source_id,
+            target_type="requirement", target_id=new_requirement_id, relationship="covers",
+        ))
+        if link.source_type == "test_case":
+            tc = db.get(TestCaseRecord, link.source_id)
+            if tc and not tc.needs_retest:
+                tc.needs_retest = True
+                flagged_count += 1
+
+    if flagged_count:
+        db.add(ProjectIssue(
+            id=uuid.uuid4().hex, session_id=session_id, issue_type="requirement_changed",
+            severity="medium", description=f"{change_summary} - {flagged_count} test case(s) flagged for retest.",
+            related_object_type="requirement", related_object_id=new_requirement_id,
+        ))
+    return flagged_count
+
 def revise_requirement(session_id: str, requirement_id: str, updates: Dict[str, Any]) -> str:
     """Creates a new version of a requirement instead of mutating it -
     the append-only history the platform's change-tracking model
@@ -638,6 +694,10 @@ def revise_requirement(session_id: str, requirement_id: str, updates: Dict[str, 
             external_code=current.external_code,
         ))
         current.is_current = False
+        _propagate_requirement_change(
+            db, session_id, current.id, new_id,
+            f"Requirement '{current.external_code or current.id}' was revised"
+        )
         db.commit()
         return new_id
     finally:
@@ -683,6 +743,17 @@ def record_actual_solution(session_id: str, decision_id: str, description: str,
             requirement_id=current.requirement_id,
         ))
         current.is_current = False
+
+        if current.requirement_id:
+            # This decision's requirement didn't itself change, but the
+            # implementation behind it did - the same 'existing coverage
+            # needs re-confirming' logic applies, scoped to the one
+            # requirement this decision is linked to.
+            _propagate_requirement_change(
+                db, session_id, current.requirement_id, current.requirement_id,
+                f"Solution decision '{current.component or current.id}' was updated to reflect the actual implementation"
+            )
+
         db.commit()
         return new_id
     finally:

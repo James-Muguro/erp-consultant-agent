@@ -294,6 +294,7 @@ class TestCaseRecord(Base):
     scenario = Column(String, nullable=False)
     priority = Column(String, nullable=False, default="Medium")
     expected_result = Column(Text, nullable=True)
+    needs_retest = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 class TrainingStepRecord(Base):
