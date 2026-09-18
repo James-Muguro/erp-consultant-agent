@@ -137,7 +137,7 @@ async function renameProject(sessionId: string, newName: string) {
             <Menu size={20} />
           </button>
           <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink">
-            {activeProject ? activeProject.project_name : "ERP Consultant AI"}
+            {activeProject ? activeProject.project_name : "Tarzyna"}
           </span>
         </header>
 

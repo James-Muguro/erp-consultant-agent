@@ -165,7 +165,7 @@ export function Sidebar({
       >
       <div className="border-b border-border p-4">
         <div className="flex items-center justify-between">
-          <h1 className="font-display text-lg text-ink">ERP Consultant AI</h1>
+          <h1 className="font-display text-lg text-ink">Tarzyna</h1>
           <button
             onClick={onClose}
             aria-label="Close menu"

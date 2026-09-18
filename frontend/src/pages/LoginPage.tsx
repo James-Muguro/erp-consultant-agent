@@ -31,9 +31,9 @@ export function LoginPage() {
     <div className="flex min-h-screen items-center justify-center bg-paper px-4">
       <div className="w-full max-w-sm">
         <div className="mb-8 text-center">
-          <h1 className="font-display text-3xl text-ink">ERP Consultant AI</h1>
+          <h1 className="font-display text-3xl text-ink">Tarzyna</h1>
           <p className="mt-2 text-sm text-ink-muted">
-            Requirements, process maps, and test plans for your implementation.
+            Next generation enterprise intelligence, assisting teams to design, develop, deploy, and master ERP solutions.
           </p>
         </div>
 
