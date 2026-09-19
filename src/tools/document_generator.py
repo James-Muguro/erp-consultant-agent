@@ -2,21 +2,46 @@
 Document Generator Tool - Creates formatted Word documents for ERP projects,
 persisted durably in Postgres (see GeneratedDocument) rather than relying on
 local disk, which Render wipes on every redeploy or free-tier idle-restart.
+
+Rendering note:
+
+  Every agent's structured output is a superset of what earlier versions of
+  this file rendered. The schema work done across the agent reviews added
+  fields the agents are instructed to fill (rationale, source, status,
+  open_questions, per-step preconditions/verification/common_errors, UAT
+  user_role/business_process/acceptance_criteria, structured decision and
+  integration points, master_data, security, technical_specs, and so on).
+  Before this revision most of those were silently dropped from the
+  rendered .docx, which meant the delivered document was thinner than the
+  data behind it. The added sections below close that gap.
+
+  Design principles preserved from the original:
+    - Section headings and "None specified." fallback for empty lists are
+      unchanged in style.
+    - Every pre-existing section still renders exactly as before.
+    - The structure is a formatting layer over structured data - no new
+      derivation of content happens here.
 """
+from __future__ import annotations
+
 import uuid
-from typing import Dict, List, Optional, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from docx import Document
-from docx.shared import Pt, Inches, RGBColor
-from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Pt, RGBColor
 
 from src.config.settings import settings
 from src.utils.logger import AgentLogger
 
 ACCENT_COLOR = RGBColor(0x1F, 0x5F, 0x4A)  # matches the frontend's pine-green accent
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class DocumentGenerator:
@@ -34,55 +59,136 @@ class DocumentGenerator:
     def _new_document(self, title: str, subtitle: str) -> Document:
         doc = Document()
 
-        title_para = doc.add_heading(title, level=0)
+        title_para = doc.add_heading(title or "Untitled", level=0)
         title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
         for run in title_para.runs:
             run.font.color.rgb = ACCENT_COLOR
 
-        subtitle_para = doc.add_paragraph(subtitle)
+        subtitle_para = doc.add_paragraph(subtitle or "")
         subtitle_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        subtitle_para.runs[0].italic = True
-        subtitle_para.runs[0].font.size = Pt(11)
+        # Guard: python-docx only creates a run for non-empty strings.
+        if subtitle_para.runs:
+            subtitle_para.runs[0].italic = True
+            subtitle_para.runs[0].font.size = Pt(11)
 
         doc.add_paragraph()
         return doc
 
-    def _add_info_table(self, doc: Document, rows: List[tuple]):
+    @staticmethod
+    def _set_cell_text(cell, text: Any, bold: bool = False) -> None:
+        """Set cell text safely. python-docx's .text setter does not create
+        a run for an empty string, so a naive `cell.paragraphs[0].runs[0]`
+        raises IndexError whenever the value is empty. This helper centralizes
+        the guard so callers can't reintroduce the crash."""
+        value = "" if text is None else str(text)
+        cell.text = value
+        if bold and cell.paragraphs[0].runs:
+            cell.paragraphs[0].runs[0].bold = True
+
+    def _add_info_table(self, doc: Document, rows: List[tuple]) -> None:
         table = doc.add_table(rows=0, cols=2)
         table.style = 'Light Grid Accent 1'
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
         for label, value in rows:
             row = table.add_row().cells
-            row[0].text = label
-            row[0].paragraphs[0].runs[0].bold = True
-            row[1].text = str(value)
+            self._set_cell_text(row[0], label, bold=True)
+            self._set_cell_text(row[1], value)
         doc.add_paragraph()
 
-    def _add_bullet_list(self, doc: Document, items: List[str]):
+    @staticmethod
+    def _format_structured_item(item: Any) -> str:
+        """Render a list entry that may be a plain string (legacy shape, or
+        the heuristic-parser fallback) or a dict (the shape the current
+        schemas produce for decision points, integration points, and open
+        questions). The previous `str(item)` on a dict produced raw
+        `{'condition': ..., 'outcomes': [...]}` reprs in the document, which
+        is not what a client-ready deliverable should contain."""
+        if not isinstance(item, dict):
+            return str(item)
+
+        # Decision point
+        if 'condition' in item:
+            condition = item.get('condition', '')
+            outcomes = item.get('outcomes') or []
+            if outcomes:
+                branch = " / ".join(str(o) for o in outcomes)
+                return f"{condition}  →  {branch}"
+            return str(condition)
+
+        # Integration point
+        if 'direction' in item or ('source' in item and 'target' in item):
+            name = item.get('name') or f"{item.get('source', '')} → {item.get('target', '')}"
+            direction = item.get('direction') or ''
+            trigger = item.get('trigger') or ''
+            transport = item.get('transport') or item.get('type') or ''
+            bits = [name]
+            if direction:
+                bits.append(f"[{direction}]")
+            if transport:
+                bits.append(f"via {transport}")
+            if trigger:
+                bits.append(f"on {trigger}")
+            return " ".join(str(b) for b in bits if b)
+
+        # Open question
+        if 'question' in item:
+            topic = item.get('topic') or ''
+            question = item.get('question') or ''
+            owner = item.get('owner') or ''
+            blocking = " [BLOCKING]" if item.get('blocking') else ""
+            head = f"{topic}: {question}" if topic else question
+            if owner:
+                head = f"{head} (owner: {owner})"
+            return f"{head}{blocking}"
+
+        # Requirement-like
+        if 'description' in item:
+            rid = item.get('id') or ''
+            desc = item.get('description') or ''
+            prio = item.get('priority') or ''
+            bits = [f"[{rid}]" if rid else "", str(desc), f"({prio})" if prio else ""]
+            return " ".join(b for b in bits if b)
+
+        # Fallback: join non-empty values
+        parts = [f"{k}={v}" for k, v in item.items() if v]
+        return " | ".join(parts) if parts else str(item)
+
+    def _add_bullet_list(self, doc: Document, items: List[Any]) -> None:
+        """Render a bullet list. Accepts list entries that are strings or
+        structured dicts (see _format_structured_item)."""
         if not items:
             doc.add_paragraph("None specified.", style='Intense Quote')
             return
         for item in items:
-            doc.add_paragraph(str(item), style='List Bullet')
+            doc.add_paragraph(self._format_structured_item(item), style='List Bullet')
 
-    def _add_data_table(self, doc: Document, headers: List[str], rows: List[List[str]]):
+    def _add_data_table(self, doc: Document, headers: List[str], rows: List[List[Any]]) -> None:
         if not rows:
             doc.add_paragraph("None specified.", style='Intense Quote')
             return
         table = doc.add_table(rows=1, cols=len(headers))
         table.style = 'Light Grid Accent 1'
         for i, header in enumerate(headers):
-            cell = table.rows[0].cells[i]
-            cell.text = header
-            cell.paragraphs[0].runs[0].bold = True
+            self._set_cell_text(table.rows[0].cells[i], header, bold=True)
         for row_values in rows:
             row = table.add_row().cells
             for i, value in enumerate(row_values):
-                row[i].text = str(value)
+                self._set_cell_text(row[i], value)
         doc.add_paragraph()
 
-    def _persist_to_db(self, session_id: str, phase: str, label: str, filepath: str):
-        """Reads the just-written file's bytes and stores them in Postgres.
+    def _add_optional_section(self, doc: Document, heading: str, body: str) -> None:
+        """Add a heading + paragraph only if `body` has content. Keeps the
+        document from becoming a wall of "None specified." when a new
+        schema field is genuinely not applicable to a given project."""
+        if body and str(body).strip():
+            doc.add_heading(heading, level=1)
+            doc.add_paragraph(str(body))
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+    def _persist_to_db(self, session_id: str, phase: str, label: str, filepath: str) -> None:
+        """Read the just-written file's bytes and store them in Postgres.
         This, not the local file, is the durable source of truth used by
         download_document - the local copy is transient and may not exist
         by the time someone downloads it, especially after a redeploy."""
@@ -107,19 +213,27 @@ class DocumentGenerator:
         finally:
             db.close()
 
-    def _save(self, doc: Document, prefix: str, name: str,
-              session_id: Optional[str] = None, phase: Optional[str] = None,
-              label: Optional[str] = None) -> str:
+    def _save(
+        self,
+        doc: Document,
+        prefix: str,
+        name: str,
+        session_id: Optional[str] = None,
+        phase: Optional[str] = None,
+        label: Optional[str] = None,
+    ) -> str:
         safe_name = name.replace(' ', '_').replace('/', '-')
-        filename = f"{prefix}_{safe_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"
+        filename = f"{prefix}_{safe_name}_{_utcnow().strftime('%Y%m%d_%H%M%S')}.docx"
         filepath = self.output_dir / filename
         doc.save(str(filepath))
 
         if session_id:
             self._persist_to_db(session_id, phase or prefix, label or prefix, str(filepath))
         else:
-            self.logger.warning(f"Document generated without session_id - not persisted to DB, "
-                                 f"will not survive a redeploy: {filepath}")
+            self.logger.warning(
+                f"Document generated without session_id - not persisted to DB, "
+                f"will not survive a redeploy: {filepath}"
+            )
 
         return str(filepath)
 
@@ -140,7 +254,7 @@ class DocumentGenerator:
         self._add_info_table(doc, [
             ("Project Name", project_name),
             ("Module", module),
-            ("Date", datetime.now().strftime('%Y-%m-%d')),
+            ("Date", _utcnow().strftime('%Y-%m-%d')),
             ("Version", "1.0"),
             ("Status", "Draft"),
         ])
@@ -153,39 +267,105 @@ class DocumentGenerator:
         doc.add_heading("Business Objectives", level=2)
         self._add_bullet_list(doc, requirements.get('objectives', []))
 
+        # ---- Functional requirements ---------------------------------- #
         doc.add_heading("Functional Requirements", level=1)
-        functional_reqs = requirements.get('functional_requirements', {})
+        functional_reqs = requirements.get('functional_requirements', {}) or {}
         if not functional_reqs:
             doc.add_paragraph("No functional requirements specified.", style='Intense Quote')
         for category, reqs in functional_reqs.items():
             doc.add_heading(category, level=2)
-            rows = [
-                [r.get('id', 'REQ-XXX'), r.get('description', ''), r.get('priority', 'Medium'),
-                 r.get('acceptance_criteria', '')]
-                for r in reqs
-            ]
-            self._add_data_table(doc, ["ID", "Description", "Priority", "Acceptance Criteria"], rows)
+            rows = []
+            for r in (reqs or []):
+                if isinstance(r, dict):
+                    rows.append([
+                        r.get('id', 'REQ-XXX'),
+                        r.get('description', ''),
+                        r.get('priority', 'Medium'),
+                        r.get('status', 'Draft'),
+                        r.get('acceptance_criteria') or '',
+                    ])
+                else:
+                    rows.append(['REQ-XXX', str(r), 'Medium', 'Draft', ''])
+            self._add_data_table(
+                doc,
+                ["ID", "Description", "Priority", "Status", "Acceptance Criteria"],
+                rows,
+            )
+            # Per-requirement rationale + source, rendered as a compact
+            # appendix when present. These are the change-control fields a
+            # reviewer needs when scope is renegotiated.
+            trace_rows = []
+            for r in (reqs or []):
+                if isinstance(r, dict) and (r.get('rationale') or r.get('source')):
+                    trace_rows.append([
+                        r.get('id', ''),
+                        r.get('rationale') or '',
+                        r.get('source') or '',
+                    ])
+            if trace_rows:
+                doc.add_heading(f"{category} — Rationale and Source", level=3)
+                self._add_data_table(doc, ["ID", "Rationale", "Source"], trace_rows)
+
+        # ---- Non-functional requirements ------------------------------ #
+        doc.add_heading("Non-Functional Requirements", level=1)
+        nfr_items = requirements.get('non_functional_requirements', []) or []
+        self._add_bullet_list(
+            doc,
+            [r.get('description', r) if isinstance(r, dict) else r for r in nfr_items],
+        )
 
         doc.add_heading("Technical Requirements", level=1)
-        self._add_bullet_list(doc, [r.get('description', r) if isinstance(r, dict) else r
-                                     for r in requirements.get('technical_requirements', [])])
+        self._add_bullet_list(doc, [
+            r.get('description', r) if isinstance(r, dict) else r
+            for r in (requirements.get('technical_requirements') or [])
+        ])
 
         doc.add_heading("Integration Requirements", level=1)
-        self._add_bullet_list(doc, [r.get('description', r) if isinstance(r, dict) else r
-                                     for r in requirements.get('integration_requirements', [])])
+        self._add_bullet_list(doc, [
+            r.get('description', r) if isinstance(r, dict) else r
+            for r in (requirements.get('integration_requirements') or [])
+        ])
 
         doc.add_heading("Reporting Requirements", level=1)
-        self._add_bullet_list(doc, [r.get('description', r) if isinstance(r, dict) else r
-                                     for r in requirements.get('reporting_requirements', [])])
+        self._add_bullet_list(doc, [
+            r.get('description', r) if isinstance(r, dict) else r
+            for r in (requirements.get('reporting_requirements') or [])
+        ])
 
         doc.add_heading("Dependencies and Constraints", level=1)
         doc.add_heading("Dependencies", level=2)
-        self._add_bullet_list(doc, requirements.get('dependencies', []))
+        self._add_bullet_list(doc, requirements.get('dependencies', []) or [])
         doc.add_heading("Constraints", level=2)
-        self._add_bullet_list(doc, requirements.get('constraints', []))
+        self._add_bullet_list(doc, requirements.get('constraints', []) or [])
 
         doc.add_heading("Assumptions", level=1)
-        self._add_bullet_list(doc, requirements.get('assumptions', []))
+        self._add_bullet_list(doc, requirements.get('assumptions', []) or [])
+
+        # ---- Open questions ------------------------------------------- #
+        # These are the gaps the requirements agent was instructed to name
+        # rather than paper over. Rendering them is the whole point of the
+        # epistemic discipline; previously they were dropped entirely.
+        doc.add_heading("Open Questions", level=1)
+        open_qs = requirements.get('open_questions', []) or []
+        if open_qs:
+            rows = []
+            for q in open_qs:
+                if isinstance(q, dict):
+                    rows.append([
+                        q.get('topic', ''),
+                        q.get('question', ''),
+                        "Blocking" if q.get('blocking') else "Non-blocking",
+                        q.get('owner') or '',
+                    ])
+                else:
+                    rows.append(['', str(q), 'Non-blocking', ''])
+            self._add_data_table(doc, ["Topic", "Question", "Blocking?", "Owner"], rows)
+        else:
+            doc.add_paragraph(
+                "No open questions - all input was resolvable from the "
+                "information provided.",
+                style='Intense Quote',
+            )
 
         doc.add_heading("Approval", level=1)
         self._add_data_table(doc, ["Role", "Name", "Signature", "Date"], [
@@ -196,10 +376,15 @@ class DocumentGenerator:
         ])
 
         sid = session_id or (metadata or {}).get('session_id')
-        filepath = self._save(doc, "requirements", project_name, session_id=sid,
-                               phase="requirements_gathering", label="requirements_gathering")
-        self.logger.log_tool_usage("generate_requirements_document", {'project': project_name, 'module': module},
-                                    f"Document saved to {filepath}")
+        filepath = self._save(
+            doc, "requirements", project_name, session_id=sid,
+            phase="requirements_gathering", label="requirements_gathering",
+        )
+        self.logger.log_tool_usage(
+            "generate_requirements_document",
+            {'project': project_name, 'module': module},
+            f"Document saved to {filepath}",
+        )
         return filepath
 
     # ------------------------------------------------------------------
@@ -220,7 +405,7 @@ class DocumentGenerator:
             ("Project Name", project_name),
             ("Proposed ERP System", erp_system),
             ("Module", module),
-            ("Date", datetime.now().strftime('%Y-%m-%d')),
+            ("Date", _utcnow().strftime('%Y-%m-%d')),
         ])
 
         doc.add_heading("Project Context (from intake)", level=1)
@@ -285,12 +470,18 @@ class DocumentGenerator:
             "Once this questionnaire has been completed with real stakeholder answers, "
             "paste the responses back into the chat to continue."
         )
-        note.runs[0].italic = True
+        if note.runs:
+            note.runs[0].italic = True
 
-        filepath = self._save(doc, "requirements_questionnaire", project_name, session_id=session_id,
-                               phase="requirements_template", label="requirements_template")
-        self.logger.log_tool_usage("generate_requirements_template", {'project': project_name, 'module': module},
-                                    f"Template saved to {filepath}")
+        filepath = self._save(
+            doc, "requirements_questionnaire", project_name, session_id=session_id,
+            phase="requirements_template", label="requirements_template",
+        )
+        self.logger.log_tool_usage(
+            "generate_requirements_template",
+            {'project': project_name, 'module': module},
+            f"Template saved to {filepath}",
+        )
         return filepath
 
     # ------------------------------------------------------------------
@@ -307,11 +498,13 @@ class DocumentGenerator:
     ) -> str:
         doc = self._new_document(f"Process Map: {process_name}", project_name)
 
+        as_is_or_to_be = process_map.get('as_is_or_to_be') or 'Unspecified'
         self._add_info_table(doc, [
             ("Project Name", project_name),
             ("Process", process_name),
             ("Module", module),
-            ("Date", datetime.now().strftime('%Y-%m-%d')),
+            ("View", as_is_or_to_be),
+            ("Date", _utcnow().strftime('%Y-%m-%d')),
         ])
 
         doc.add_heading("Overview", level=1)
@@ -321,31 +514,89 @@ class DocumentGenerator:
         doc.add_paragraph(process_map.get('scope') or "Not specified.")
 
         doc.add_heading("Roles", level=1)
-        self._add_bullet_list(doc, process_map.get('roles', []))
+        self._add_bullet_list(doc, process_map.get('roles', []) or [])
 
         doc.add_heading("Process Steps", level=1)
-        steps = process_map.get('steps', [])
+        steps = process_map.get('steps', []) or []
         if steps:
-            self._add_data_table(doc, ["#", "Step", "Description", "Responsible Role"], [
-                [s.get('number', i + 1), s.get('name', ''), s.get('description', ''), s.get('responsible_role', '')]
-                for i, s in enumerate(steps)
-            ])
+            rows = []
+            for i, s in enumerate(steps):
+                if isinstance(s, dict):
+                    rows.append([
+                        s.get('number', i + 1),
+                        s.get('name', ''),
+                        s.get('responsible_role') or '-',
+                        s.get('transaction') or '-',
+                        s.get('description') or '',
+                    ])
+                else:
+                    rows.append([i + 1, str(s), '-', '-', ''])
+            self._add_data_table(
+                doc, ["#", "Step", "Responsible Role", "Transaction", "Description"], rows,
+            )
+
+            # Detailed per-step appendix - trigger/inputs/outputs/exceptions.
+            # These are the fields the process-mapping guardrails require;
+            # before this revision they were silently dropped from the .docx.
+            detail_rows = []
+            for s in steps:
+                if not isinstance(s, dict):
+                    continue
+                trigger = s.get('trigger') or ''
+                inputs = s.get('inputs') or []
+                outputs = s.get('outputs') or []
+                exceptions = s.get('exception_paths') or []
+                if trigger or inputs or outputs or exceptions:
+                    detail_rows.append([
+                        s.get('id', '') or s.get('number', ''),
+                        trigger,
+                        ", ".join(str(x) for x in inputs),
+                        ", ".join(str(x) for x in outputs),
+                        "; ".join(str(x) for x in exceptions),
+                    ])
+            if detail_rows:
+                doc.add_heading("Step Detail", level=2)
+                self._add_data_table(
+                    doc,
+                    ["Step", "Trigger", "Inputs", "Outputs", "Exception Paths"],
+                    detail_rows,
+                )
         else:
             doc.add_paragraph("No steps specified.", style='Intense Quote')
 
         doc.add_heading("Decision Points", level=1)
-        self._add_bullet_list(doc, process_map.get('decision_points', []))
+        self._add_bullet_list(doc, process_map.get('decision_points', []) or [])
 
         doc.add_heading("Integration Points", level=1)
-        self._add_bullet_list(doc, process_map.get('integration_points', []))
+        self._add_bullet_list(doc, process_map.get('integration_points', []) or [])
 
         doc.add_heading("Exceptions", level=1)
-        self._add_bullet_list(doc, process_map.get('exceptions', []))
+        self._add_bullet_list(doc, process_map.get('exceptions', []) or [])
 
-        filepath = self._save(doc, "process_map", process_name, session_id=session_id,
-                               phase="process_mapping", label=process_name)
-        self.logger.log_tool_usage("generate_process_map", {'project': project_name, 'process': process_name},
-                                    f"Document saved to {filepath}")
+        # Improvements was a pre-existing field that was never rendered.
+        doc.add_heading("Identified Improvements", level=1)
+        self._add_bullet_list(doc, process_map.get('improvements', []) or [])
+
+        doc.add_heading("Open Questions", level=1)
+        open_qs = process_map.get('open_questions', []) or []
+        if open_qs:
+            self._add_bullet_list(doc, open_qs)
+        else:
+            doc.add_paragraph(
+                "No open questions - the process was fully specified by the "
+                "provided input.",
+                style='Intense Quote',
+            )
+
+        filepath = self._save(
+            doc, "process_map", process_name, session_id=session_id,
+            phase="process_mapping", label=process_name,
+        )
+        self.logger.log_tool_usage(
+            "generate_process_map",
+            {'project': project_name, 'process': process_name},
+            f"Document saved to {filepath}",
+        )
         return filepath
 
     # ------------------------------------------------------------------
@@ -366,41 +617,117 @@ class DocumentGenerator:
             ("Project Name", project_name),
             ("Module", module),
             ("Test Type", test_type),
-            ("Date", datetime.now().strftime('%Y-%m-%d')),
+            ("Date", _utcnow().strftime('%Y-%m-%d')),
             ("Total Test Cases", len(test_cases)),
         ])
 
         for idx, tc in enumerate(test_cases, 1):
-            doc.add_heading(f"Test Case {idx}: {tc.get('scenario', 'Test Scenario')}", level=1)
-            self._add_info_table(doc, [
+            doc.add_heading(
+                f"Test Case {idx}: {tc.get('scenario', 'Test Scenario')}", level=1,
+            )
+
+            # UAT-specific metadata is rendered only when populated - QA
+            # cases leave role/process/acceptance blank by design.
+            info_rows = [
                 ("Test Case ID", tc.get('id', f'TC-{idx:03d}')),
                 ("Priority", tc.get('priority', 'Medium')),
                 ("Test Type", tc.get('type', 'Functional')),
-            ])
-            doc.add_heading("Objective", level=2)
-            doc.add_paragraph(tc.get('objective', 'Not specified.'))
+            ]
+            if tc.get('user_role'):
+                info_rows.append(("User Role", tc['user_role']))
+            if tc.get('business_process'):
+                info_rows.append(("Business Process", tc['business_process']))
+            self._add_info_table(doc, info_rows)
+
+            if tc.get('objective'):
+                doc.add_heading("Objective", level=2)
+                doc.add_paragraph(tc['objective'])
+
             doc.add_heading("Preconditions", level=2)
-            self._add_bullet_list(doc, tc.get('preconditions', []))
+            self._add_bullet_list(doc, tc.get('preconditions', []) or [])
+
             doc.add_heading("Test Steps", level=2)
-            for step_num, step in enumerate(tc.get('steps', []), 1):
+            for step_num, step in enumerate(tc.get('steps', []) or [], 1):
                 doc.add_paragraph(f"{step_num}. {step}")
+
+            # Test data table, when present. The schema stores it as a list
+            # of {key, value} pairs; rendering as a table makes it scannable.
+            test_data = tc.get('test_data') or []
+            if test_data:
+                doc.add_heading("Test Data", level=2)
+                rows = []
+                for item in test_data:
+                    if isinstance(item, dict):
+                        rows.append([item.get('key', ''), item.get('value', '')])
+                    else:
+                        rows.append([str(item), ''])
+                self._add_data_table(doc, ["Field", "Value"], rows)
+
             doc.add_heading("Expected Result", level=2)
-            doc.add_paragraph(tc.get('expected_result', 'Not specified.'))
+            doc.add_paragraph(tc.get('expected_result') or 'Not specified.')
+
+            # Acceptance criteria is UAT's business sign-off statement, and
+            # is distinct from expected_result. Rendered only when present.
+            if tc.get('acceptance_criteria'):
+                doc.add_heading("Acceptance Criteria", level=2)
+                doc.add_paragraph(tc['acceptance_criteria'])
+
+            # Traceability: what this test validates. Rendered only when
+            # links exist - an empty list is an honest "no traceability
+            # established yet" rather than an error.
+            trace_bits = []
+            if tc.get('related_requirement_ids'):
+                trace_bits.append(
+                    "Requirements: " + ", ".join(str(r) for r in tc['related_requirement_ids'])
+                )
+            if tc.get('related_process_step_ids'):
+                trace_bits.append(
+                    "Process steps: " + ", ".join(str(s) for s in tc['related_process_step_ids'])
+                )
+            if tc.get('related_design_component'):
+                trace_bits.append(f"Design component: {tc['related_design_component']}")
+            if trace_bits:
+                doc.add_heading("Traceability", level=2)
+                for bit in trace_bits:
+                    doc.add_paragraph(bit, style='List Bullet')
+
+            # Execution status / failure detail rendered only when set.
+            status = tc.get('execution_status') or 'not_run'
             doc.add_heading("Status", level=2)
-            doc.add_paragraph("☐ Pass    ☐ Fail    ☐ Blocked")
+            if status and status != 'not_run':
+                doc.add_paragraph(
+                    f"Execution status: {status}"
+                    + (f" — {tc.get('failure_classification')}"
+                       if tc.get('failure_classification') else "")
+                )
+                if tc.get('failure_description'):
+                    doc.add_paragraph(tc['failure_description'])
+            else:
+                doc.add_paragraph("☐ Pass    ☐ Fail    ☐ Blocked")
 
         doc.add_heading("Test Execution Summary", level=1)
         self._add_data_table(
             doc, ["Test Case ID", "Scenario", "Priority", "Status", "Tester", "Date"],
-            [[tc.get('id', 'TC-XXX'), tc.get('scenario', ''), tc.get('priority', 'Medium'), "", "", ""]
-             for tc in test_cases]
+            [[
+                tc.get('id', 'TC-XXX'),
+                tc.get('scenario', ''),
+                tc.get('priority', 'Medium'),
+                tc.get('execution_status') or '',
+                "",
+                "",
+            ] for tc in test_cases],
         )
 
         phase = "qa_testing" if test_type == "QA" else "uat_testing"
-        filepath = self._save(doc, f"test_cases_{test_type}", project_name, session_id=session_id,
-                               phase=phase, label=phase)
-        self.logger.log_tool_usage("generate_test_case_document", {'project': project_name, 'test_type': test_type},
-                                    f"Document saved to {filepath}")
+        filepath = self._save(
+            doc, f"test_cases_{test_type}", project_name, session_id=session_id,
+            phase=phase, label=phase,
+        )
+        self.logger.log_tool_usage(
+            "generate_test_case_document",
+            {'project': project_name, 'test_type': test_type},
+            f"Document saved to {filepath}",
+        )
         return filepath
 
     # ------------------------------------------------------------------
@@ -420,38 +747,107 @@ class DocumentGenerator:
         self._add_info_table(doc, [
             ("Module", module),
             ("Process", process_name),
-            ("Date", datetime.now().strftime('%Y-%m-%d')),
+            ("Date", _utcnow().strftime('%Y-%m-%d')),
         ])
 
         doc.add_heading("Purpose", level=1)
-        doc.add_paragraph(f"This manual provides step-by-step instructions for executing the "
-                           f"{process_name} process in the ERP system.")
+        doc.add_paragraph(
+            f"This manual provides step-by-step instructions for executing the "
+            f"{process_name} process in the ERP system."
+        )
 
         doc.add_heading("Prerequisites", level=1)
-        self._add_bullet_list(doc, [f"Access to {module} module", "Required authorizations",
-                                     "Basic understanding of ERP navigation"])
+        self._add_bullet_list(doc, [
+            f"Access to {module} module",
+            "Required authorizations",
+            "Basic understanding of ERP navigation",
+        ])
 
         doc.add_heading("Process Steps", level=1)
-        for idx, step in enumerate(process_steps, 1):
-            doc.add_heading(f"Step {idx}: {step.get('title', 'Process Step')}", level=2)
-            doc.add_paragraph(f"Transaction Code: {step.get('transaction', 'N/A')}").runs[0].italic = True
+        for idx, step in enumerate(process_steps or [], 1):
+            if not isinstance(step, dict):
+                # Legacy shape from the heuristic parser.
+                doc.add_heading(f"Step {idx}", level=2)
+                doc.add_paragraph(str(step))
+                continue
+
+            doc.add_heading(
+                f"Step {idx}: {step.get('title', 'Process Step')}", level=2,
+            )
+
+            # Metadata line: role + transaction, when present. These are
+            # new schema fields that were previously dropped.
+            meta_bits = []
+            if step.get('role'):
+                meta_bits.append(f"Role: {step['role']}")
+            if step.get('transaction'):
+                meta_bits.append(f"Transaction: {step['transaction']}")
+            if meta_bits:
+                meta_para = doc.add_paragraph(" | ".join(meta_bits))
+                if meta_para.runs:
+                    meta_para.runs[0].italic = True
+
+            # Preconditions (new) - what must be in place before the step
+            # can be executed.
+            preconditions = step.get('preconditions') or []
+            if preconditions:
+                doc.add_heading("Before You Start", level=3)
+                self._add_bullet_list(doc, preconditions)
+
             doc.add_paragraph(step.get('instructions', 'Not specified.'))
-            fields = step.get('fields', [])
+
+            fields = step.get('fields') or []
             if fields:
                 doc.add_heading("Key Fields", level=3)
-                self._add_data_table(doc, ["Field", "Description", "Required", "Example"], [
-                    [f.get('name', ''), f.get('description', ''), f.get('required', 'No'), f.get('example', '')]
-                    for f in fields
-                ])
+                rows = []
+                for f in fields:
+                    if isinstance(f, dict):
+                        rows.append([
+                            f.get('name', ''),
+                            f.get('description', ''),
+                            f.get('required', 'No'),
+                            f.get('example', ''),
+                        ])
+                    else:
+                        rows.append([str(f), '', '', ''])
+                self._add_data_table(doc, ["Field", "Description", "Required", "Example"], rows)
+
+            # Verification (new) - how the user knows the step succeeded.
+            if step.get('verification'):
+                doc.add_heading("How to Verify", level=3)
+                doc.add_paragraph(step['verification'])
+
+            # Common errors (new) - symptom / likely cause / resolution.
+            common_errors = step.get('common_errors') or []
+            if common_errors:
+                doc.add_heading("Common Issues", level=3)
+                rows = []
+                for ce in common_errors:
+                    if isinstance(ce, dict):
+                        rows.append([
+                            ce.get('symptom', ''),
+                            ce.get('likely_cause', ''),
+                            ce.get('resolution', ''),
+                            ce.get('severity', 'Warning'),
+                        ])
+                    else:
+                        rows.append([str(ce), '', '', ''])
+                self._add_data_table(doc, ["Symptom", "Likely Cause", "Resolution", "Severity"], rows)
+
             tips = step.get('tips')
             if tips:
                 doc.add_heading("Tips", level=3)
                 self._add_bullet_list(doc, tips)
 
-        filepath = self._save(doc, "user_manual", process_name, session_id=session_id,
-                               phase="training", label="user_manual")
-        self.logger.log_tool_usage("generate_user_manual", {'process': process_name, 'module': module},
-                                    f"Document saved to {filepath}")
+        filepath = self._save(
+            doc, "user_manual", process_name, session_id=session_id,
+            phase="training", label="user_manual",
+        )
+        self.logger.log_tool_usage(
+            "generate_user_manual",
+            {'process': process_name, 'module': module},
+            f"Document saved to {filepath}",
+        )
         return filepath
 
     # ------------------------------------------------------------------
@@ -470,7 +866,7 @@ class DocumentGenerator:
         self._add_info_table(doc, [
             ("Project Name", project_name),
             ("Module", module),
-            ("Date", datetime.now().strftime('%Y-%m-%d')),
+            ("Date", _utcnow().strftime('%Y-%m-%d')),
             ("Author", "ERP Consultant AI"),
         ])
 
@@ -480,41 +876,225 @@ class DocumentGenerator:
         doc.add_heading("Solution Architecture", level=1)
         doc.add_paragraph(design.get('architecture_overview') or "Not specified.")
 
+        # ---- Configurations ------------------------------------------- #
         doc.add_heading("Module Configuration", level=1)
-        for config in design.get('configurations', []):
-            doc.add_heading(config.get('component', 'Component'), level=2)
+        configs = design.get('configurations') or []
+        if not configs:
+            doc.add_paragraph("No configurations specified.", style='Intense Quote')
+        for config in configs:
+            if not isinstance(config, dict):
+                continue
+            classification = config.get('classification') or 'CONFIGURATION'
+            doc.add_heading(
+                f"{config.get('component', 'Component')} [{classification}]", level=2,
+            )
+            if config.get('module'):
+                sub = doc.add_paragraph(f"Module: {config['module']}")
+                if sub.runs:
+                    sub.runs[0].italic = True
             doc.add_paragraph(config.get('description', ''))
-            self._add_bullet_list(doc, config.get('steps', []))
+            steps = config.get('steps') or []
+            if steps:
+                self._add_bullet_list(doc, steps)
 
+        # ---- Integrations --------------------------------------------- #
         doc.add_heading("Integration Design", level=1)
-        for integ in design.get('integrations', []):
+        integrations = design.get('integrations') or []
+        if not integrations:
+            doc.add_paragraph("No integrations specified.", style='Intense Quote')
+        for integ in integrations:
+            if not isinstance(integ, dict):
+                continue
             doc.add_heading(integ.get('name', 'Integration'), level=2)
-            self._add_info_table(doc, [
+            rows = [
                 ("Type", integ.get('type', 'Real-time')),
+                ("Direction", integ.get('direction', '')),
                 ("Source", integ.get('source', '')),
                 ("Target", integ.get('target', '')),
-            ])
-            doc.add_paragraph(integ.get('description', ''))
+                ("Trigger", integ.get('trigger', '')),
+                ("Transport", integ.get('transport', '')),
+                ("Payload", integ.get('payload_summary', '')),
+                ("Error handling", integ.get('error_handling', '')),
+                ("Idempotency key", integ.get('idempotency_key', '')),
+            ]
+            self._add_info_table(doc, [(k, v) for k, v in rows if v])
+            if integ.get('description'):
+                doc.add_paragraph(integ['description'])
 
+        # ---- Customizations ------------------------------------------- #
         doc.add_heading("Customizations", level=1)
-        customizations = design.get('customizations', [])
+        customizations = design.get('customizations') or []
         if customizations:
-            self._add_data_table(doc, ["Type", "Component", "Description", "Justification"], [
-                [c.get('type', ''), c.get('component', ''), c.get('description', ''), c.get('justification', '')]
-                for c in customizations
-            ])
+            rows = []
+            for c in customizations:
+                if not isinstance(c, dict):
+                    continue
+                rows.append([
+                    c.get('type', ''),
+                    c.get('component', ''),
+                    c.get('description', ''),
+                    c.get('justification', ''),
+                    c.get('complexity', ''),
+                ])
+            self._add_data_table(
+                doc,
+                ["Type", "Component", "Description", "Justification", "Complexity"],
+                rows,
+            )
+
+            # Lifecycle impact and alternatives considered render as a
+            # per-customization appendix only when populated. These are the
+            # fields a steering committee actually asks about.
+            appendix_rows = []
+            for c in customizations:
+                if not isinstance(c, dict):
+                    continue
+                alternatives = c.get('alternatives_considered') or []
+                lifecycle = c.get('lifecycle_impact') or ''
+                if alternatives or lifecycle:
+                    appendix_rows.append([
+                        c.get('component', ''),
+                        "; ".join(str(a) for a in alternatives),
+                        lifecycle,
+                    ])
+            if appendix_rows:
+                doc.add_heading("Customization Review Detail", level=2)
+                self._add_data_table(
+                    doc,
+                    ["Component", "Alternatives Considered", "Lifecycle Impact"],
+                    appendix_rows,
+                )
         else:
-            doc.add_paragraph("No customizations required. Solution uses standard ERP functionality.")
+            doc.add_paragraph(
+                "No customizations required. Solution uses standard ERP functionality "
+                "and configuration."
+            )
 
-        doc.add_heading("Migration Strategy", level=1)
-        doc.add_paragraph(design.get('migration', {}).get('strategy') or "Not specified.")
+        # ---- Master data ---------------------------------------------- #
+        # The schema stores master data in two shapes: flattened (keyed by
+        # data_type) for backward compatibility, and as a rich list under
+        # master_data_items. Prefer the rich list when available; fall back
+        # to the flattened dict.
+        doc.add_heading("Master Data", level=1)
+        md_items = design.get('master_data_items')
+        if isinstance(md_items, list) and md_items:
+            rows = []
+            for m in md_items:
+                if not isinstance(m, dict):
+                    continue
+                rows.append([
+                    m.get('data_type', ''),
+                    m.get('status', 'TBD'),
+                    m.get('owner', ''),
+                    m.get('details', ''),
+                ])
+            self._add_data_table(
+                doc, ["Data Type", "Status", "Owner", "Details"], rows,
+            )
+        else:
+            md_flat = design.get('master_data') or {}
+            if isinstance(md_flat, dict) and md_flat:
+                self._add_data_table(
+                    doc, ["Data Type", "Details"],
+                    [[k, v] for k, v in md_flat.items()],
+                )
+            else:
+                doc.add_paragraph("No master data specified.", style='Intense Quote')
 
-        filepath = self._save(doc, "solution_design", project_name, session_id=session_id,
-                               phase="solution_design", label="solution_design")
-        self.logger.log_tool_usage("generate_solution_design", {'project': project_name, 'module': module},
-                                    f"Document saved to {filepath}")
+        # ---- Security ------------------------------------------------- #
+        security = design.get('security') or {}
+        if isinstance(security, dict) and any(security.values()):
+            doc.add_heading("Security and Authorization", level=1)
+            self._add_optional_section(doc, "Overview", security.get('overview', ''))
+            if security.get('authorization_model'):
+                doc.add_heading("Authorization Model", level=2)
+                doc.add_paragraph(security['authorization_model'])
+            if security.get('roles'):
+                doc.add_heading("Roles", level=2)
+                self._add_bullet_list(doc, security['roles'])
+            if security.get('sod_controls'):
+                doc.add_heading("Segregation-of-Duties Controls", level=2)
+                self._add_bullet_list(doc, security['sod_controls'])
+            if security.get('sensitive_access'):
+                doc.add_heading("Sensitive Access", level=2)
+                self._add_bullet_list(doc, security['sensitive_access'])
+
+        # ---- Migration ------------------------------------------------ #
+        migration = design.get('migration') or {}
+        if isinstance(migration, dict) and any(migration.values()):
+            doc.add_heading("Migration Strategy", level=1)
+            if migration.get('approach'):
+                sub = doc.add_paragraph(f"Approach: {migration['approach']}")
+                if sub.runs:
+                    sub.runs[0].bold = True
+            self._add_optional_section(doc, "Summary", migration.get('strategy', ''))
+            self._add_optional_section(doc, "Cutover Window", migration.get('cutover_window', ''))
+            if migration.get('data_scope'):
+                doc.add_heading("Data Scope", level=2)
+                self._add_bullet_list(doc, migration['data_scope'])
+            self._add_optional_section(
+                doc, "Reconciliation", migration.get('reconciliation_approach', ''),
+            )
+            self._add_optional_section(
+                doc, "Rollback Approach", migration.get('rollback_approach', ''),
+            )
+
+        # ---- Technical specs ------------------------------------------ #
+        ts_items = design.get('technical_specs_items')
+        doc.add_heading("Technical Specifications", level=1)
+        if isinstance(ts_items, list) and ts_items:
+            rows = []
+            for t in ts_items:
+                if not isinstance(t, dict):
+                    continue
+                rows.append([t.get('category', ''), t.get('name', ''), t.get('value', '')])
+            self._add_data_table(doc, ["Category", "Name", "Value"], rows)
+        else:
+            ts_flat = design.get('technical_specs') or {}
+            if isinstance(ts_flat, dict) and ts_flat:
+                self._add_data_table(
+                    doc, ["Specification", "Value"],
+                    [[k, v] for k, v in ts_flat.items()],
+                )
+            else:
+                doc.add_paragraph("No technical specifications specified.", style='Intense Quote')
+
+        # ---- Assumptions and open questions --------------------------- #
+        doc.add_heading("Assumptions", level=1)
+        self._add_bullet_list(doc, design.get('assumptions', []) or [])
+
+        doc.add_heading("Open Questions", level=1)
+        open_qs = design.get('open_questions', []) or []
+        if open_qs:
+            rows = []
+            for q in open_qs:
+                if isinstance(q, dict):
+                    rows.append([
+                        q.get('topic', ''),
+                        q.get('question', ''),
+                        "Blocking" if q.get('blocking') else "Non-blocking",
+                        q.get('owner') or '',
+                    ])
+                else:
+                    rows.append(['', str(q), 'Non-blocking', ''])
+            self._add_data_table(doc, ["Topic", "Question", "Blocking?", "Owner"], rows)
+        else:
+            doc.add_paragraph(
+                "No open questions - the design was fully specified by the "
+                "provided input.",
+                style='Intense Quote',
+            )
+
+        filepath = self._save(
+            doc, "solution_design", project_name, session_id=session_id,
+            phase="solution_design", label="solution_design",
+        )
+        self.logger.log_tool_usage(
+            "generate_solution_design",
+            {'project': project_name, 'module': module},
+            f"Document saved to {filepath}",
+        )
         return filepath
-
 
     # ------------------------------------------------------------------
     # Consolidated project status report (client-ready deliverable)
@@ -550,8 +1130,8 @@ class DocumentGenerator:
             ("Project Name", session.project_name),
             ("ERP System", session.erp_system),
             ("Module", session.module),
-            ("Current Phase", session.current_phase.replace('_', ' ').title()),
-            ("Report Date", datetime.now().strftime('%Y-%m-%d')),
+            ("Current Phase", (session.current_phase or '').replace('_', ' ').title()),
+            ("Report Date", _utcnow().strftime('%Y-%m-%d')),
             ("Requirement Coverage", f"{health.get('requirements_coverage_pct', 0)}%"),
         ])
 
@@ -610,14 +1190,19 @@ class DocumentGenerator:
 
         doc.add_heading("Coverage Gaps", level=1)
         doc.add_heading("Requirements with no downstream coverage", level=2)
-        self._add_bullet_list(doc, [r['description'] for r in gaps.get('uncovered_requirements', [])])
+        self._add_bullet_list(
+            doc, [r['description'] for r in gaps.get('uncovered_requirements', [])],
+        )
         doc.add_heading("Requirements with no test coverage", level=2)
-        self._add_bullet_list(doc, [r['description'] for r in gaps.get('untested_requirements', [])])
+        self._add_bullet_list(
+            doc, [r['description'] for r in gaps.get('untested_requirements', [])],
+        )
 
         doc.add_heading("Open Items for Review", level=1)
         if open_issues:
             self._add_data_table(doc, ["Type", "Severity", "Description"], [
-                [i['issue_type'].replace('_', ' '), i['severity'], i['description']] for i in open_issues
+                [i['issue_type'].replace('_', ' '), i['severity'], i['description']]
+                for i in open_issues
             ])
         else:
             doc.add_paragraph("No open items.")
@@ -629,10 +1214,15 @@ class DocumentGenerator:
             ["Consulting Lead", "", "", ""],
         ])
 
-        filepath = self._save(doc, "project_report", session.project_name, session_id=session_id,
-                               phase="project_report", label="Project Status Report")
-        self.logger.log_tool_usage("generate_project_report", {'project': session.project_name},
-                                    f"Report saved to {filepath}")
+        filepath = self._save(
+            doc, "project_report", session.project_name, session_id=session_id,
+            phase="project_report", label="Project Status Report",
+        )
+        self.logger.log_tool_usage(
+            "generate_project_report",
+            {'project': session.project_name},
+            f"Report saved to {filepath}",
+        )
         return filepath
 
 

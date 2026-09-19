@@ -12,10 +12,61 @@ those pieces directly - not needed yet.
 User is a stub for Stage 2 (authentication/multi-tenancy). It is not
 referenced by any code path yet - it exists so Stage 2 can add a foreign
 key from sessions to users without an awkward later migration.
+
+Notes on this revision:
+
+  * New columns added to close the gap between agent schemas and what the
+    project_intelligence sync layer actually persists. Without these, the
+    rationale/source/traceability/classification fields produced by the
+    agents are silently dropped by _filter_model_kwargs() in
+    src/services/project_intelligence.py. See per-table notes below.
+
+  * TestCaseRecord is now defined BEFORE ProjectIssue. ProjectIssue has a
+    ForeignKey to test_case_records.id; string-FK resolution is deferred
+    in modern SQLAlchemy so the previous order worked, but it's fragile
+    and reordering costs nothing (Alembic detects tables by name, not by
+    Python class order).
+
+  * Composite indexes added on TraceLink for the coverage queries that
+    filter on (target_type, target_id) and (source_type, source_id).
+    Without these, every project-health check is a full table scan.
+
+  * Unique constraints added on (session_id, external_code) for the
+    records where external_code is a stable identity: requirements,
+    process steps, test cases, training steps. This catches the class
+    of duplicate-external-code bug that the permissive ID normalizers
+    in the schemas can theoretically produce. If a legitimately
+    duplicate code appears in practice, the sync insert fails loudly
+    rather than silently producing two rows that trace to the same
+    model-reported ID.
+
+  * Added updated_at to ProjectIssue, TestCaseRecord, and
+    TrainingStepRecord - tables where fields mutate post-creation
+    (resolution, retest flag, etc.) and audit trails are useful.
+
+  * Removed unused `import uuid as _uuid_intel` at end of file.
+
+  * server_default for is_casual now uses sa.text("false") which the
+    SQLAlchemy dialect compiles to the correct literal per backend
+    (FALSE on Postgres, 0 on SQLite). The previous string "false" was
+    Postgres-specific and silently truthy in some SQLite contexts.
 """
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Boolean, Integer, LargeBinary, Float
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.types import JSON
 
@@ -30,6 +81,14 @@ def _json_type():
         return JSONB
     return JSON
 
+
+def _utcnow():
+    return datetime.now(timezone.utc)
+
+
+# ============================================================================
+# Sessions and identity
+# ============================================================================
 class SessionRecord(Base):
     __tablename__ = "sessions"
 
@@ -41,11 +100,11 @@ class SessionRecord(Base):
     module = Column(String, nullable=False)
     erp_system = Column(String, nullable=False)
     current_phase = Column(String, nullable=False, index=True)
-    created_at = Column(DateTime(timezone=True), nullable=False,
-                         default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime(timezone=True), nullable=False,
-                         default=lambda: datetime.now(timezone.utc),
-                         onupdate=lambda: datetime.now(timezone.utc), index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, default=_utcnow,
+        onupdate=_utcnow, index=True,
+    )
     # Soft delete: archived conversations are hidden from the default project
     # list but not destroyed. NULL = active. Set on DELETE /api/projects/{id}.
     archived_at = Column(DateTime(timezone=True), nullable=True, index=True)
@@ -54,7 +113,10 @@ class SessionRecord(Base):
     # metadata that was never meaningfully chosen for these. Sessions
     # created before this column existed default to False (real projects),
     # matching their actual origin at the time.
-    is_casual = Column(Boolean, nullable=False, default=False, server_default="false")
+    is_casual = Column(
+        Boolean, nullable=False, default=False,
+        server_default=text("false"),
+    )
     data = Column(_json_type()(), nullable=False)
 
 
@@ -66,8 +128,7 @@ class User(Base):
     name = Column(String, nullable=True)
     profile_picture_url = Column(Text, nullable=True)
     hashed_password = Column(Text, nullable=False)
-    created_at = Column(DateTime(timezone=True), nullable=False,
-                         default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
 
 
 class Feedback(Base):
@@ -78,12 +139,18 @@ class Feedback(Base):
 
     id = Column(String, primary_key=True)
     user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
-    session_id = Column(String, ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=True, index=True)
+    session_id = Column(
+        String, ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        nullable=True, index=True,
+    )
     rating = Column(Integer, nullable=True)  # 1-5, optional
     comment = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False,
-                         default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
 
+
+# ============================================================================
+# Documents
+# ============================================================================
 class GeneratedDocument(Base):
     """Durable storage for generated documents (requirements, process
     maps, solution designs, test cases, training materials, etc).
@@ -95,15 +162,20 @@ class GeneratedDocument(Base):
     __tablename__ = "generated_documents"
 
     id = Column(String, primary_key=True)
-    session_id = Column(String, ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=False, index=True)
+    session_id = Column(
+        String, ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
     phase = Column(String, nullable=False)
     label = Column(String, nullable=False)
     filename = Column(String, nullable=False)
-    content_type = Column(String, nullable=False,
-                           default="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    content_type = Column(
+        String, nullable=False,
+        default="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
     content = Column(LargeBinary, nullable=False)
-    created_at = Column(DateTime(timezone=True), nullable=False,
-                         default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
 
 class ProjectDocument(Base):
     """Metadata for a consultant-uploaded project document (distinct from
@@ -120,17 +192,23 @@ class ProjectDocument(Base):
     __tablename__ = "project_documents"
 
     id = Column(String, primary_key=True)
-    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=False, index=True)
+    session_id = Column(
+        String, ForeignKey("sessions.session_id"), nullable=False, index=True,
+    )
     user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
     filename = Column(String, nullable=False)
     storage_key = Column(String, nullable=False, unique=True)
     content_type = Column(String, nullable=False)
     size_bytes = Column(Integer, nullable=False)
     extracted_text_chars = Column(Integer, nullable=False, default=0)
-    uploaded_at = Column(DateTime(timezone=True), nullable=False,
-                          default=lambda: datetime.now(timezone.utc), index=True)
+    uploaded_at = Column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, index=True,
+    )
 
 
+# ============================================================================
+# Project memory
+# ============================================================================
 class ProjectMemory(Base):
     """Per-project agent knowledge: seeded templates, patterns the agents
     generate as they work, lessons learned at project completion, and
@@ -148,7 +226,9 @@ class ProjectMemory(Base):
     __tablename__ = "project_memories"
 
     id = Column(String, primary_key=True)
-    session_id = Column(String, ForeignKey("sessions.session_id"), nullable=False, index=True)
+    session_id = Column(
+        String, ForeignKey("sessions.session_id"), nullable=False, index=True,
+    )
     category = Column(String, nullable=False, index=True)
     content = Column(Text, nullable=False)
     entry_metadata = Column(_json_type()(), nullable=True)
@@ -159,22 +239,33 @@ class ProjectMemory(Base):
     importance = Column(Float, nullable=False, default=1.0)
     access_count = Column(Integer, nullable=False, default=0)
     last_accessed = Column(DateTime(timezone=True), nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False,
-                         default=lambda: datetime.now(timezone.utc), index=True)
-
-import uuid as _uuid_intel
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow, index=True)
 
 
+# ============================================================================
+# Project intelligence - structured objects
+# ============================================================================
 class RequirementItemRecord(Base):
     """Structured, identifiable requirement objects - the 'requirements
     intelligence' layer. Coexists with the existing JSON blob stored on
     SessionState/SessionRecord; this table is what makes requirements
     queryable, reviewable, and traceable instead of only living inside a
-    generated document."""
+    generated document.
+
+    external_code holds the canonical model-reported ID (e.g. 'REQ-001'),
+    which is what link_requirements() / resolve_requirement_codes() match
+    on. Rationale and source are captured from the requirements schema's
+    change-control fields; they were previously dropped by the sync layer.
+    Non-functional requirements are stored under category='Non-functional'
+    rather than a separate table - they share every other field shape.
+    """
     __tablename__ = "requirement_items"
 
     id = Column(String, primary_key=True)
-    session_id = Column(String, ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=False, index=True)
+    session_id = Column(
+        String, ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
     lineage_id = Column(String, nullable=False, index=True)  # stable across all versions of "the same" requirement
     version = Column(Integer, nullable=False, default=1)
     is_current = Column(Boolean, nullable=False, default=True)
@@ -185,19 +276,53 @@ class RequirementItemRecord(Base):
     req_type = Column(String, nullable=False, default="Functional")
     acceptance_criteria = Column(Text, nullable=True)
     status = Column(String, nullable=False, default="draft")  # draft, approved, rejected
+    # Change-control fields. rationale explains why the requirement exists
+    # (needed when scope is renegotiated); source names its origin
+    # (stakeholder, regulation, existing-system limitation). Both optional -
+    # a missing value is preferable to a fabricated one.
+    rationale = Column(Text, nullable=True)
+    source = Column(Text, nullable=True)
     source_excerpt = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc),
-                         onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, default=_utcnow,
+        onupdate=_utcnow,
+    )
+
+    __table_args__ = (
+        # Two requirements in the same session must not share a model-facing
+        # code - otherwise resolve_requirement_codes() picks an arbitrary
+        # match and traceability becomes ambiguous. The ID normalizer in the
+        # requirements schema is permissive (accepts REQ1, REQ_001, req-001
+        # and normalizes them), so duplicates can theoretically arise from
+        # sloppy model output; this constraint turns that into a loud insert
+        # failure rather than a silent traceability bug.
+        UniqueConstraint("session_id", "external_code",
+                         name="uq_requirement_session_external_code"),
+    )
 
 
 class ProcessStepRecord(Base):
     """Structural representation of business process steps, linkable back
-    to the requirement(s) they implement."""
+    to the requirement(s) they implement.
+
+    requirement_id (singular) is legacy: the domain is many-to-many and the
+    canonical storage of step→requirement links is TraceLink (see
+    project_intelligence.link_requirements). The column is retained for
+    backward compatibility with any reader that expects it, but new code
+    should use TraceLink.
+
+    external_code carries the ProcessStep.id (STEP-NNN) so a re-sync can
+    correlate with prior rows. Without it, every sync produced a fresh
+    lineage with no external handle.
+    """
     __tablename__ = "process_steps"
 
     id = Column(String, primary_key=True)
-    session_id = Column(String, ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=False, index=True)
+    session_id = Column(
+        String, ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
     lineage_id = Column(String, nullable=False, index=True)
     version = Column(Integer, nullable=False, default=1)
     is_current = Column(Boolean, nullable=False, default=True)
@@ -206,18 +331,51 @@ class ProcessStepRecord(Base):
     name = Column(String, nullable=False)
     description = Column(Text, nullable=True)
     responsible_role = Column(String, nullable=True)
-    requirement_id = Column(String, ForeignKey("requirement_items.id", ondelete="SET NULL"), nullable=True, index=True)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    # Extended step metadata from the process_map_schema. All optional - the
+    # model is instructed to leave empty rather than invent when unknown.
+    trigger = Column(Text, nullable=True)
+    inputs = Column(_json_type()(), nullable=True)          # list[str]
+    outputs = Column(_json_type()(), nullable=True)         # list[str]
+    transaction = Column(String, nullable=True)
+    exception_paths = Column(_json_type()(), nullable=True) # list[str]
+    external_code = Column(String, nullable=True, index=True)
+    requirement_id = Column(
+        String, ForeignKey("requirement_items.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
+    __table_args__ = (
+        Index("ix_process_steps_session_process", "session_id", "process_name"),
+        # Same rationale as requirements: external_code must be unique per
+        # session so resolve_process_step_external_code() resolves to a
+        # single row.
+        UniqueConstraint("session_id", "external_code",
+                         name="uq_process_step_session_external_code"),
+    )
 
 
 class SolutionDecision(Base):
     """ERP/module/config/customization/integration decisions as
     structured objects with rationale, linkable to the requirement(s)
-    that drove them."""
+    that drove them.
+
+    requirement_id (singular) is legacy, as with ProcessStepRecord: the
+    many-to-many mapping lives in TraceLink.
+
+    classification (STANDARD / CONFIGURATION / EXTENSION) is populated for
+    configuration decisions and lets downstream analysis count how many
+    decisions actually are standard-first. complexity and lifecycle_impact
+    are populated for customizations - the fields a steering committee
+    actually asks about.
+    """
     __tablename__ = "solution_decisions"
 
     id = Column(String, primary_key=True)
-    session_id = Column(String, ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=False, index=True)
+    session_id = Column(
+        String, ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
     lineage_id = Column(String, nullable=False, index=True)
     version = Column(Integer, nullable=False, default=1)
     is_current = Column(Boolean, nullable=False, default=True)
@@ -226,29 +384,154 @@ class SolutionDecision(Base):
     component = Column(String, nullable=True)
     description = Column(Text, nullable=False)
     rationale = Column(Text, nullable=True)
-    requirement_id = Column(String, ForeignKey("requirement_items.id", ondelete="SET NULL"), nullable=True, index=True)
+    # Standard-first ladder classification for configurations; NULL for
+    # customizations (customizations ARE the bottom rung, self-evidently).
+    classification = Column(String, nullable=True)
+    # Customization governance fields.
+    complexity = Column(String, nullable=True)          # Low | Medium | High
+    lifecycle_impact = Column(Text, nullable=True)
+    external_code = Column(String, nullable=True, index=True)
+    requirement_id = Column(
+        String, ForeignKey("requirement_items.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
     status = Column(String, nullable=False, default="proposed")  # proposed, approved, rejected
-    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
+    __table_args__ = (
+        Index("ix_solution_decisions_session_type", "session_id", "decision_type"),
+    )
 
 
+class TestCaseRecord(Base):
+    """Structured QA/UAT test cases, linkable to the requirements they
+    validate.
+
+    user_role, business_process, and acceptance_criteria are UAT-specific
+    and populated only for UAT test cases; QA cases leave them NULL. These
+    fields are what enable role-coverage and process-linkage reporting in
+    the UAT agent's validator - without them, the agent's coverage signals
+    have nothing to read.
+
+    related_design_component is a free-form label linking a test back to a
+    configuration, integration, or customization entry in the solution
+    design. Distinct from the TraceLink-based requirement links, which use
+    real foreign keys.
+
+    DEFINED BEFORE ProjectIssue so its ForeignKey can be resolved at
+    metadata-construction time. See module docstring.
+    """
+    __tablename__ = "test_case_records"
+
+    id = Column(String, primary_key=True)
+    session_id = Column(
+        String, ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    test_type = Column(String, nullable=False)  # QA or UAT
+    external_code = Column(String, nullable=True)  # e.g. "TC-001" or "TC-A1B2C3"
+    scenario = Column(String, nullable=False)
+    priority = Column(String, nullable=False, default="Medium")
+    expected_result = Column(Text, nullable=True)
+    # UAT-specific context. See class docstring.
+    user_role = Column(String, nullable=True)
+    business_process = Column(String, nullable=True)
+    acceptance_criteria = Column(Text, nullable=True)
+    related_design_component = Column(String, nullable=True)
+    needs_retest = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, default=_utcnow,
+        onupdate=_utcnow,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("session_id", "external_code",
+                         name="uq_test_case_session_external_code"),
+    )
+
+
+class TrainingStepRecord(Base):
+    """Structured training manual steps, linkable to the requirements they
+    cover.
+
+    role, verification, and prerequisites come from the training schema's
+    per-step fields. Together with title and instructions they're what
+    make a step usable: preconditions tell the user what must be in place,
+    instructions tell them what to do, verification tells them how they
+    know it worked. Previously only title/instructions were persisted, so
+    the rest was silently lost.
+    """
+    __tablename__ = "training_step_records"
+
+    id = Column(String, primary_key=True)
+    session_id = Column(
+        String, ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    external_code = Column(String, nullable=True, index=True)  # TSTEP-NNN
+    title = Column(String, nullable=False)
+    instructions = Column(Text, nullable=True)
+    role = Column(String, nullable=True)
+    verification = Column(Text, nullable=True)
+    prerequisites = Column(_json_type()(), nullable=True)  # list[str]
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, default=_utcnow,
+        onupdate=_utcnow,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("session_id", "external_code",
+                         name="uq_training_step_session_external_code"),
+    )
+
+
+# ============================================================================
+# Issues, reviews, traceability
+# ============================================================================
 class ProjectIssue(Base):
     """First-class exceptions: contradictions, missing info, coverage
     gaps, high-risk decisions - visible until a consultant resolves them,
-    instead of being silently absorbed into an incomplete output."""
+    instead of being silently absorbed into an incomplete output.
+
+    Also carries open_questions filed by the agent sync layer (issue_type
+    'open_question'), so gaps surfaced by the agents have a landing spot.
+
+    test_case_id references test_case_records - TestCaseRecord is declared
+    above for FK resolution. See module docstring.
+    """
     __tablename__ = "project_issues"
 
     id = Column(String, primary_key=True)
-    session_id = Column(String, ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=False, index=True)
-    issue_type = Column(String, nullable=False)  # contradiction, missing_info, coverage_gap, high_risk_decision
+    session_id = Column(
+        String, ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    issue_type = Column(String, nullable=False)
+    # contradiction, missing_info, coverage_gap, high_risk_decision,
+    # test_failure, requirement_changed, open_question
     severity = Column(String, nullable=False, default="medium")  # low, medium, high
     description = Column(Text, nullable=False)
     related_object_type = Column(String, nullable=True)
     related_object_id = Column(String, nullable=True)
-    test_case_id = Column(String, ForeignKey("test_case_records.id", ondelete="SET NULL"), nullable=True, index=True)
+    test_case_id = Column(
+        String, ForeignKey("test_case_records.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
     classification = Column(String, nullable=True)  # defect, unclear_requirement, changed_requirement, data_issue, integration_issue, environment_issue, other
     status = Column(String, nullable=False, default="open")  # open, resolved, dismissed
-    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, default=_utcnow,
+        onupdate=_utcnow,
+    )
     resolved_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_project_issues_session_status", "session_id", "status"),
+        Index("ix_project_issues_session_type", "session_id", "issue_type"),
+    )
 
 
 class ReviewAction(Base):
@@ -258,55 +541,66 @@ class ReviewAction(Base):
     __tablename__ = "review_actions"
 
     id = Column(String, primary_key=True)
-    session_id = Column(String, ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=False, index=True)
+    session_id = Column(
+        String, ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
     user_id = Column(String, ForeignKey("users.id"), nullable=False)
     object_type = Column(String, nullable=False)  # requirement, solution_decision, process_step
     object_id = Column(String, nullable=False)
     action = Column(String, nullable=False)  # approved, rejected, corrected
     note = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
+    __table_args__ = (
+        Index("ix_review_actions_object", "object_type", "object_id"),
+    )
 
 
 class TraceLink(Base):
     """Generic traceability edge between any two project objects (e.g. a
     QA test case covering a requirement). One flexible table instead of a
     bespoke join table per object-type pair - powers coverage analysis
-    and gap detection later without a schema change."""
+    and gap detection later without a schema change.
+
+    Composite indexes on (target_type, target_id) and (source_type,
+    source_id) are what keep coverage queries fast. Every call to
+    get_coverage_gaps and get_project_health filters on target_type =
+    'requirement' joined to target_id; without these, the query is a
+    full scan.
+    """
     __tablename__ = "trace_links"
 
     id = Column(String, primary_key=True)
-    session_id = Column(String, ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=False, index=True)
+    session_id = Column(
+        String, ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
     source_type = Column(String, nullable=False)
     source_id = Column(String, nullable=False)
     target_type = Column(String, nullable=False)
     target_id = Column(String, nullable=False)
     relationship = Column(String, nullable=False, default="covers")  # covers, derives_from, conflicts_with
-    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
 
-class TestCaseRecord(Base):
-    """Structured QA/UAT test cases, linkable to the requirements they validate."""
-    __tablename__ = "test_case_records"
+    __table_args__ = (
+        Index("ix_trace_links_target", "target_type", "target_id"),
+        Index("ix_trace_links_source", "source_type", "source_id"),
+        Index("ix_trace_links_session_relationship", "session_id", "relationship"),
+        # Prevent duplicate identical edges - project_intelligence can be
+        # retried after a partial failure, and without this constraint a
+        # retry would silently double a link and inflate coverage counts.
+        UniqueConstraint(
+            "session_id", "source_type", "source_id",
+            "target_type", "target_id", "relationship",
+            name="uq_trace_link_edge",
+        ),
+    )
 
-    id = Column(String, primary_key=True)
-    session_id = Column(String, ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=False, index=True)
-    test_type = Column(String, nullable=False)  # QA or UAT
-    external_code = Column(String, nullable=True)  # e.g. "TC-001"
-    scenario = Column(String, nullable=False)
-    priority = Column(String, nullable=False, default="Medium")
-    expected_result = Column(Text, nullable=True)
-    needs_retest = Column(Boolean, nullable=False, default=False)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
-class TrainingStepRecord(Base):
-    """Structured training manual steps, linkable to the requirements they cover."""
-    __tablename__ = "training_step_records"
-
-    id = Column(String, primary_key=True)
-    session_id = Column(String, ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=False, index=True)
-    title = Column(String, nullable=False)
-    instructions = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
-
+# ============================================================================
+# Baselines
+# ============================================================================
 class SolutionBaseline(Base):
     """A named, point-in-time snapshot of 'the solution actually delivered'
     - the brief's critical 'final validated solution' concept. Creating a
@@ -316,12 +610,15 @@ class SolutionBaseline(Base):
     __tablename__ = "solution_baselines"
 
     id = Column(String, primary_key=True)
-    session_id = Column(String, ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=False, index=True)
+    session_id = Column(
+        String, ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
     label = Column(String, nullable=False)  # e.g. "Go-Live Baseline", "UAT Baseline"
     notes = Column(Text, nullable=True)
     created_by = Column(String, ForeignKey("users.id"), nullable=False)
     is_active = Column(Boolean, nullable=False, default=True)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
 
 
 class SolutionBaselineItem(Base):
@@ -330,5 +627,11 @@ class SolutionBaselineItem(Base):
     __tablename__ = "solution_baseline_items"
 
     id = Column(String, primary_key=True)
-    baseline_id = Column(String, ForeignKey("solution_baselines.id", ondelete="CASCADE"), nullable=False, index=True)
-    solution_decision_id = Column(String, ForeignKey("solution_decisions.id", ondelete="CASCADE"), nullable=False)
+    baseline_id = Column(
+        String, ForeignKey("solution_baselines.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    solution_decision_id = Column(
+        String, ForeignKey("solution_decisions.id", ondelete="CASCADE"),
+        nullable=False,
+    )

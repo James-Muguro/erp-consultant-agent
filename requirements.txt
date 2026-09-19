@@ -69,4 +69,4 @@ slowapi>=0.1.9,<1.0
 
 # Test-only: realistic S3 API mocking (no real cloud credentials needed for tests)
 moto[s3]>=5.0.0,<6.0
-reportlab>=4.0.0,<5.0
+# reportlab>=4.0.0,<5.0
