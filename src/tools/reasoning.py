@@ -6,33 +6,23 @@ Public API is unchanged: reasoning_tool.assess_source(query, context)
 and reasoning_tool.make_plan(instruction, context). Both methods return
 the same dict shapes they always have, with additive fields.
 
-Design notes on this revision:
+Resilience contract (LLM outage):
 
-  * assess_source now short-circuits on a small heuristic for clear-cut
-    cases. Every chat message used to trigger an LLM call just to pick
-    between kb/web/hybrid; the heuristic catches the obvious cases (a
-    module code, "our project", a year >= 2024) and returns without a
-    network round-trip. Ambiguous queries still fall through to the LLM,
-    and the LLM path itself is now bounded by a timeout.
+  A complete LLM provider outage must not turn source assessment into a
+  single point of failure for retrieval. When the LLM path fails for
+  any reason - timeout, exception, empty response, schema violation -
+  this layer returns a deterministic decision (`decision='hybrid'`,
+  `confidence=0.3`, `source='fallback'`) that consults every available
+  reference source. The `source` field lets callers distinguish an
+  LLM-derived decision from a heuristic one from a fallback one. The
+  fallback is a routing choice only; it never fabricates an answer and
+  never claims the model responded.
 
-  * Both methods use response_schema when the underlying LLM supports
-    it. The previous version parsed the LLM's free-text reply with
-    substring matching and float-on-whitespace-token extraction, both of
-    which produce the wrong answer on perfectly reasonable LLM output
-    ("hybrid is overkill here, this is pure KB" would resolve to
-    'hybrid'). Structured output removes the parsing layer entirely.
-
-  * The make_plan justification bug is fixed. The old code located the
-    matched line via list.index(), which returns the first line equal to
-    the match - not the position in the reversed iteration - and could
-    splice in the wrong slice of the response when any line appeared
-    more than once.
-
-  * assess_source results are cached (small LRU, process-local) so
-    repeated identical questions don't re-invoke the LLM.
-
-  * reload_model now calls reload_llm() to actually re-initialize the
-    shared LLM client, instead of re-fetching the existing singleton.
+  Exception logging in this layer is deliberately not `logger.exception`
+  for LLM-call failures: the LLM wrapper in src/utils/llm.py has already
+  logged the provider outage, and a full traceback here would duplicate
+  it. The reasoning layer records a single structured event naming the
+  stage, the reason, and the resulting decision instead.
 """
 from __future__ import annotations
 
@@ -215,13 +205,22 @@ class ReasoningTool:
             reasoning:   short justification (from LLM or from the
                          heuristic, depending on which produced the answer)
             source:      'heuristic' | 'llm' | 'fallback' - which path
-                         produced this decision (new field; additive)
+                         produced this decision
 
         Order of operations:
           1. Cache hit (same query + context within this process).
           2. Heuristic, for clear-cut cases.
           3. LLM, with structured output and a timeout.
           4. Fallback to a conservative 'hybrid' if the LLM call fails.
+
+        LLM-failure resilience: a timeout, a raised exception from the LLM
+        wrapper, an empty response, or a schema violation each produce a
+        deterministic 'hybrid' decision with `source='fallback'`. This
+        never claims to come from the model and never propagates the
+        provider outage to the caller - retrieval continues against both
+        reference sources. Fallback decisions are deliberately not
+        cached, so once the LLM is reachable again the next identical
+        query re-invokes the LLM instead of replaying the stale fallback.
         """
         query = (query or "").strip()
         context = context or ""
@@ -250,13 +249,23 @@ class ReasoningTool:
         )
         decision = self._assess_via_llm(query, context)
 
-        _cache_put(query, context, decision)
+        # 4. Cache only LLM-derived decisions. Caching the deterministic
+        # fallback would pin every ambiguous query seen during an LLM
+        # outage to the fallback outcome even after the LLM recovers.
+        if decision.get('source') == 'llm':
+            _cache_put(query, context, decision)
         return decision
 
     def _assess_via_llm(self, query: str, context: str) -> Dict[str, Any]:
         """Ask the LLM, enforcing structured output. On any failure,
         return a conservative hybrid default (which is strictly more
-        information-gathering than either 'kb' or 'web' alone)."""
+        information-gathering than either 'kb' or 'web' alone).
+
+        None of the branches below propagates an exception: an LLM
+        provider outage must not turn into a retrieval outage. Each
+        branch returns the deterministic fallback, which records a
+        single structured event via `_fallback_decision`.
+        """
         prompt = (
             "You are a routing assistant for an ERP consulting tool. Given "
             "a short user query, decide which reference sources to consult.\n\n"
@@ -288,14 +297,15 @@ class ReasoningTool:
                 timeout=_REASONING_LLM_TIMEOUT_SECONDS,
             )
         except OperationTimeoutError:
-            self.logger.warning(
-                "Source decision LLM call timed out; defaulting to hybrid",
+            return self._fallback_decision(
+                'timeout',
                 timeout_s=_REASONING_LLM_TIMEOUT_SECONDS,
             )
-            return self._fallback_decision('timeout')
         except Exception as e:  # noqa: BLE001
-            self.logger.exception("Reasoning assess_source LLM call failed")
-            return self._fallback_decision(str(e))
+            # Warning, not exception: the LLM wrapper in src/utils/llm.py
+            # has already logged the provider outage with full detail.
+            # A duplicate traceback here adds no diagnostic value.
+            return self._fallback_decision('llm_call_failed', error=str(e))
 
         text = getattr(response, 'text', None) or ''
         if not text.strip():
@@ -306,11 +316,9 @@ class ReasoningTool:
         except Exception as e:  # noqa: BLE001
             # Structured output should have prevented this, but be
             # defensive: an unexpected shape must not break routing.
-            self.logger.warning(
-                "Source decision response failed schema validation",
-                error=str(e),
+            return self._fallback_decision(
+                'schema_validation_failed', error=str(e),
             )
-            return self._fallback_decision('schema validation failed')
 
         return {
             'decision': parsed.decision,
@@ -319,17 +327,32 @@ class ReasoningTool:
             'source': 'llm',
         }
 
-    @staticmethod
-    def _fallback_decision(reason: str) -> Dict[str, Any]:
+    def _fallback_decision(self, reason: str, **extra: Any) -> Dict[str, Any]:
         """Conservative fallback. 'hybrid' consults every source, which is
         strictly a superset of consulting one - it's the safest default
-        when the LLM is unavailable."""
-        return {
+        when the LLM is unavailable.
+
+        Records a single structured event naming the stage, the reason,
+        and the resulting decision, so operators can distinguish an
+        LLM-derived decision from a fallback one without having to parse
+        free-text log lines. No secrets and no traceback are included.
+        """
+        result = {
             'decision': 'hybrid',
             'confidence': 0.3,
             'reasoning': f'fallback to hybrid: {reason}',
             'source': 'fallback',
         }
+        self.logger.warning(
+            "Source assessment fell back to deterministic default",
+            stage='assess_source',
+            reason=reason,
+            decision=result['decision'],
+            confidence=result['confidence'],
+            source=result['source'],
+            **extra,
+        )
+        return result
 
     # ------------------------------------------------------------------ #
     # Planning
@@ -341,7 +364,7 @@ class ReasoningTool:
             steps:         List[str]
             justification: str
             raw:           the raw LLM text (or empty on fallback)
-            source:        'llm' | 'fallback' (new field; additive)
+            source:        'llm' | 'fallback'
         """
         if not instruction or not instruction.strip():
             return {
@@ -373,14 +396,12 @@ class ReasoningTool:
                 timeout=_REASONING_LLM_TIMEOUT_SECONDS,
             )
         except OperationTimeoutError:
-            self.logger.warning(
-                "make_plan LLM call timed out",
+            return self._plan_fallback(
+                'timeout',
                 timeout_s=_REASONING_LLM_TIMEOUT_SECONDS,
             )
-            return self._plan_fallback('timeout')
         except Exception as e:  # noqa: BLE001
-            self.logger.exception("Reasoning make_plan LLM call failed")
-            return self._plan_fallback(str(e))
+            return self._plan_fallback('llm_call_failed', error=str(e))
 
         text = getattr(response, 'text', None) or ''
         if not text.strip():
@@ -389,11 +410,9 @@ class ReasoningTool:
         try:
             parsed = PlanOutput.model_validate_json(text)
         except Exception as e:  # noqa: BLE001
-            self.logger.warning(
-                "Plan response failed schema validation",
-                error=str(e),
+            return self._plan_fallback(
+                'schema_validation_failed', raw=text, error=str(e),
             )
-            return self._plan_fallback('schema validation failed', raw=text)
 
         return {
             'steps': list(parsed.steps),
@@ -402,14 +421,26 @@ class ReasoningTool:
             'source': 'llm',
         }
 
-    @staticmethod
-    def _plan_fallback(reason: str, raw: str = "") -> Dict[str, Any]:
-        return {
+    def _plan_fallback(
+        self, reason: str, raw: str = "", **extra: Any,
+    ) -> Dict[str, Any]:
+        """Deterministic empty plan. Same logging discipline as
+        `_fallback_decision`: one structured event, no traceback, no
+        secrets."""
+        result = {
             'steps': [],
             'justification': f'fallback: {reason}',
             'raw': raw,
             'source': 'fallback',
         }
+        self.logger.warning(
+            "Planning fell back to deterministic empty plan",
+            stage='make_plan',
+            reason=reason,
+            source=result['source'],
+            **extra,
+        )
+        return result
 
 
 # Global instance

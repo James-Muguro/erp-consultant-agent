@@ -13,43 +13,14 @@ User is a stub for Stage 2 (authentication/multi-tenancy). It is not
 referenced by any code path yet - it exists so Stage 2 can add a foreign
 key from sessions to users without an awkward later migration.
 
-Notes on this revision:
-
-  * New columns added to close the gap between agent schemas and what the
-    project_intelligence sync layer actually persists. Without these, the
-    rationale/source/traceability/classification fields produced by the
-    agents are silently dropped by _filter_model_kwargs() in
-    src/services/project_intelligence.py. See per-table notes below.
-
-  * TestCaseRecord is now defined BEFORE ProjectIssue. ProjectIssue has a
-    ForeignKey to test_case_records.id; string-FK resolution is deferred
-    in modern SQLAlchemy so the previous order worked, but it's fragile
-    and reordering costs nothing (Alembic detects tables by name, not by
-    Python class order).
-
-  * Composite indexes added on TraceLink for the coverage queries that
-    filter on (target_type, target_id) and (source_type, source_id).
-    Without these, every project-health check is a full table scan.
-
-  * Unique constraints added on (session_id, external_code) for the
-    records where external_code is a stable identity: requirements,
-    process steps, test cases, training steps. This catches the class
-    of duplicate-external-code bug that the permissive ID normalizers
-    in the schemas can theoretically produce. If a legitimately
-    duplicate code appears in practice, the sync insert fails loudly
-    rather than silently producing two rows that trace to the same
-    model-reported ID.
-
-  * Added updated_at to ProjectIssue, TestCaseRecord, and
-    TrainingStepRecord - tables where fields mutate post-creation
-    (resolution, retest flag, etc.) and audit trails are useful.
-
-  * Removed unused `import uuid as _uuid_intel` at end of file.
-
-  * server_default for is_casual now uses sa.text("false") which the
-    SQLAlchemy dialect compiles to the correct literal per backend
-    (FALSE on Postgres, 0 on SQLite). The previous string "false" was
-    Postgres-specific and silently truthy in some SQLite contexts.
+Session ownership and deletion semantics: every table whose rows have no
+lifecycle independent of the owning session declares
+ON DELETE CASCADE on its sessions.session_id foreign key. This is the
+schema-level guarantee that deleting a session does not fail with a
+ForeignKeyViolation because a child row still references it, and it means
+application code does not have to know every child table by name. Tables
+whose rows have independent lifecycle (users, feedback rows retained for
+analytics/user attribution) preserve their current behavior.
 """
 from datetime import datetime, timezone
 
@@ -188,12 +159,19 @@ class ProjectDocument(Base):
     fed into project_memories (see src/tools/document_extractor.py) - 0
     means extraction found nothing usable (e.g. a scanned/image-only PDF),
     which the API surfaces so the consultant knows the upload succeeded
-    but isn't yet searchable content."""
+    but isn't yet searchable content.
+
+    Session ownership: rows have no lifecycle independent of the owning
+    session, so the sessions.session_id FK declares ON DELETE CASCADE.
+    Deleting the DB row does not remove the object from external storage;
+    that separation remains the responsibility of the storage layer.
+    """
     __tablename__ = "project_documents"
 
     id = Column(String, primary_key=True)
     session_id = Column(
-        String, ForeignKey("sessions.session_id"), nullable=False, index=True,
+        String, ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        nullable=False, index=True,
     )
     user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
     filename = Column(String, nullable=False)
@@ -222,12 +200,19 @@ class ProjectMemory(Base):
     could surface in another user's agent-generated output. Every query
     against this table must filter by session_id - there is no
     cross-project read path, by design.
+
+    Session ownership: rows have no lifecycle independent of the owning
+    session, so the sessions.session_id FK declares ON DELETE CASCADE.
+    Before this was set, PostgreSQL rejected the parent session delete
+    with ForeignKeyViolation on project_memories_session_id_fkey, since
+    the child rows still referenced the session at delete time.
     """
     __tablename__ = "project_memories"
 
     id = Column(String, primary_key=True)
     session_id = Column(
-        String, ForeignKey("sessions.session_id"), nullable=False, index=True,
+        String, ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        nullable=False, index=True,
     )
     category = Column(String, nullable=False, index=True)
     content = Column(Text, nullable=False)

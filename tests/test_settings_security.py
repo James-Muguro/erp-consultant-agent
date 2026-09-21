@@ -37,6 +37,17 @@ Test hermeticity:
   developer's machine, in CI, and in Docker. Without it, a value in
   a stray .env would silently override or supplement the test's
   monkeypatched environment.
+
+Provider-configuration contract (mirrors src/config/settings.py):
+  A provider counts as configured only when BOTH its API key and its
+  matching model identifier are present. The four valid pairs are:
+    GEMINI_API_KEY    + GEMINI_MODEL
+    GROQ_API_KEY      + GROQ_MODEL
+    OPENAI_API_KEY    + OPENAI_MODEL
+    ANTHROPIC_API_KEY + ANTHROPIC_MODEL
+  The baseline environment below therefore sets Gemini's key AND model
+  together; tests that intentionally enable another provider must
+  supply that provider's matching model alongside its key.
 """
 from __future__ import annotations
 
@@ -52,9 +63,9 @@ from src.config.settings import Settings
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-# A valid baseline environment: one LLM provider (Gemini), one SerpAPI
-# key, and a strong JWT secret. Every test overrides only the fields it
-# specifically cares about.
+# A valid baseline environment: one complete LLM provider pair (Gemini
+# key + model), one SerpAPI key, and a strong JWT secret. Every test
+# overrides only the fields it specifically cares about.
 _STRONG_JWT = "x" * 40
 
 _PLACEHOLDER_JWT_VALUES = [
@@ -72,9 +83,12 @@ _PLACEHOLDER_JWT_VALUES = [
 def _base_env(**overrides) -> dict:
     """Build an environment dict for Settings(). Includes a strong JWT
     secret by default so tests that don't care about the JWT validator
-    aren't forced to supply one."""
+    aren't forced to supply one, and a complete Gemini provider pair
+    (API key + model) so the at-least-one-provider validator is
+    satisfied without any test needing to opt in."""
     env = {
         "GEMINI_API_KEY": "fake-gemini-key",
+        "GEMINI_MODEL": "gemini-test-model",
         "SERPAPI_API_KEY": "fake-serpapi-key",
         "JWT_SECRET_KEY": _STRONG_JWT,
     }
@@ -164,9 +178,11 @@ class TestProviderConfiguration:
         """Gemini alone is a valid deployment. The previous Settings
         required it unconditionally; the review made every provider
         Optional and added a cross-field check that at least one is
-        configured."""
+        configured. A provider counts as configured only when both its
+        API key and its matching model are present."""
         env()
-        # Baseline env has only Gemini.
+        # Baseline env provides a complete Gemini pair; make sure no
+        # other provider sneaks in.
         monkeypatch.delenv("GROQ_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -177,10 +193,14 @@ class TestProviderConfiguration:
     def test_accepts_openai_only(self, env, monkeypatch):
         """An OpenAI-only deployment is a legitimate configuration.
         Under the pre-review Settings this would fail because
-        GEMINI_API_KEY was required."""
+        GEMINI_API_KEY was required. A complete pair (key + model) is
+        supplied for OpenAI so the provider is registered, and the
+        baseline Gemini key is removed so no provider other than
+        OpenAI is configured."""
         env()
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key")
+        monkeypatch.setenv("OPENAI_MODEL", "fake-openai-model")
         settings = _settings()
         assert settings.openai_api_key == "fake-openai-key"
         assert settings.configured_llm_providers == ["openai"]
@@ -191,7 +211,7 @@ class TestProviderConfiguration:
                     "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
             monkeypatch.delenv(key, raising=False)
         with pytest.raises(
-            ValidationError, match="At least one LLM provider"
+            ValidationError, match="At least one complete LLM provider"
         ):
             _settings()
 
@@ -199,11 +219,15 @@ class TestProviderConfiguration:
         """The configured_llm_providers list must match the order the
         HybridLLMClient tries tiers in (gemini, groq, openai,
         anthropic) — a caller reading this list to understand routing
-        depends on the ordering."""
+        depends on the ordering. Each added provider needs both its
+        API key and its matching model to count as configured."""
         env()
         monkeypatch.setenv("GROQ_API_KEY", "fake-groq")
+        monkeypatch.setenv("GROQ_MODEL", "fake-groq-model")
         monkeypatch.setenv("OPENAI_API_KEY", "fake-openai")
+        monkeypatch.setenv("OPENAI_MODEL", "fake-openai-model")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic")
+        monkeypatch.setenv("ANTHROPIC_MODEL", "fake-anthropic-model")
         settings = _settings()
         assert settings.configured_llm_providers == [
             "gemini", "groq", "openai", "anthropic",
@@ -319,10 +343,14 @@ class TestDiagnostics:
 
     def test_describe_reflects_only_configured_providers(self, env, monkeypatch):
         """The diagnostic must accurately report which tiers are
-        actually active — the entire point of surfacing it at boot."""
+        actually active — the entire point of surfacing it at boot.
+        A provider counts as configured only when both its API key
+        and its matching model are present, so OpenAI is enabled here
+        with a complete pair."""
         env()
         monkeypatch.delenv("GROQ_API_KEY", raising=False)
         monkeypatch.setenv("OPENAI_API_KEY", "fake-openai")
+        monkeypatch.setenv("OPENAI_MODEL", "fake-openai-model")
         config = _settings().describe_llm_configuration()
         assert config["providers"] == ["gemini", "openai"]
 

@@ -298,16 +298,16 @@ class HybridLLMClient:
     # ------------------------------------------------------------------ #
     # Anthropic (schema via tool use, text via plain messages)
     # ------------------------------------------------------------------ #
-    def _try_anthropic(self, prompt, max_tokens, response_schema, model=None):
+    def _try_anthropic(self, prompt, max_tokens, response_schema):
         # Anthropic Python SDK v1.0+ removed temperature/top_p/top_k from
         # Messages.create() entirely - no sampling control available here.
         #
-        # Model resolution: the caller-supplied `model` argument is
-        # honored when it is a non-empty string; otherwise we fall back
-        # to settings.anthropic_model. Neither path is hardcoded. If no
-        # model is available, we refuse to send an invalid request rather
-        # than let Anthropic reject it with an opaque error.
-        resolved_model = model if _is_configured_model(model) else settings.anthropic_model
+        # Model resolution: this method deliberately takes NO model
+        # argument. The model is read directly from the environment-backed
+        # settings.anthropic_model on every invocation, so no caller (or
+        # task-profile layer) can override the provider model identifier.
+        # A missing model raises rather than being silently substituted.
+        resolved_model = settings.anthropic_model
         if not _is_configured_model(resolved_model):
             raise RuntimeError(
                 "Anthropic model is not configured. Set ANTHROPIC_MODEL "
@@ -416,36 +416,6 @@ class HybridLLMClient:
                 model=getattr(response, "model", None),
             )
 
-    # ------------------------------------------------------------------ #
-    # Structured logging
-    # ------------------------------------------------------------------ #
-    def _log_llm_call(self, provider: str, start_time: float, response: LLMResponse) -> None:
-        """One structured log line per successful LLM call: which provider
-        actually answered, which model, how long it took, token usage when
-        the provider exposes it, and the normalized stop reason. 'length'
-        is escalated to a warning because it means the model's output was
-        truncated by max_tokens - a silent quality failure that callers
-        should catch and act on."""
-        duration_ms = round((time.time() - start_time) * 1000, 1)
-        usage = getattr(response, "usage", None) or {}
-        finish = getattr(response, "finish_reason", None)
-        logger.info(
-            "LLM call completed",
-            provider=provider,
-            model=getattr(response, "model", None),
-            finish_reason=finish,
-            duration_ms=duration_ms,
-            prompt_tokens=usage.get("prompt_tokens"),
-            completion_tokens=usage.get("completion_tokens"),
-            total_tokens=usage.get("total_tokens"),
-        )
-        if finish == "length":
-            logger.warning(
-                "LLM output truncated by max_tokens",
-                provider=provider,
-                model=getattr(response, "model", None),
-            )
-
     @staticmethod
     def _looks_truncated_json(text: str) -> bool:
         """Cheap brace-balance check for JSON-like output. Returns True if
@@ -500,7 +470,12 @@ class HybridLLMClient:
         Provider model identifiers come only from environment-backed
         settings (settings.<provider>_model); task profiles do not override
         them. A tier whose model setting has gone missing is skipped
-        cleanly rather than sending an invalid model to the provider."""
+        cleanly rather than sending an invalid model to the provider.
+
+        If every configured tier fails, this raises RuntimeError. It never
+        returns a synthetic or partial "successful" response - the caller's
+        knowledge-base / non-LLM fallback path is expected to catch that
+        exception and take over."""
         generation_config = generation_config or {}
         temperature = generation_config.get("temperature", self.temperature)
         max_tokens = generation_config.get("max_output_tokens", settings.max_tokens)
@@ -511,6 +486,8 @@ class HybridLLMClient:
             timeout=settings.llm_call_timeout_seconds,
         )
 
+        failures: list[str] = []
+
         # -------- Tier 1: Gemini --------
         if self.use_gemini and self.gemini:
             gemini_model = settings.gemini_model
@@ -519,6 +496,7 @@ class HybridLLMClient:
                     "HybridLLM: Gemini model is not configured; skipping "
                     "Gemini tier."
                 )
+                failures.append("gemini: model not configured")
             else:
                 start = time.time()
                 try:
@@ -542,6 +520,7 @@ class HybridLLMClient:
                         f"HybridLLM: Gemini generation failed after retries, "
                         f"trying Groq: {e}"
                     )
+                    failures.append(f"gemini: {e}")
 
         # -------- Tier 2: Groq --------
         if self.groq_client:
@@ -551,6 +530,7 @@ class HybridLLMClient:
                     "HybridLLM: Groq model is not configured; skipping "
                     "Groq tier."
                 )
+                failures.append("groq: model not configured")
             else:
                 start = time.time()
                 try:
@@ -577,6 +557,7 @@ class HybridLLMClient:
                         f"HybridLLM: Groq generation failed after retries, "
                         f"trying OpenAI: {e}"
                     )
+                    failures.append(f"groq: {e}")
 
         # -------- Tier 3: OpenAI --------
         if self.openai_client:
@@ -586,6 +567,7 @@ class HybridLLMClient:
                     "HybridLLM: OpenAI model is not configured; skipping "
                     "OpenAI tier."
                 )
+                failures.append("openai: model not configured")
             else:
                 start = time.time()
                 try:
@@ -609,6 +591,7 @@ class HybridLLMClient:
                         f"HybridLLM: OpenAI generation failed after retries, "
                         f"trying Anthropic: {e}"
                     )
+                    failures.append(f"openai: {e}")
 
         # -------- Tier 4: Anthropic --------
         if self.anthropic_client:
@@ -618,15 +601,17 @@ class HybridLLMClient:
                     "HybridLLM: Anthropic model is not configured; skipping "
                     "Anthropic tier."
                 )
+                failures.append("anthropic: model not configured")
             else:
                 start = time.time()
                 try:
+                    # Model is read from settings.anthropic_model inside
+                    # _try_anthropic; no override is passed in.
                     resp = call_with_retries(
                         self._try_anthropic,
                         prompt,
                         max_tokens,
                         response_schema,
-                        anthropic_model,
                         **retry_kwargs,
                     )
                     self._log_llm_call("anthropic", start, resp)
@@ -635,22 +620,28 @@ class HybridLLMClient:
                     logger.error(
                         f"HybridLLM: Anthropic generation failed after retries: {e}"
                     )
+                    failures.append(f"anthropic: {e}")
 
         logger.error("HybridLLM: No LLM backend succeeded")
+        # Real failure, not a synthetic success. Callers catch this and
+        # execute their knowledge-base / non-LLM fallback path. Diagnostics
+        # list which tiers failed and why, without exposing secrets.
         raise RuntimeError(
             "All configured LLM providers are currently unavailable "
-            "(Gemini, Groq, OpenAI, and Anthropic all failed or are not configured)."
+            "(Gemini, Groq, OpenAI, and Anthropic all failed or are not "
+            "configured). Failures: " + ("; ".join(failures) if failures else "none")
         )
 
     # ------------------------------------------------------------------ #
     # Streaming
     # ------------------------------------------------------------------ #
-    def _try_anthropic_stream(self, prompt, max_tokens, model=None):
-        # Same model resolution order as _try_anthropic: honor the
-        # caller-supplied model when it's a usable non-empty string,
-        # otherwise fall back to settings.anthropic_model. Never
-        # hardcoded.
-        resolved_model = model if _is_configured_model(model) else settings.anthropic_model
+    def _try_anthropic_stream(self, prompt, max_tokens):
+        # Model resolution: like _try_anthropic, this deliberately takes
+        # NO model argument. The model is read directly from the
+        # environment-backed settings.anthropic_model on every invocation,
+        # so no caller (or task-profile layer) can override the provider
+        # model identifier.
+        resolved_model = settings.anthropic_model
         if not _is_configured_model(resolved_model):
             raise RuntimeError(
                 "Anthropic model is not configured. Set ANTHROPIC_MODEL "
@@ -681,7 +672,12 @@ class HybridLLMClient:
         Provider model identifiers come only from environment-backed
         settings (settings.<provider>_model). A tier whose model setting
         has gone missing is skipped cleanly, mirroring the non-streaming
-        path."""
+        path.
+
+        If every configured tier fails before yielding a single chunk, this
+        raises RuntimeError rather than yielding empty output or a
+        synthetic message - the caller's non-LLM fallback path is expected
+        to take over."""
         generation_config = generation_config or {}
 
         if generation_config.get("response_schema") is not None:
@@ -728,6 +724,8 @@ class HybridLLMClient:
                         time.sleep(delay)
             raise last_exc
 
+        failures: list[str] = []
+
         if self.use_gemini and self.gemini:
             gemini_model = settings.gemini_model
             if not _is_configured_model(gemini_model):
@@ -735,6 +733,7 @@ class HybridLLMClient:
                     "HybridLLM: Gemini model is not configured; skipping "
                     "Gemini stream tier."
                 )
+                failures.append("gemini: model not configured")
             else:
                 try:
                     gemini_config = dict(generation_config)
@@ -750,6 +749,7 @@ class HybridLLMClient:
                         f"HybridLLM: Gemini stream failed after retries, trying "
                         f"Groq: {e.__cause__}"
                     )
+                    failures.append(f"gemini: {e.__cause__}")
 
         if self.groq_client:
             groq_model = settings.groq_model
@@ -758,6 +758,7 @@ class HybridLLMClient:
                     "HybridLLM: Groq model is not configured; skipping "
                     "Groq stream tier."
                 )
+                failures.append("groq: model not configured")
             else:
                 try:
                     groq_max_tokens = min(max_tokens, _GROQ_MAX_OUTPUT_TOKENS_CAP)
@@ -774,6 +775,7 @@ class HybridLLMClient:
                         f"HybridLLM: Groq stream failed after retries, trying "
                         f"OpenAI: {e.__cause__}"
                     )
+                    failures.append(f"groq: {e.__cause__}")
 
         if self.openai_client:
             openai_model = settings.openai_model
@@ -782,6 +784,7 @@ class HybridLLMClient:
                     "HybridLLM: OpenAI model is not configured; skipping "
                     "OpenAI stream tier."
                 )
+                failures.append("openai: model not configured")
             else:
                 try:
                     yield from _run_tier_with_retry(
@@ -797,6 +800,7 @@ class HybridLLMClient:
                         f"HybridLLM: OpenAI stream failed after retries, trying "
                         f"Anthropic: {e.__cause__}"
                     )
+                    failures.append(f"openai: {e.__cause__}")
 
         if self.anthropic_client:
             anthropic_model = settings.anthropic_model
@@ -805,12 +809,13 @@ class HybridLLMClient:
                     "HybridLLM: Anthropic model is not configured; skipping "
                     "Anthropic stream tier."
                 )
+                failures.append("anthropic: model not configured")
             else:
                 try:
+                    # Model is read from settings.anthropic_model inside
+                    # _try_anthropic_stream; no override is passed in.
                     yield from _run_tier_with_retry(
-                        lambda: self._try_anthropic_stream(
-                            prompt, max_tokens, anthropic_model
-                        ),
+                        lambda: self._try_anthropic_stream(prompt, max_tokens),
                         "Anthropic",
                     )
                     return
@@ -819,11 +824,14 @@ class HybridLLMClient:
                         f"HybridLLM: Anthropic stream failed after retries: "
                         f"{e.__cause__}"
                     )
+                    failures.append(f"anthropic: {e.__cause__}")
 
         logger.error("HybridLLM: No LLM backend succeeded (streaming)")
+        # Real failure - never yield a synthetic or empty "success".
         raise RuntimeError(
             "All configured LLM providers are currently unavailable "
-            "(Gemini, Groq, OpenAI, and Anthropic all failed or are not configured)."
+            "(Gemini, Groq, OpenAI, and Anthropic all failed or are not "
+            "configured). Failures: " + ("; ".join(failures) if failures else "none")
         )
 
 

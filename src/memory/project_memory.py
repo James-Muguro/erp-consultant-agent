@@ -9,26 +9,6 @@ return type) is reused from memory_bank.py rather than duplicated, since
 its shape (to_dict/from_dict, access tracking fields) is still exactly
 right - only where the entries live changed, not what an entry is.
 
-Design notes on this revision:
-
-  * Access tracking is now wired up. Previously access_count and
-    last_accessed existed in the schema and were sorted on by every
-    search, but nothing ever incremented them - the "frequently recalled
-    memories rank higher" behavior the schema implies was inert. Now
-    get_relevant_memories (the recall path used by every agent) bumps
-    access_count and last_accessed for the entries it returns.
-
-  * seed_defaults is idempotent. Calling it twice on the same session no
-    longer creates duplicate template rows.
-
-  * Tag matching is case-insensitive. Previously a stored tag "SAP" was
-    invisible to a search for "sap" - a common pattern when callers store
-    tags from user input or module names.
-
-  * Search result ordering now includes created_at as a final tiebreaker,
-    so two equally-important, equally-accessed memories prefer the more
-    recent one. Matches what a consultant would expect when both are
-    otherwise equivalent.
 """
 from __future__ import annotations
 

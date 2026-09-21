@@ -10,46 +10,6 @@ and writes structured rows alongside it - the single source of truth
 for "what did the agent actually decide" moves here over time, without
 breaking anything that currently works.
 
-Notes on this revision:
-
-  * A duplicate definition of `sync_requirements_from_structured`
-    (previously declared twice, the second shadowing the first) has been
-    consolidated into one. The surviving version includes external_code,
-    which is what makes resolve_requirement_codes() able to match the
-    agent's canonical REQ-NNN codes.
-
-  * New schema fields are now captured where they exist in the DB model:
-      - RequirementItemRecord: rationale, source, status,
-        non_functional_requirements bucket.
-      - ProcessStepRecord: external_code (from ProcessStep.id).
-      - SolutionDecision: external_code (from CFG/INT/CUST ids).
-      - TestCaseRecord: user_role, business_process, acceptance_criteria,
-        related_process_step_ids (via TraceLink), related_design_component.
-      - TrainingStepRecord: external_code, role, verification, prerequisites.
-    Where the DB model doesn't yet have the column, the value is
-    silently skipped (see _filter_model_kwargs) rather than crashing.
-    See "DB schema dependencies" at the end of this file's docstring.
-
-  * Open questions from any agent are stored as ProjectIssue rows with
-    issue_type='open_question'. This isn't a dedicated table - a
-    follow-up UI could filter on that type - but it prevents the
-    questions from being silently lost, which was the previous state.
-
-  * _propagate_requirement_change() no longer creates duplicate links
-    when called with old_id == new_id (as record_actual_solution does).
-
-  * resolve_requirement_codes() deduplicates its unresolved-code issues
-    per session, so a model that hallucinates 15 codes files one
-    aggregated issue instead of 15 individual ones.
-
-  * Cross-session reference validation added to create_baseline,
-    record_review_action, and add_trace_link. Previously a caller could
-    link or approve objects from another session.
-
-  * get_project_health no longer opens three nested DB sessions; the
-    coverage-gap and baseline lookups are done inline on the same
-    session.
-
 DB schema state
 ---------------
 The columns listed below were added to src/db/models.py alongside this

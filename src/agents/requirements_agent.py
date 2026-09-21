@@ -215,19 +215,33 @@ class RequirementsAgent:
                 self.logger.warning(f"clean_text failed, continuing with raw structure: {e}")
                 warnings.append("Output sanitization failed; raw structure was retained.")
 
-            # 7. Validate quality and surface it (previously dead code).
+            # 7. Validate quality and surface it.
             validation_result = self.validate_requirements(structured_requirements)
 
-            # 8. Downstream sync (previously inline; still inline to avoid
-            #    circular import in the original file layout).
+            # 8. Structured requirements persistence. This is a required
+            #    step, not best-effort: a phase that cannot persist its
+            #    structured output must not report success, otherwise
+            #    downstream phases and the /health, /coverage, and baseline
+            #    endpoints read from a session whose structured view is
+            #    empty while the phase output JSON blob says the phase
+            #    completed. A failed sync therefore propagates and the
+            #    top-level boundary reports the phase as failed.
+            #    The import stays inline to avoid a circular import with
+            #    src.services in the original file layout.
             try:
                 from src.services import project_intelligence
                 project_intelligence.sync_requirements_from_structured(
                     session_id, structured_requirements
                 )
-            except Exception as e:  # noqa: BLE001
-                self.logger.warning(f"Downstream sync failed, continuing: {e}")
-                warnings.append("Downstream project intelligence sync failed.")
+            except Exception as e:  # noqa: BLE001 - re-raised below with context
+                self.logger.error(
+                    f"Structured requirements persistence failed for session "
+                    f"{session_id}: {e}"
+                )
+                raise RuntimeError(
+                    f"Structured requirements persistence failed for session "
+                    f"{session_id}: {e}"
+                ) from e
 
             # 9. Document generation.
             doc_path = doc_generator.generate_requirements_document(

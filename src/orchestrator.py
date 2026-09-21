@@ -5,32 +5,6 @@ This is the pipeline driver: it sequences the six phases, threads state
 between them, applies the phase-level timeout, and assembles the final
 project state.
 
-Design notes on this revision:
-
-  * Pipeline gating. Previously every phase failure was logged and the
-    workflow continued anyway, producing a cascade of "X not found"
-    errors from downstream phases. Now failures on critical phases
-    (requirements_gathering, solution_design) stop the pipeline with a
-    clear error, and non-critical failures are surfaced in the summary.
-
-  * Diagnostics aggregation. Every agent now returns enriched keys
-    (warnings, open_questions, degraded, repaired, validation). The
-    orchestrator previously dropped all of them. It now collects them
-    per-phase and aggregates them at the workflow level, so the
-    epistemic discipline the agents enforce reaches the caller.
-
-  * Correlation binding. Each phase binds session_id and phase_name onto
-    the log context via AgentLogger.bound(), so log lines from
-    concurrent phases on different sessions are distinguishable.
-
-  * Terminal 'completed' phase. AgentMemory.advance_phase rejects any
-    phase outside the six-entry PHASES sequence, so calling it with
-    'completed' silently fails. The _advance_to_phase helper handles the
-    terminal case by going through the session service directly.
-
-  * Defensive result handling. _call_agent_safely normalizes non-dict
-    results from agents into a structured failure, so a return-value
-    mistake in one agent can't crash the orchestrator.
 """
 from __future__ import annotations
 
@@ -208,6 +182,22 @@ class ERPOrchestratorAgent:
         Returns True if the transition succeeded, False otherwise.
         """
         if phase == ProjectPhase.COMPLETED.value:
+            # Verify the session exists before attempting the terminal
+            # transition. session_service.advance_phase silently no-ops
+            # on a missing session (it logs a warning internally but
+            # does not raise), so without this check the try block below
+            # would report success for a transition that never happened.
+            # This mirrors the existence check AgentMemory.advance_phase
+            # already performs for non-terminal phases, where a missing
+            # session correctly yields False.
+            session = agent_memory.session_service.get_session(session_id)
+            if not session:
+                self.logger.warning(
+                    "Cannot advance to terminal 'completed' state: "
+                    "session not found",
+                    session_id=session_id,
+                )
+                return False
             try:
                 agent_memory.session_service.advance_phase(session_id, phase)
                 return True

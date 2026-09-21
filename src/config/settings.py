@@ -14,10 +14,11 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables.
 
     Cross-field invariants (enforced by validators below):
-      * At least one LLM provider must be configured. The hybrid LLM
-        wrapper supports four, and it's a legitimate deployment to run
-        with only one. Requiring Gemini specifically was a false
-        constraint.
+      * At least one LLM provider must be fully configured. A provider is
+        configured only when BOTH its API key AND its model identifier are
+        present and valid; an API key with no model (or vice versa) does
+        not count. The hybrid LLM wrapper supports four providers, and
+        it's a legitimate deployment to run with only one.
       * SerpApi key is required only when `enable_google_search` is on.
         It's a feature flag, not a global prerequisite.
       * The per-phase timeout must be at least as long as the worst-case
@@ -26,12 +27,11 @@ class Settings(BaseSettings):
         exact tier count isn't knowable here (dependencies on which keys
         are set), so this checks the conservative bound.
 
-    Scope note: Settings describes configuration only. Whether a
-    provider is actually usable at runtime (API key AND a non-empty
-    model) is enforced by the LLM layer, not here. Consequently, an
-    API key without a matching model is a valid, constructible Settings
-    object; the runtime LLM wrapper will skip such a tier rather than
-    send an invalid request.
+    Provider model identifiers are environment-driven only. There are no
+    hardcoded production model names or defaults anywhere in this file.
+    Changing a model requires only an environment-variable change
+    (GEMINI_MODEL / GROQ_MODEL / OPENAI_MODEL / ANTHROPIC_MODEL), with no
+    Python code change.
     """
 
     model_config = SettingsConfigDict(
@@ -44,10 +44,12 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     # LLM provider credentials
     # ------------------------------------------------------------------ #
-    # All four are Optional at the type level. At least one must be set;
-    # enforced by _require_at_least_one_llm_provider below. The hybrid
-    # wrapper skips any tier whose client failed to initialize, so an
-    # unset key just means that tier is inactive, not a startup failure.
+    # All four are Optional at the type level. Each provider is considered
+    # configured only when BOTH its API key AND its matching model are
+    # present; enforced by _require_at_least_one_llm_provider below. The
+    # hybrid wrapper skips any tier that is not fully configured, so an
+    # unset key (or unset model) just means that tier is inactive, not a
+    # startup failure.
     gemini_api_key: Optional[str] = Field(
         None, description="Gemini API Key (primary, free tier)"
     )
@@ -67,9 +69,9 @@ class Settings(BaseSettings):
     # These are environment-driven only - there are no hardcoded defaults.
     # Set via GEMINI_MODEL, GROQ_MODEL, OPENAI_MODEL, ANTHROPIC_MODEL.
     # A missing (None) value is valid at Settings-construction time; the
-    # runtime LLM layer is responsible for treating a provider with an
-    # API key but no configured model as unavailable. A model explicitly
-    # supplied as whitespace-only is rejected by validation.
+    # provider is simply treated as not configured. An empty string,
+    # whitespace-only value, or a value with internal whitespace is
+    # rejected by validation - never silently substituted.
     gemini_model: Optional[str] = Field(
         None,
         description="Gemini model ID (from GEMINI_MODEL; no built-in default)",
@@ -249,25 +251,33 @@ class Settings(BaseSettings):
 
     @property
     def configured_llm_providers(self) -> List[str]:
-        """Ordered list of configured LLM providers, matching the fallback
-        order used by HybridLLMClient. Useful for startup logging and for
-        diagnosing why a call landed on a paid tier.
+        """Ordered list of fully configured LLM providers, matching the
+        fallback order used by HybridLLMClient. Useful for startup logging
+        and for diagnosing why a call landed on a paid tier.
 
-        A provider is listed when its API key is present. Whether the
-        provider also has a usable model configured is a runtime concern
-        enforced by the LLM layer, not by Settings - the Settings test
-        contract allows constructing a Settings object with an API key
-        and no matching model field."""
+        A provider is listed only when BOTH its API key AND its matching
+        model identifier are present (the model field validator already
+        rejects empty/whitespace-only/internal-whitespace values, so a
+        non-None model here is a valid, non-whitespace identifier). A
+        provider with a key but no model, or a model but no key, is not
+        configured."""
         providers: List[str] = []
-        if self.gemini_api_key:
+        if self.gemini_api_key and self.gemini_model:
             providers.append("gemini")
-        if self.groq_api_key:
+        if self.groq_api_key and self.groq_model:
             providers.append("groq")
-        if self.openai_api_key:
+        if self.openai_api_key and self.openai_model:
             providers.append("openai")
-        if self.anthropic_api_key:
+        if self.anthropic_api_key and self.anthropic_model:
             providers.append("anthropic")
         return providers
+
+    @property
+    def unconfigured_llm_providers(self) -> List[str]:
+        """Ordered list of providers that are not fully configured (missing
+        API key, missing model, or both). Mirrors the fallback order."""
+        configured = set(self.configured_llm_providers)
+        return [p for p in ("gemini", "groq", "openai", "anthropic") if p not in configured]
 
     # ------------------------------------------------------------------ #
     # Validators
@@ -309,28 +319,30 @@ class Settings(BaseSettings):
         """Model identifiers are environment-driven only - no hardcoded
         defaults exist anywhere.
 
-        Distinguishes three cases so tests using partial provider
-        configuration keep working while a genuinely bad value still
-        fails loudly at construction time:
-          * None            -> valid; the provider's model is simply not
-                               configured. Runtime availability is decided
-                               by the LLM layer, not by Settings.
+        Contract:
+          * None            -> valid; the provider's model is not
+                               configured, so that provider is not
+                               configured (see configured_llm_providers).
+          * empty / ""      -> invalid; rejected so a stray empty env var
+                               surfaces at startup.
+          * whitespace-only -> invalid; rejected for the same reason.
+          * internal WS     -> invalid; a stray space inside a model name
+                               fails on every provider call with an opaque
+                               400, so reject it early.
           * non-empty str   -> valid; returned stripped of surrounding
-                               whitespace. Internal whitespace still
-                               raises (a stray space inside a model name
-                               fails on every provider call with an
-                               opaque 400).
-          * whitespace-only -> invalid; raises ValueError so an env var
-                               that was set to "" or "   " surfaces at
-                               startup rather than silently deactivating
-                               a tier the operator thought was live."""
+                               whitespace. The exact non-whitespace model
+                               identifier is preserved with no provider-
+                               specific format enforcement.
+
+        No substitution: an invalid or missing value is never silently
+        replaced with a different model."""
         if v is None:
             return None
         stripped = v.strip()
         if not stripped:
             raise ValueError(
-                "model name must be a non-empty string (whitespace-only "
-                "values are rejected)"
+                "model name must be a non-empty string (empty and "
+                "whitespace-only values are rejected)"
             )
         if any(c.isspace() for c in stripped):
             raise ValueError(f"model name must not contain whitespace: {v!r}")
@@ -338,16 +350,20 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _require_at_least_one_llm_provider(self) -> "Settings":
-        """The hybrid LLM wrapper can run with any single configured provider.
-        Requiring Gemini specifically was a false constraint - a deployment
-        using only OpenAI or only Groq is legitimate. A provider counts as
-        configured here when its API key is present; whether it also has a
-        usable model configured is a runtime concern enforced by the LLM
-        layer, not by Settings."""
+        """The hybrid LLM wrapper can run with any single fully-configured
+        provider. A provider counts as configured only when BOTH its API
+        key AND its matching model identifier are present - a key without
+        a model, or a model without a key, is not configured and cannot
+        serve requests."""
         if not self.configured_llm_providers:
             raise ValueError(
-                "At least one LLM provider must be configured. Set one of: "
-                "GEMINI_API_KEY, GROQ_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY."
+                "At least one complete LLM provider must be configured. Each "
+                "provider requires BOTH an API key AND a model identifier. "
+                "Set at least one of these pairs: "
+                "GEMINI_API_KEY + GEMINI_MODEL, "
+                "GROQ_API_KEY + GROQ_MODEL, "
+                "OPENAI_API_KEY + OPENAI_MODEL, "
+                "ANTHROPIC_API_KEY + ANTHROPIC_MODEL."
             )
         return self
 
@@ -407,18 +423,18 @@ class Settings(BaseSettings):
         """Return a log-friendly summary of the effective LLM routing.
 
         Intended to be called once at startup so operators can see at a
-        glance which providers are active and which model each tier will
-        use. In particular, this surfaces a wrong model name (which fails
-        silently at call time and shifts load to a paid tier) as a config
-        line you can eyeball.
+        glance which providers are active, which are not, and which
+        environment-supplied model each tier will use. In particular, this
+        surfaces a wrong model name (which fails silently at call time and
+        shifts load to a paid tier) as a config line you can eyeball.
 
-        Note: `providers` lists every provider with an API key present,
-        regardless of whether its model is configured. A provider whose
-        model is None is reported by the LLM layer at runtime as
-        unavailable; see HybridLLMClient.
+        Distinguishes configured from unconfigured providers. API keys and
+        other secrets are never included in the output.
         """
+        configured = self.configured_llm_providers
         return {
-            "providers": self.configured_llm_providers,
+            "providers": configured,
+            "unconfigured_providers": self.unconfigured_llm_providers,
             "models": {
                 "gemini": self.gemini_model,
                 "groq": self.groq_model,

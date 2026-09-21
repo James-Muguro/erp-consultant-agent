@@ -432,6 +432,24 @@ def extract_text(response: Any) -> str:
     return str(response)
 
 
+# User-facing header used when we surface retrieved reference material
+# directly because LLM synthesis failed. Deliberately does NOT say "I
+# wasn't able to synthesize..." or "I had trouble summarizing..." - the
+# point of the fallback is to preserve the useful reference content, not
+# to apologize for a synthesis step the caller never sees. It also does
+# not imply the text below came from an LLM.
+_REFERENCE_FALLBACK_HEADER = (
+    "Here is the reference material retrieved for your question:"
+)
+
+# User-facing message used only when LLM synthesis failed AND there is no
+# usable reference material to fall back to. Honest, does not claim to
+# have found anything, does not reference any internal diagnostics.
+_NO_REFERENCE_FAILURE_MESSAGE = (
+    "I wasn't able to generate a response right now. Please try again shortly."
+)
+
+
 def _reference_data_fallback(data: Optional[Dict[str, Any]]) -> Optional[str]:
     """Compose a fallback answer from already-retrieved reference data.
 
@@ -444,9 +462,13 @@ def _reference_data_fallback(data: Optional[Dict[str, Any]]) -> Optional[str]:
       * Does NOT call any LLM.
       * Does NOT fabricate facts - only reuses what retrieval produced.
       * Preserves source attribution when the retrieval response carries
-        a `sources` field.
+        a `sources` field, and when individual entries carry title/source/
+        url either at the top level or nested inside a `metadata` dict
+        (langchain-style Document shape).
       * Returns None when there is no usable reference content, so the
         caller can fall through to an explicit failure message.
+      * Never implies the text was LLM-generated - the header states
+        explicitly that this is reference material.
 
     The shape of `data` matches what src.tools.info_retriever.info_retriever
     returns: a dict that may carry `kb_results`, `web_results`, and
@@ -462,7 +484,14 @@ def _reference_data_fallback(data: Optional[Dict[str, Any]]) -> Optional[str]:
             stripped = item.strip()
             return stripped or None
         if isinstance(item, dict):
-            for key in ("content", "text", "snippet", "answer", "summary", "body"):
+            # Content keys, in preference order. `page_content` is the
+            # langchain/LlamaIndex Document field; without it a
+            # retrieval layer that emits Documents would be treated as
+            # carrying no usable text and the fallback would be lost.
+            for key in (
+                "content", "text", "snippet", "answer", "summary",
+                "body", "page_content",
+            ):
                 value = item.get(key)
                 if isinstance(value, str) and value.strip():
                     title = (
@@ -470,6 +499,13 @@ def _reference_data_fallback(data: Optional[Dict[str, Any]]) -> Optional[str]:
                         or item.get("source")
                         or item.get("url")
                     )
+                    if not title and isinstance(item.get("metadata"), dict):
+                        md = item["metadata"]
+                        title = (
+                            md.get("title")
+                            or md.get("source")
+                            or md.get("url")
+                        )
                     if isinstance(title, str) and title.strip():
                         return f"{title.strip()}: {value.strip()}"
                     return value.strip()
@@ -511,14 +547,41 @@ def _reference_data_fallback(data: Optional[Dict[str, Any]]) -> Optional[str]:
             if isinstance(label, str) and label.strip():
                 source_labels.append(label.strip())
 
-    header = (
-        "I wasn't able to synthesize a full answer right now, but here is "
-        "the reference material I retrieved for your question:"
-    )
     body = "\n\n".join(parts)
     if source_labels:
         body = body + "\n\nSources: " + "; ".join(source_labels)
-    return header + "\n\n" + body
+    return _REFERENCE_FALLBACK_HEADER + "\n\n" + body
+
+
+def _fallback_kind(data: Optional[Dict[str, Any]]) -> str:
+    """Classify the fallback source for structured logging: 'knowledge_base'
+    when retrieved KB rows were used, otherwise 'reference_material' (web
+    results and/or sources only)."""
+    if isinstance(data, dict) and data.get("kb_results"):
+        return "knowledge_base"
+    return "reference_material"
+
+
+def _fallback_reason_for(
+    data: Optional[Dict[str, Any]], retrieval_failed: bool,
+) -> str:
+    """Name the failure state for structured logs so the four distinct
+    states required by the resilience contract are observable:
+
+      1. LLM unavailable, retrieval succeeded with usable content:
+         handled upstream - we log `fallback_reason="llm_unavailable"`
+         on the success branch instead of calling this helper.
+      2. LLM unavailable, retrieval returned nothing usable:
+         `"llm_unavailable_no_reference_material"`.
+      3. Retrieval itself failed (info_retriever raised):
+         `"retrieval_failed"`.
+      4. Both: same as (3) plus the LLM error already logged upstream.
+
+    This is a log-only distinction; the user-facing message is unchanged
+    so the API contract is preserved."""
+    if retrieval_failed:
+        return "retrieval_failed"
+    return "llm_unavailable_no_reference_material"
 
 
 def _derive_chat_title(message: str) -> str:
@@ -2067,10 +2130,27 @@ def chat(
             user_id=current_user.id, is_casual=True,
         )
 
-    data = info_retriever(
-        req.message, {'summary': ''},
-        prefer_web=req.prefer_web, session_id=req.session_id,
-    )
+    # Retrieval. This pipeline includes an LLM-dependent reasoning step
+    # (source assessment). If that step fails - for example because every
+    # provider is unavailable - we must not lose the reference material
+    # the pipeline already had, nor fail the whole request. Continue with
+    # `data = None`; the synthesis call below will still be attempted, and
+    # the reference-material fallback remains available if it exists.
+    retrieval_failed = False
+    try:
+        data = info_retriever(
+            req.message, {'summary': ''},
+            prefer_web=req.prefer_web, session_id=req.session_id,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "info_retriever failed; continuing without reference material",
+            error=str(e),
+            session_id=session_id,
+        )
+        data = None
+        retrieval_failed = True
+
     generation_config = {
         'temperature': 0.5,
         'max_output_tokens': settings.max_tokens,
@@ -2089,17 +2169,39 @@ def chat(
         response = llm_instance.generate_content(prompt, generation_config=generation_config)
         final_answer = extract_text(response)
     except Exception as e:  # noqa: BLE001
-        # All LLM providers failed. Do NOT discard the reference data that
-        # info_retriever already returned - surface it through the existing
-        # fallback path instead. No second LLM request is made, and no
-        # facts are invented. If there is no usable reference data, keep an
-        # explicit failure message.
+        # Every LLM provider failed. The LLM layer raised honestly (see
+        # src/utils/llm.py); this layer's job is to preserve the reference
+        # material that info_retriever already returned, rather than
+        # discard it for a generic apology. No second LLM call, no
+        # fabrication, no imitation of an LLM-generated answer.
         logger.error("Error during final answer synthesis", error=str(e))
+
         fallback_answer = _reference_data_fallback(data)
         if fallback_answer is not None:
             final_answer = fallback_answer
+            logger.warning(
+                "Final answer served from retrieved reference material",
+                fallback=_fallback_kind(data),
+                fallback_reason="llm_unavailable",
+                provider_synthesis_failed=True,
+                session_id=session_id,
+            )
         else:
-            final_answer = "I found some information, but I had trouble summarizing it."
+            # States 2/3/4: LLM failed and there is no usable reference
+            # material. Preserve honest failure behavior - do not claim
+            # to have found anything. The reason distinguishes retrieval
+            # failure (state 3) from an empty retrieval result (state 2)
+            # so operators can tell the two apart in logs, without
+            # changing the user-facing message.
+            reason = _fallback_reason_for(data, retrieval_failed)
+            final_answer = _NO_REFERENCE_FAILURE_MESSAGE
+            logger.warning(
+                "LLM synthesis failed and no reference material was "
+                "available; returning honest failure message",
+                fallback_reason=reason,
+                provider_synthesis_failed=True,
+                session_id=session_id,
+            )
 
     agent_memory.session_service.add_to_conversation(
         session_id, role="user", content=req.message,
@@ -2408,10 +2510,27 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
 
         yield _sse_comment("keepalive")
         yield ev('tool_started', tool='info_retriever', message='Searching knowledge base and web')
-        data = info_retriever(
-            req.message, {'summary': ''},
-            prefer_web=req.prefer_web, session_id=req.session_id,
-        )
+        # Retrieval includes an LLM-dependent reasoning step. If it fails
+        # (for example because every provider is unavailable), keep the
+        # request alive: emit tool_completed for protocol consistency and
+        # continue with `data = None`. The streamed synthesis step below
+        # is still attempted, and the reference-material fallback remains
+        # available if `data` had produced content.
+        retrieval_failed = False
+        try:
+            data = info_retriever(
+                req.message, {'summary': ''},
+                prefer_web=req.prefer_web, session_id=req.session_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "info_retriever failed during streaming chat; continuing "
+                "without reference material",
+                error=str(e),
+                session_id=session_id,
+            )
+            data = None
+            retrieval_failed = True
         yield ev('tool_completed', tool='info_retriever')
 
         generation_config = {
@@ -2451,15 +2570,39 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
             # than discard the reference data retrieved above, surface it
             # through the same text_delta/event stream. Guarded by
             # `not full_answer_parts` so we never duplicate or contradict
-            # partial output that already reached the client. No second
-            # LLM request is made and no facts are invented.
+            # partial output that already reached the client - mid-stream
+            # failure semantics are preserved untouched (no fallback splice
+            # into a partially emitted answer). No second LLM request is
+            # made and no facts are invented.
             logger.error("Error during streamed answer synthesis", error=str(e))
             if not full_answer_parts:
-                fallback = _reference_data_fallback(data) or (
-                    "I found some information, but I had trouble summarizing it."
-                )
-                full_answer_parts.append(fallback)
-                yield ev('text_delta', text=fallback)
+                fallback = _reference_data_fallback(data)
+                if fallback is not None:
+                    full_answer_parts.append(fallback)
+                    yield ev('text_delta', text=fallback)
+                    logger.warning(
+                        "Streamed answer served from retrieved reference material",
+                        fallback=_fallback_kind(data),
+                        fallback_reason="llm_unavailable",
+                        provider_synthesis_failed=True,
+                        session_id=session_id,
+                    )
+                else:
+                    # States 2/3/4: LLM failed and no reference material
+                    # exists. Preserve honest failure behavior - do not
+                    # claim to have found anything. Reason distinguishes
+                    # retrieval failure from an empty retrieval result.
+                    reason = _fallback_reason_for(data, retrieval_failed)
+                    full_answer_parts.append(_NO_REFERENCE_FAILURE_MESSAGE)
+                    yield ev('text_delta', text=_NO_REFERENCE_FAILURE_MESSAGE)
+                    logger.warning(
+                        "Streamed LLM synthesis failed and no reference "
+                        "material was available; returning honest failure "
+                        "message",
+                        fallback_reason=reason,
+                        provider_synthesis_failed=True,
+                        session_id=session_id,
+                    )
 
         final_answer = "".join(full_answer_parts)
         agent_memory.session_service.add_to_conversation(

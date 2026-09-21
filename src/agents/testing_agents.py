@@ -287,23 +287,48 @@ class _BaseTestingAgent:
         cases: List[Dict[str, Any]],
         warnings: List[str],
     ) -> bool:
+        """Persist structured test cases via project_intelligence.
+
+        This is a required step for phase success, not a best-effort
+        notification: the test_case_records rows, TraceLinks, and
+        ProjectIssue rows produced by sync_test_cases_from_structured are
+        what downstream UAT, /health, coverage calculations, traceability,
+        and defect tracking read from. A silent failure here would let the
+        phase output JSON blob claim completion while the authoritative
+        structured view stays empty, which is the state inconsistency the
+        pipeline-integrity rule forbids.
+
+        The per-test-case failure recording performed inside
+        sync_test_cases_from_structured is part of this same call — a
+        failure inside it either succeeds as part of the sync or fails the
+        sync. The QA/UAT phases treat both as one authoritative operation.
+
+        Returns True on success. Raises RuntimeError on any failure,
+        including the module-import failure, so callers report the phase
+        as failed rather than returning a misleading success.
+        """
         try:
             from src.services import project_intelligence
         except Exception as e:  # noqa: BLE001
-            self.logger.warning(f"project_intelligence import failed: {e}")
-            warnings.append(
-                "Downstream project intelligence unavailable; test cases not synced."
-            )
-            return False
+            self.logger.error(f"project_intelligence import failed: {e}")
+            raise RuntimeError(
+                f"Test case persistence unavailable: could not import "
+                f"project_intelligence: {e}"
+            ) from e
         try:
             project_intelligence.sync_test_cases_from_structured(
                 session_id, test_type, cases
             )
             return True
         except Exception as e:  # noqa: BLE001
-            self.logger.warning(f"sync_test_cases_from_structured failed: {e}")
-            warnings.append("Test cases were not synced to project intelligence.")
-            return False
+            self.logger.error(
+                f"sync_test_cases_from_structured failed for session "
+                f"{session_id}, test_type={test_type}: {e}"
+            )
+            raise RuntimeError(
+                f"Test case persistence failed for session {session_id}, "
+                f"test_type={test_type}: {e}"
+            ) from e
 
     # -- utilities --------------------------------------------------------
     def _soft_limit(self, text: str, label: str) -> str:
@@ -486,18 +511,30 @@ class QATestingAgent(_BaseTestingAgent):
                     + "; ".join(validation['issues'][:3])
                 )
 
-            # 8. Downstream sync (isolated)
-            sync_ok = self._sync_downstream(
+            # 8. Downstream sync. Required for phase success — the
+            #    structured test_case_records, TraceLinks, and ProjectIssue
+            #    rows are the authoritative output downstream UAT,
+            #    /health, coverage, traceability, and defect tracking read
+            #    from. A silent failure here would let the phase output
+            #    JSON blob claim completion while the structured view
+            #    stays empty. The helper raises RuntimeError on any
+            #    failure, propagating to the outer boundary.
+            self._sync_downstream(
                 session_id, "QA", structured_test_cases, warnings
             )
 
-            # 9. Project / session lookup (safe)
-            session = self._safe_memory_call(
-                agent_memory.session_service.get_session,
-                session_id,
-                default=None,
-                warnings=warnings,
-            )
+            # 9. Session lookup is required: the session object carries the
+            #    project_name used in the document and its existence
+            #    confirms the session has not been deleted mid-run. The
+            #    orchestrator already verified the session exists before
+            #    invoking generate_test_cases, so a None here means the
+            #    session disappeared or a DB-level failure occurred —
+            #    either way, the phase cannot be reported as successful.
+            session = agent_memory.session_service.get_session(session_id)
+            if session is None:
+                raise RuntimeError(
+                    f"Cannot persist QA test cases: session {session_id} not found"
+                )
             project_name = getattr(session, 'project_name', None) or "ERP Project"
 
             # 10. Document
@@ -509,7 +546,12 @@ class QATestingAgent(_BaseTestingAgent):
                 session_id=session_id,
             )
 
-            # 11. Persist phase output (isolated)
+            # 11. Persist phase output. The orchestrator reads this payload
+            #     via get_phase_output(session_id, 'qa_testing') to build
+            #     downstream UAT and training context, so it is
+            #     authoritative rather than best-effort. A failure here
+            #     would leave downstream phases without the QA output while
+            #     this phase reported success.
             try:
                 agent_memory.save_phase_output(
                     session_id,
@@ -524,9 +566,15 @@ class QATestingAgent(_BaseTestingAgent):
                         'input_stats': input_stats,
                     },
                 )
-            except Exception as e:  # noqa: BLE001
-                self.logger.warning(f"save_phase_output failed: {e}")
-                warnings.append("QA test cases were not persisted to session memory.")
+            except Exception as e:  # noqa: BLE001 - re-raised below with context
+                self.logger.error(
+                    f"Failed to persist QA phase output for session "
+                    f"{session_id}: {e}"
+                )
+                raise RuntimeError(
+                    f"Failed to persist QA phase output for session "
+                    f"{session_id}: {e}"
+                ) from e
 
             # 12. Decision log — reflect actual coverage, not an assumed claim.
             type_dist = validation['signals'].get('type_distribution', {})
@@ -538,7 +586,6 @@ class QATestingAgent(_BaseTestingAgent):
                     f"traceability coverage: "
                     f"{validation['signals'].get('traceability_ratio')}"
                     + (" (degraded parse)" if parse_meta['degraded'] else "")
-                    + ("" if sync_ok else " (downstream sync failed)")
                 ),
                 self.config.name,
             )
@@ -1097,18 +1144,25 @@ class UATTestingAgent(_BaseTestingAgent):
             if validation['warnings']:
                 warnings.extend(validation['warnings'])
 
-            # 8. Downstream sync (isolated)
-            sync_ok = self._sync_downstream(
+            # 8. Downstream sync. Required for phase success — same
+            #    authoritative-persistence contract as QA. The helper
+            #    raises RuntimeError on any failure, propagating to the
+            #    outer boundary so the phase is reported as failed rather
+            #    than silently claiming completion.
+            self._sync_downstream(
                 session_id, "UAT", structured_scenarios, warnings
             )
 
-            # 9. Session + module resolution (explicit)
-            session = self._safe_memory_call(
-                agent_memory.session_service.get_session,
-                session_id,
-                default=None,
-                warnings=warnings,
-            )
+            # 9. Session lookup is required: the session carries the
+            #    project_name and module used in the document, and its
+            #    existence confirms the session has not been deleted
+            #    mid-run. A None here means the phase cannot correctly
+            #    persist, so we fail rather than fabricate a project name.
+            session = agent_memory.session_service.get_session(session_id)
+            if session is None:
+                raise RuntimeError(
+                    f"Cannot persist UAT scenarios: session {session_id} not found"
+                )
             project_name = getattr(session, 'project_name', None) or "ERP Project"
             module = getattr(session, 'module', None) or "ERP"
             if module == "ERP":
@@ -1126,7 +1180,12 @@ class UATTestingAgent(_BaseTestingAgent):
                 session_id=session_id,
             )
 
-            # 11. Persist phase output (isolated)
+            # 11. Persist phase output. Authoritative: the orchestrator
+            #     reads this via get_phase_output(session_id,
+            #     'uat_testing') to build the training phase's context and
+            #     the project summary. A failure here would leave
+            #     downstream consumers without the UAT output while the
+            #     phase reported success.
             try:
                 agent_memory.save_phase_output(
                     session_id,
@@ -1141,9 +1200,15 @@ class UATTestingAgent(_BaseTestingAgent):
                         'input_stats': input_stats,
                     },
                 )
-            except Exception as e:  # noqa: BLE001
-                self.logger.warning(f"save_phase_output failed: {e}")
-                warnings.append("UAT scenarios were not persisted to session memory.")
+            except Exception as e:  # noqa: BLE001 - re-raised below with context
+                self.logger.error(
+                    f"Failed to persist UAT phase output for session "
+                    f"{session_id}: {e}"
+                )
+                raise RuntimeError(
+                    f"Failed to persist UAT phase output for session "
+                    f"{session_id}: {e}"
+                ) from e
 
             # 12. Decision log — reflect real coverage
             role_coverage = validation['signals'].get('role_coverage', {})
@@ -1155,7 +1220,6 @@ class UATTestingAgent(_BaseTestingAgent):
                     f"acceptance criteria present: "
                     f"{validation['signals'].get('acceptance_criteria_ratio')}"
                     + (" (degraded parse)" if parse_meta['degraded'] else "")
-                    + ("" if sync_ok else " (downstream sync failed)")
                 ),
                 self.config.name,
             )

@@ -243,12 +243,6 @@ class TestMakeStorageKey:
         )
         assert key.count("/") == 2
 
-    @pytest.mark.skip(reason=(
-        "object_storage.make_storage_key does not currently strip null "
-        "bytes / truncate long filenames / sanitize session-id path "
-        "separators. Kept as a documented improvement target for the "
-        "object_storage review; re-enable when the module is fixed."
-    ))
     def test_null_byte_in_filename_is_removed(self):
         """A null byte in a filename is a classic injection vector for
         filesystems and some object stores. It must not survive into
@@ -267,12 +261,6 @@ class TestMakeStorageKey:
         assert key.startswith("projects/prj_1/doc1_")
         assert key.count("/") == 2
 
-    @pytest.mark.skip(reason=(
-        "object_storage.make_storage_key does not currently strip null "
-        "bytes / truncate long filenames / sanitize session-id path "
-        "separators. Kept as a documented improvement target for the "
-        "object_storage review; re-enable when the module is fixed."
-    ))
     def test_very_long_filename_is_truncated(self):
         """S3 keys can be up to 1024 bytes, but a key with a
         multi-megabyte filename would exceed that. The key must stay
@@ -285,12 +273,6 @@ class TestMakeStorageKey:
         assert key.startswith("projects/prj_1/doc1_")
         assert key.count("/") == 2
 
-    @pytest.mark.skip(reason=(
-        "object_storage.make_storage_key does not currently strip null "
-        "bytes / truncate long filenames / sanitize session-id path "
-        "separators. Kept as a documented improvement target for the "
-        "object_storage review; re-enable when the module is fixed."
-    ))
     def test_path_separator_in_session_id_is_neutralized(self):
         """A session_id is not supposed to contain separators, but if a
         caller passes one (a malformed input from a different code

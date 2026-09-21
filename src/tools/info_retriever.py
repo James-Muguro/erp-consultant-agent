@@ -23,6 +23,15 @@ Responsibilities:
       friends) from externally fetched text, since the synthesis prompt's
       injection defense relies on those markers being intact.
 
+  Normalization is intentionally permissive about the shape each source
+  emits. KB entries may be native dicts (`type` in module/concept/erp),
+  langchain-style Documents (`{"page_content": ..., "metadata": {...}}`),
+  or plain objects exposing `page_content` / `content` / `text`. Memory
+  entries may be `MemoryEntry` objects (via `.to_dict()`) or plain dicts.
+  Whatever form arrives, a compact prompt-ready string is produced; source
+  metadata (title/source/url) is preserved as a prefix when present and is
+  never invented.
+
 Caching: not implemented here. A repeated query hits SerpAPI again.
 Adding a TTL cache (e.g. cachetools.TTLCache keyed on
 (query, prefer_web, session_id)) would reduce external cost; left as a
@@ -31,7 +40,7 @@ follow-up because cache-invalidation semantics deserve their own review.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.config.settings import settings
 from src.memory.project_memory import project_memory_store
@@ -81,6 +90,19 @@ _PROMPT_MARKER_ESCAPE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Content keys, in preference order, that a retrieval record may use to
+# carry its text. Covers native KB entries ("description" is handled
+# separately in _format_kb_hit), langchain Documents ("page_content"),
+# OpenAI-style retrieval records ("content"/"text"), and common snippet
+# shapes. Anything not listed here still falls through to the key=value
+# dump, so no previously-working shape is lost.
+_CONTENT_KEYS: Tuple[str, ...] = (
+    "content", "text", "snippet", "answer", "summary", "body", "page_content",
+)
+
+# Metadata keys that carry a human-readable label for the record.
+_TITLE_KEYS: Tuple[str, ...] = ("title", "source", "url")
+
 # Small English stopword list for query tokenization. Not exhaustive - the
 # goal is to avoid the pathological case where a natural-language
 # question's function words dominate a keyword search on project memory.
@@ -121,19 +143,104 @@ def _get_google_search_tool():
 # ---------------------------------------------------------------------------
 def _sanitize_external_text(text: Any) -> str:
     """Neutralize prompt-marker escape sequences in externally-sourced
-    text. Returns a string (empty for None)."""
+    text. Returns a string (empty for None).
+
+    Also strips null bytes: they serve no purpose in prompt text and
+    several downstream sinks (log forwarders, JSON writers) reject them.
+    """
     if text is None:
         return ""
     if not isinstance(text, str):
         text = str(text)
+    text = text.replace("\x00", "")
     return _PROMPT_MARKER_ESCAPE_PATTERN.sub("[removed-marker]", text)
+
+
+def _is_meaningful(value: Any) -> bool:
+    """True when `value` carries non-empty information for the key=value
+    fallback. Defined explicitly rather than via membership in a tuple to
+    avoid pathological `__eq__` on exotic types."""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, dict, tuple, set)):
+        return len(value) > 0
+    return True
+
+
+def _extract_title_and_content(obj: Any) -> Optional[Tuple[Optional[str], str]]:
+    """Return (title, content) for a dict- or attribute-shaped record,
+    or None if no usable content is found.
+
+    Recognizes the content shapes the retrieval sources have actually
+    emitted: dicts and objects that carry text under `content`, `text`,
+    `snippet`, `answer`, `summary`, `body`, or `page_content`. Title/
+    source/url is read from the same object if present at the top level,
+    otherwise from a nested `metadata` dict (langchain Document shape).
+
+    The title may legitimately be None; the caller decides whether to
+    prefix. Content is always returned as a non-empty string."""
+    if obj is None:
+        return None
+
+    if isinstance(obj, dict):
+        getter = obj.get
+        metadata = obj.get("metadata")
+    else:
+        def getter(key, default=None):
+            return getattr(obj, key, default)
+        metadata = getattr(obj, "metadata", None)
+
+    content: Optional[str] = None
+    for key in _CONTENT_KEYS:
+        value = getter(key, None)
+        if isinstance(value, str) and value.strip():
+            content = value
+            break
+    if content is None:
+        return None
+
+    title: Optional[str] = None
+    for key in _TITLE_KEYS:
+        value = getter(key, None)
+        if isinstance(value, str) and value.strip():
+            title = value
+            break
+    if title is None and isinstance(metadata, dict):
+        for key in _TITLE_KEYS:
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                title = value
+                break
+
+    return title, content
 
 
 def _format_kb_hit(hit: Any) -> Optional[str]:
     """Render a KB hit as a compact, prompt-ready string. Returns None
     for entries that can't be usefully rendered (so callers can filter
-    them out rather than emitting an empty bullet)."""
+    them out rather than emitting an empty bullet).
+
+    Native KB shapes (`type` in module/concept/erp) are handled first.
+    Any other shape - a langchain Document, an object exposing
+    `page_content`, or a dict carrying content under a common key - is
+    normalized via `_extract_title_and_content`. Only as a last resort
+    does the unknown-shape `key: value` dump fire."""
+    if hit is None:
+        return None
+
+    # Non-dict: try attribute-shaped content before falling back to
+    # str(obj) (which for langchain Documents produces a repr and leaks
+    # the metadata dict into the prompt).
     if not isinstance(hit, dict):
+        extracted = _extract_title_and_content(hit)
+        if extracted is not None:
+            title, content = extracted
+            content = _sanitize_external_text(content)
+            if title:
+                return f"{_sanitize_external_text(title.strip())}: {content.strip()}"
+            return content.strip()
         text = _sanitize_external_text(hit)
         return text or None
 
@@ -158,12 +265,22 @@ def _format_kb_hit(hit: Any) -> Optional[str]:
         vendor = _sanitize_external_text(hit.get("vendor", ""))
         return f"[erp] {name}" + (f" ({vendor})" if vendor else "")
 
+    # Dict carrying content under a common key (langchain Document,
+    # OpenAI-style record, snippet dict, ...).
+    extracted = _extract_title_and_content(hit)
+    if extracted is not None:
+        title, content = extracted
+        content = _sanitize_external_text(content)
+        if title:
+            return f"{_sanitize_external_text(title.strip())}: {content.strip()}"
+        return content.strip()
+
     # Unknown shape - fall back to a comma-joined key=value summary that
     # avoids the raw dict repr and stays readable.
     if hit:
         return "; ".join(
             f"{k}: {_sanitize_external_text(v)}"
-            for k, v in hit.items() if v not in (None, "", [], {})
+            for k, v in hit.items() if _is_meaningful(v)
         )
     return None
 
@@ -180,13 +297,31 @@ def _format_memory_hit(entry: Any) -> Optional[str]:
             entry = entry.to_dict()
         except Exception:  # noqa: BLE001 - fall through to str() path
             entry = None
+
     if isinstance(entry, dict):
         category = entry.get("category", "note")
         content = entry.get("content", "")
+        if not (isinstance(content, str) and content.strip()):
+            # The store's canonical key is `content`; some callers may
+            # have placed the text under another common key.
+            for key in _CONTENT_KEYS:
+                value = entry.get(key)
+                if isinstance(value, str) and value.strip():
+                    content = value
+                    break
         content = _sanitize_external_text(content)
         if not content:
             return None
         return f"[project memory / {category}] {content}"
+
+    # Non-dict, non-to_dict entry: try attribute-shaped content before
+    # the str() fallback.
+    extracted = _extract_title_and_content(entry)
+    if extracted is not None:
+        _, content = extracted
+        content = _sanitize_external_text(content)
+        if content:
+            return f"[project memory / note] {content}"
     text = _sanitize_external_text(entry)
     return text or None
 
@@ -309,7 +444,10 @@ def retrieve(
             kb_hits = []
         except Exception as e:  # noqa: BLE001
             payload['errors'].append('kb: error')
-            logger.exception("KB search failed")
+            # Warning, not exception: the underlying KB layer has already
+            # logged the failure; a duplicate full traceback here adds no
+            # diagnostic value.
+            logger.warning("KB search failed", error=str(e))
             kb_hits = []
 
         kb_formatted = [
@@ -341,9 +479,9 @@ def retrieve(
                         timeout_s=_MEMORY_SEARCH_TIMEOUT_SECONDS,
                     )
                     mem_hits = []
-                except Exception:  # noqa: BLE001
+                except Exception as e:  # noqa: BLE001
                     payload['errors'].append('memory: error')
-                    logger.exception("Memory search failed")
+                    logger.warning("Memory search failed", error=str(e))
                     mem_hits = []
 
                 mem_formatted = [
@@ -377,9 +515,9 @@ def retrieve(
                 timeout_s=_WEB_SEARCH_TIMEOUT_SECONDS,
             )
             web_txt = None
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             payload['errors'].append('web: error')
-            logger.exception("Web search failed")
+            logger.warning("Web search failed", error=str(e))
             web_txt = None
 
         if web_txt:

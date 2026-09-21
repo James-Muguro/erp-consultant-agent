@@ -88,6 +88,14 @@ class TrainingAgent:
     # document that looks official.
     MIN_SUBSTANTIVE_ARTIFACTS = 1
 
+    # Metadata keys the degraded parser attaches to structure dicts. They
+    # are structural bookkeeping (which path produced the content), not
+    # substantive training content — a dict whose only non-empty value is
+    # one of these is empty for the purposes of _has_substantive_content.
+    _SUBSTANTIVE_CHECK_METADATA_KEYS = frozenset({
+        'source', 'parse_meta', 'validation',
+    })
+
     # Phrases that indicate a step or procedure is not actually actionable.
     _GENERIC_STEP_PATTERNS = (
         r'^\s*log ?in(?: to the system)?\s*$',
@@ -151,13 +159,30 @@ class TrainingAgent:
             },
         )
 
-        # 1. Fetch session early (safe) — used for module + process map.
-        session = self._safe_memory_call(
-            agent_memory.session_service.get_session,
-            session_id,
-            default=None,
-            warnings=warnings,
-        )
+        # 1. Fetch session. This is required, not best-effort: the session
+        #    carries the module, the process map for grounding, and it is
+        #    the target of the phase-output persistence below. If it does
+        #    not exist, the phase cannot be reported as successful —
+        #    returning a document labelled "ERP" against a session that
+        #    was never verified would be misleading, and the subsequent
+        #    phase-output write would silently no-op (update_session
+        #    returns None for a missing session), leaving the phase
+        #    output missing while the phase reported success.
+        session = agent_memory.session_service.get_session(session_id)
+        if session is None:
+            duration = time.time() - start_time
+            msg = (
+                f"Cannot create training materials: session {session_id} "
+                "not found"
+            )
+            self.logger.error(msg)
+            metrics_collector.record_task(self.config.name, False, duration)
+            return {
+                'success': False,
+                'error': msg,
+                'warnings': warnings,
+                'duration': duration,
+            }
         module = self._resolve_module(session, warnings)
 
         # 2. Pre-flight: refuse if there is no grounding at all.
@@ -262,8 +287,21 @@ class TrainingAgent:
             if validation['warnings']:
                 warnings.extend(validation['warnings'])
 
-            # 10. Downstream sync (isolated)
-            sync_ok = self._sync_downstream(
+            # 10. Downstream sync. Required for phase success — the
+            #     training_step_records rows produced by
+            #     sync_training_steps_from_structured are the authoritative
+            #     structured view that the project summary, project
+            #     intelligence, /health, and the terminal learn_from_project
+            #     step read from. A silent failure here would let the phase
+            #     output JSON blob claim completion while the structured
+            #     view stays empty, and would risk teaching the system
+            #     content that never became authoritative project state.
+            #     The helper raises RuntimeError on any failure, propagating
+            #     to the outer boundary so the orchestrator's
+            #     `if result.get('success')` gate (which calls
+            #     learn_from_project only on success) correctly skips
+            #     learning for a failed phase.
+            self._sync_downstream(
                 session_id, structured_materials, warnings=warnings
             )
 
@@ -284,7 +322,13 @@ class TrainingAgent:
                     "to disk."
                 )
 
-            # 12. Persist phase output (isolated)
+            # 12. Persist phase output. Authoritative: the orchestrator
+            #     reads this via get_phase_output(session_id, 'training')
+            #     to build the project summary and the terminal learning
+            #     input. A failure here would leave downstream consumers
+            #     without the training output while the phase reported
+            #     success, and would teach the system from content that
+            #     never reached the authoritative phase state.
             try:
                 agent_memory.save_phase_output(
                     session_id,
@@ -301,9 +345,15 @@ class TrainingAgent:
                         'input_stats': input_stats,
                     },
                 )
-            except Exception as e:  # noqa: BLE001
-                self.logger.warning(f"save_phase_output failed: {e}")
-                warnings.append("Training materials were not persisted to session memory.")
+            except Exception as e:  # noqa: BLE001 - re-raised below with context
+                self.logger.error(
+                    f"Failed to persist training phase output for session "
+                    f"{session_id}: {e}"
+                )
+                raise RuntimeError(
+                    f"Failed to persist training phase output for session "
+                    f"{session_id}: {e}"
+                ) from e
 
             # 13. Decision log — reflect real artifact content, not an
             #     assumed claim.
@@ -318,7 +368,6 @@ class TrainingAgent:
                     f"step_count="
                     f"{validation['signals'].get('user_manual_step_count', 0)}"
                     + (" (degraded parse)" if parse_meta['degraded'] else "")
-                    + ("" if sync_ok else " (downstream sync failed)")
                 ),
                 self.config.name,
             )
@@ -797,6 +846,17 @@ class TrainingAgent:
     # Substantive-content check
     # ------------------------------------------------------------------ #
     def _has_substantive_content(self, materials: Dict[str, Any]) -> bool:
+        """True when at least one artifact carries real training content.
+
+        A dict artifact counts only if it carries at least one value
+        outside the metadata-key set and outside the empty containers
+        `([], {}, '', None)`. Excluding the metadata keys matters because
+        the degraded parser stamps `source: 'degraded_parse'` onto every
+        structure it returns; without this exclusion, an entirely empty
+        degraded parse would count as substantive and slip past the
+        refusal gate, letting the phase ship an official-looking document
+        that contains no actionable content.
+        """
         if not isinstance(materials, dict):
             return False
         artifacts = 0
@@ -805,12 +865,16 @@ class TrainingAgent:
             if not value:
                 continue
             if isinstance(value, dict):
-                # Non-empty dict counts, but a dict with only empty lists
-                # does not.
-                if any(v for v in value.values() if v not in ([], {}, '', None)):
+                substantive_values = [
+                    v for k, v in value.items()
+                    if k not in self._SUBSTANTIVE_CHECK_METADATA_KEYS
+                    and v not in ([], {}, '', None)
+                ]
+                if substantive_values:
                     artifacts += 1
-            elif isinstance(value, str) and value.strip():
-                artifacts += 1
+            elif isinstance(value, str):
+                if value.strip():
+                    artifacts += 1
             else:
                 artifacts += 1
         return artifacts >= self.MIN_SUBSTANTIVE_ARTIFACTS
@@ -824,24 +888,47 @@ class TrainingAgent:
         materials: Dict[str, Any],
         warnings: List[str],
     ) -> bool:
+        """Persist structured training steps via project_intelligence.
+
+        This is a required step for phase success, not a best-effort
+        notification: the training_step_records rows, TraceLinks to
+        requirements and process steps, and ProjectIssue rows that
+        sync_training_steps_from_structured writes are the authoritative
+        structured view the project summary, project intelligence, /health,
+        and the terminal learn_from_project step read from. A silent
+        failure here would let the phase output JSON blob claim completion
+        while the structured view stays empty, and would risk teaching the
+        system content that never became authoritative project state — the
+        orchestrator calls learn_from_project only when the phase reports
+        success, so a silent failure would seed project learning with
+        content that was never persisted.
+
+        Returns True on success. Raises RuntimeError on any failure,
+        including the module-import failure, so callers report the phase
+        as failed rather than returning a misleading success.
+        """
         try:
             from src.services import project_intelligence
         except Exception as e:  # noqa: BLE001
-            self.logger.warning(f"project_intelligence import failed: {e}")
-            warnings.append(
-                "Downstream project intelligence unavailable; training steps "
-                "were not synced."
-            )
-            return False
+            self.logger.error(f"project_intelligence import failed: {e}")
+            raise RuntimeError(
+                f"Training step persistence unavailable: could not import "
+                f"project_intelligence: {e}"
+            ) from e
         try:
             project_intelligence.sync_training_steps_from_structured(
                 session_id, materials
             )
             return True
         except Exception as e:  # noqa: BLE001
-            self.logger.warning(f"sync_training_steps_from_structured failed: {e}")
-            warnings.append("Training steps were not synced to project intelligence.")
-            return False
+            self.logger.error(
+                f"sync_training_steps_from_structured failed for session "
+                f"{session_id}: {e}"
+            )
+            raise RuntimeError(
+                f"Training step persistence failed for session "
+                f"{session_id}: {e}"
+            ) from e
 
     # ------------------------------------------------------------------ #
     # Document generation (each artifact isolated)

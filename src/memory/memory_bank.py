@@ -299,9 +299,12 @@ class MemoryBank:
         # Remove from storage
         del self.memories[entry_id]
         
-        # Delete file
-        memory_file = self.memory_dir / f"{entry_id}.json"
-        if memory_file.exists():
+        # Delete file, guarding against an entry_id whose on-disk path would
+        # resolve outside memory_dir. A file whose contents declared an
+        # unsafe entry_id could otherwise cause this call to unlink an
+        # arbitrary file.
+        memory_file = self._memory_file_path(entry_id)
+        if memory_file is not None and memory_file.exists():
             memory_file.unlink()
         
         self.logger.log_memory_operation("memory_deleted", {'entry_id': entry_id})
@@ -352,9 +355,53 @@ class MemoryBank:
             {'evicted_count': overflow, 'max_memory_items': max_items}
         )
 
+    def _memory_file_path(self, entry_id: str) -> Optional[Path]:
+        """Return the on-disk path for entry_id under memory_dir, or None
+        if entry_id would resolve outside memory_dir.
+
+        entry_id is composed directly into a file path in _save_memory and
+        delete_memory. Without this check, an entry_id containing a path
+        separator, a '..' component, or an absolute path -- supplied by a
+        caller or, in the worst case, loaded from a crafted JSON file in
+        memory_dir -- would let the operation read, write, or unlink files
+        outside the memory directory. Callers must handle None by skipping
+        the filesystem operation.
+
+        Uses Path.resolve() to canonicalize both the base directory and the
+        candidate path before comparing, so '..' components and symlinked
+        parents cannot bypass the check. Any filesystem or comparison error
+        is treated as unsafe.
+        """
+        try:
+            base = self.memory_dir.resolve()
+        except OSError:
+            return None
+        try:
+            candidate = (self.memory_dir / f"{entry_id}.json").resolve()
+        except OSError:
+            return None
+        try:
+            candidate.relative_to(base)
+        except ValueError:
+            return None
+        return candidate
+
     def _save_memory(self, entry: MemoryEntry):
-        """Save memory to disk"""
-        memory_file = self.memory_dir / f"{entry.entry_id}.json"
+        """Save memory to disk.
+
+        The on-disk path is validated via _memory_file_path so an entry_id
+        that would escape memory_dir is refused rather than written outside
+        it. Failing to persist is worse than silently writing to an
+        attacker-controlled path, so refusal is logged and the write is
+        skipped.
+        """
+        memory_file = self._memory_file_path(entry.entry_id)
+        if memory_file is None:
+            self.logger.warning(
+                f"Refusing to persist memory with unsafe entry_id: "
+                f"{entry.entry_id!r}"
+            )
+            return
         with open(memory_file, 'w') as f:
             json.dump(entry.to_dict(), f, indent=2, default=str)
     

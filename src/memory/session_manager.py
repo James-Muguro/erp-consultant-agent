@@ -525,13 +525,20 @@ class DbSessionService(InMemorySessionService):
     worked for sessions already loaded into this process's memory — here
     both go straight to the database.
 
-    Cascade behavior on delete: sessions have ON DELETE CASCADE on their
-    child FKs (see src/db/models.py). Postgres honors it unconditionally.
-    SQLite honors it only when PRAGMA foreign_keys=ON, which is a
-    per-connection setting — src/db/base.py is responsible for enabling it.
-    If it isn't enabled, delete_session() leaves orphaned rows in the
-    project_intelligence tables. Verify the pragma is active in any SQLite
-    deployment before relying on delete_session to clean up.
+    Deletion and referential integrity: delete_session() explicitly removes
+    rows from every session-referencing table whose FK relationship this
+    module can see (project_documents, project_memories, feedback) in the
+    correct child-before-parent order, then deletes the sessions row and
+    relies on the schema's ON DELETE CASCADE for the project_intelligence
+    tables. The earlier version assumed CASCADE covered ProjectMemory and
+    was wrong — production PostgreSQL raised ForeignKeyViolation on the
+    session delete because the child row still existed. That class of bug
+    is why the current version deletes each known child explicitly rather
+    than trusting the schema's cascade rules. If additional session-
+    referencing tables exist whose FK is not ON DELETE CASCADE, the fix
+    belongs in the schema (src/db/models.py / migration), not here; the
+    remaining alternative would be duplicated cleanup that silently
+    diverges from the schema.
     """
 
     def __init__(self):
@@ -685,18 +692,35 @@ class DbSessionService(InMemorySessionService):
             db.close()
 
     def delete_session(self, session_id: str) -> bool:
-        """Hard-delete a session and its associated objects.
+        """Hard-delete a session and every persisted artifact that
+        references it.
 
-        Explicitly deletes ProjectMemory and Feedback (they carry user-
-        attributable data that a caller may want to observe being removed,
-        and being explicit here makes the deletion auditable), and relies
-        on ON DELETE CASCADE for the project_intelligence tables. On SQLite
-        this requires PRAGMA foreign_keys=ON — see class docstring.
+        Deletion order (child before parent) matters: any session-
+        referencing table whose FK is not ON DELETE CASCADE will make the
+        parent delete fail with a ForeignKeyViolation if a child row still
+        exists. The earlier version of this method assumed CASCADE covered
+        ProjectMemory and hit exactly that failure in production. This
+        version explicitly deletes every child row this module can see —
+        project_documents, project_memories, feedback — before deleting
+        the sessions row, and relies on the schema's cascade only for the
+        project_intelligence tables that are not imported here.
 
-        Also removes uploaded project documents from object storage before
-        deleting their metadata rows; a failure to delete the storage
-        object is logged but does not prevent the DB delete, since leaving
-        orphaned storage is preferable to leaving a half-deleted session.
+        External storage is best-effort and intentionally outside the DB
+        transaction. Storage cleanup failures are logged and counted, and
+        the final log line reports any residual objects so an operator can
+        identify and retry them; the DB deletion still proceeds because
+        leaving orphaned storage is preferable to leaving a half-deleted
+        session. The objects that were successfully deleted are not
+        recoverable, but object-storage delete is idempotent, so a retry
+        via a fresh call to delete_session (if the DB still holds the
+        session) will harmlessly re-issue the deletes for any remaining
+        keys.
+
+        Idempotency: a second call after a successful first call returns
+        False because the session row is gone. Nothing about the second
+        call can affect another session — all queries are scoped by the
+        exact session_id, and there is no fallback path that could match
+        a different session.
         """
         from src.db.models import SessionRecord, ProjectMemory, Feedback, ProjectDocument
 
@@ -711,7 +735,12 @@ class DbSessionService(InMemorySessionService):
             if record is None:
                 return False
 
-            # 1. Best-effort object storage cleanup.
+            # 1. Best-effort object-storage cleanup, before the DB
+            #    transaction. We need the storage keys from ProjectDocument
+            #    rows while they still exist, so this step must run before
+            #    the DB delete. Failures are collected so the outcome of
+            #    the deletion can be reported accurately at the end.
+            storage_failures: List[str] = []
             if object_storage is not None:
                 storage_keys = [
                     row[0]
@@ -722,15 +751,28 @@ class DbSessionService(InMemorySessionService):
                 for storage_key in storage_keys:
                     try:
                         object_storage.delete_object(storage_key)
-                    except Exception:
-                        self.logger.exception(
+                    except Exception as e:  # noqa: BLE001 - external call
+                        storage_failures.append(storage_key)
+                        # The lower layer (object_storage.delete_object)
+                        # already logged the underlying provider error with
+                        # its own traceback. A duplicate traceback here
+                        # would just add noise; record the outcome instead.
+                        self.logger.warning(
                             "Failed to delete project document from object storage",
                             session_id=session_id,
                             storage_key=storage_key,
+                            error=str(e),
                         )
 
-            # 2. Explicit user-data cleanup for the tables we don't want to
-            #    leave to cascade.
+            # 2. Explicit child-row cleanup, in child-before-parent order.
+            #    Relying on CASCADE for these tables is the pattern that
+            #    produced the earlier production ForeignKeyViolation, so
+            #    each known session-referencing table is deleted explicitly
+            #    here. If a schema-level CASCADE also fires when the parent
+            #    is deleted, it will simply affect zero additional rows.
+            db.query(ProjectDocument).filter(
+                ProjectDocument.session_id == session_id
+            ).delete(synchronize_session=False)
             db.query(ProjectMemory).filter(
                 ProjectMemory.session_id == session_id
             ).delete(synchronize_session=False)
@@ -738,15 +780,38 @@ class DbSessionService(InMemorySessionService):
                 Feedback.session_id == session_id
             ).delete(synchronize_session=False)
 
-            # 3. Delete the session; cascade removes project_intelligence
-            #    rows if the DB enforces foreign keys.
+            # 3. Delete the parent session row. Any ON DELETE CASCADE
+            #    relationships declared in the schema (project_intelligence
+            #    tables not imported by this module) fire within the same
+            #    transaction, so commit lands all-or-nothing.
             db.delete(record)
             db.commit()
 
+            # 4. Cache invalidation after the DB transaction has durably
+            #    committed. If anything above raised, the cache is left
+            #    intact so the caller sees a consistent view.
             self.sessions.pop(session_id, None)
 
-            self.logger.info("Session deleted", session_id=session_id)
+            if storage_failures:
+                self.logger.warning(
+                    "Session deleted with residual storage objects",
+                    session_id=session_id,
+                    storage_failures=len(storage_failures),
+                )
+            else:
+                self.logger.info("Session deleted", session_id=session_id)
             return True
+        except Exception:
+            # Roll back the transaction explicitly so the connection is
+            # not returned to the pool mid-transaction. Object-storage
+            # deletions already performed are outside this boundary and
+            # are not rolled back — S3 delete is idempotent, so a retry of
+            # delete_session is safe.
+            try:
+                db.rollback()
+            except Exception:  # noqa: BLE001 - rollback must not mask the original error
+                pass
+            raise
         finally:
             db.close()
 

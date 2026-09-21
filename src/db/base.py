@@ -7,38 +7,6 @@ Postgres DSN (e.g. postgresql+psycopg2://user:pass@host:5432/dbname) in
 production - no code changes required, SQLAlchemy handles both dialects
 through the same engine/session interface.
 
-Notes on this revision:
-
-  * Schema-drift detection for local SQLite. create_all() only creates
-    missing tables; it never adds columns to existing ones. A developer
-    whose local DB predates a model change would otherwise see opaque
-    "no such column" errors from the first query that touches the new
-    column. _check_sqlite_schema_drift() compares Base.metadata to the
-    actual DB and logs a clear warning naming the missing columns and
-    the remedy. The check is derived from the models, so it can't go
-    stale as models gain or lose columns.
-
-  * Startup diagnostic. One INFO line at import time describing the
-    dialect, URL (password redacted), and pool sizing. Matches the
-    boot-time logging pattern used elsewhere (see
-    src/tools/knowledge/__init__.py, src/orchestrator_api.py).
-
-  * Pool sizing for Postgres is explicit and settings-overridable.
-    SQLAlchemy's default (pool_size=5, max_overflow=10 = 15 total
-    connections) is tight for a multi-worker deployment running agent
-    phases concurrently. SQLite ignores these because its pool model
-    does not accept them.
-
-  * expire_on_commit is documented rather than changed. SQLAlchemy's
-    default is True, meaning ORM objects are expired after commit and
-    attribute access reloads them from the DB. The codebase's pattern
-    (return IDs, not ORM objects, from mutation functions) works with
-    either setting; flipping it globally would be a silent behavior
-    change across the app, so it stays at the default with a note.
-
-  * The targeted SQLite ALTERs are wrapped in try/except so an odd
-    local-DB state (locked file, corrupt table) cannot take boot down.
-    The drift warning still fires, so the operator sees what happened.
 """
 from __future__ import annotations
 

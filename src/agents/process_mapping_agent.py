@@ -214,19 +214,31 @@ class ProcessMappingAgent:
                     + "; ".join(validation['issues'][:3])
                 )
 
-            # 9. Downstream sync — each step isolated so one failure doesn't
-            #    cascade and so partial syncs are visible.
+            # 9. Downstream sync. The structured process-step rows are what
+            #    downstream phases, /health, coverage, and baselines read
+            #    from; a phase that cannot persist them must not report
+            #    success, otherwise the session's authoritative structured
+            #    view stays empty while the phase output JSON blob claims
+            #    completion. Per-step requirement linking remains best-effort
+            #    inside _sync_downstream: one malformed code in one step must
+            #    not fail the whole phase.
             link_stats = self._sync_downstream(
                 session_id, process_name, structured_process, warnings
             )
 
-            # 10. Document
-            session = self._safe_memory_call(
-                agent_memory.session_service.get_session,
-                session_id,
-                default=None,
-                warnings=warnings,
-            )
+            # 10. Session + document. The session lookup is a hard
+            #     requirement: it is needed both for the document's
+            #     project_name and for the phase-output persistence in
+            #     step 11. The orchestrator already verified the session
+            #     exists before invoking map_process, so a None here means
+            #     the session disappeared mid-run or a DB-level failure
+            #     occurred — either way, the phase cannot be reported as
+            #     successful.
+            session = agent_memory.session_service.get_session(session_id)
+            if session is None:
+                raise RuntimeError(
+                    f"Cannot persist process map: session {session_id} not found"
+                )
             project_name = getattr(session, 'project_name', None) or "ERP Project"
 
             doc_path = doc_generator.generate_process_map(
@@ -237,24 +249,33 @@ class ProcessMappingAgent:
                 session_id=session_id,
             )
 
-            # 11. Persist on session (avoid mutating shared object in place)
-            if session is not None:
-                try:
-                    existing = dict(getattr(session, 'process_maps', None) or {})
-                    existing[process_name] = {
-                        'structured': structured_process,
-                        'raw_text': process_map_text,
-                        'document_path': doc_path,
-                        'timestamp': time.time(),
-                        'validation': validation,
-                        'warnings': warnings,
-                    }
-                    agent_memory.session_service.update_session(
-                        session_id, {'process_maps': existing}
-                    )
-                except Exception as e:  # noqa: BLE001
-                    self.logger.warning(f"Failed to persist process map on session: {e}")
-                    warnings.append("Process map was not persisted on the session object.")
+            # 11. Persist phase output on the session. This is the dict
+            #     that _select_phase_context and _check_prerequisites in
+            #     the orchestrator read via get_phase_output, so it is
+            #     authoritative — not best-effort. A failure here would
+            #     leave downstream phases thinking process mapping never
+            #     ran, so it is re-raised rather than downgraded to a
+            #     warning.
+            try:
+                existing = dict(getattr(session, 'process_maps', None) or {})
+                existing[process_name] = {
+                    'structured': structured_process,
+                    'raw_text': process_map_text,
+                    'document_path': doc_path,
+                    'timestamp': time.time(),
+                    'validation': validation,
+                    'warnings': warnings,
+                }
+                agent_memory.session_service.update_session(
+                    session_id, {'process_maps': existing}
+                )
+            except Exception as e:  # noqa: BLE001 - re-raised below with context
+                self.logger.error(
+                    f"Failed to persist process map on session {session_id}: {e}"
+                )
+                raise RuntimeError(
+                    f"Failed to persist process map on session {session_id}: {e}"
+                ) from e
 
             # 12. Decision log
             steps = structured_process.get('steps', []) or []
@@ -772,7 +793,7 @@ class ProcessMappingAgent:
             return default
 
     # ------------------------------------------------------------------ #
-    # Downstream sync (isolated)
+    # Downstream sync (primary sync is required; per-step linking is best-effort)
     # ------------------------------------------------------------------ #
     def _sync_downstream(
         self,
@@ -786,21 +807,35 @@ class ProcessMappingAgent:
         steps = structured_process.get('steps', []) or []
         stats['total_steps'] = len(steps)
 
+        # Primary sync is a required step: the structured process-step rows
+        # are what downstream phases, /health, coverage, and baselines read
+        # from. A failure here means the phase output JSON blob would claim
+        # completion while the authoritative structured view stays empty,
+        # so it is re-raised rather than downgraded to a warning. Per-step
+        # requirement linking below remains best-effort: one malformed
+        # requirement code in one step must not fail the whole phase.
         try:
             from src.services import project_intelligence
         except Exception as e:  # noqa: BLE001
-            self.logger.warning(f"project_intelligence import failed: {e}")
-            warnings.append("Downstream project intelligence unavailable; steps not synced.")
-            return stats
+            self.logger.error(f"project_intelligence import failed: {e}")
+            raise RuntimeError(
+                f"Process step persistence unavailable: could not import "
+                f"project_intelligence: {e}"
+            ) from e
 
         try:
             step_ids = project_intelligence.sync_process_steps_from_structured(
                 session_id, process_name, structured_process
             )
         except Exception as e:  # noqa: BLE001
-            self.logger.warning(f"sync_process_steps_from_structured failed: {e}")
-            warnings.append("Process steps were not synced to project intelligence.")
-            return stats
+            self.logger.error(
+                f"sync_process_steps_from_structured failed for session "
+                f"{session_id}, process {process_name}: {e}"
+            )
+            raise RuntimeError(
+                f"Process step persistence failed for session {session_id}, "
+                f"process {process_name}: {e}"
+            ) from e
 
         if not step_ids:
             warnings.append("No step IDs returned from project intelligence; linking skipped.")

@@ -272,18 +272,30 @@ class SolutionDesignAgent:
                     + "; ".join(validation['issues'][:3])
                 )
 
-            # 9. Downstream sync, isolated.
-            sync_ok = self._sync_downstream(
+            # 9. Downstream sync. Structured solution decisions are what
+            #    downstream phases (QA, UAT, training), /health, coverage,
+            #    baselines, and the traceability layer read from; a phase
+            #    that cannot persist them must not report success, otherwise
+            #    the phase output JSON blob claims completion while the
+            #    authoritative structured view stays empty. Per-step linking
+            #    is not part of this call — sync_solution_decisions_from_structured
+            #    is a single atomic operation — so a failure here is fatal.
+            self._sync_downstream(
                 session_id, structured_design, warnings=warnings
             )
 
-            # 10. Project/session lookup (safe)
-            session = self._safe_memory_call(
-                agent_memory.session_service.get_session,
-                session_id,
-                default=None,
-                warnings=warnings,
-            )
+            # 10. Session lookup is required: the session object carries the
+            #     project_name used in the document, and its existence
+            #     confirms the session has not been deleted mid-run. The
+            #     orchestrator already verified the session exists before
+            #     invoking design_solution, so a None here means the session
+            #     disappeared or a DB-level failure occurred — either way,
+            #     the phase cannot be reported as successful.
+            session = agent_memory.session_service.get_session(session_id)
+            if session is None:
+                raise RuntimeError(
+                    f"Cannot persist solution design: session {session_id} not found"
+                )
             project_name = getattr(session, 'project_name', None) or "ERP Project"
 
             # 11. Document generation
@@ -294,7 +306,13 @@ class SolutionDesignAgent:
                 session_id=session_id,
             )
 
-            # 12. Persist phase output (best-effort, isolated)
+            # 12. Persist phase output. This is the payload the orchestrator
+            #     reads via get_phase_output(session_id, 'solution_design')
+            #     to build downstream QA/UAT/training context, so it is
+            #     authoritative rather than best-effort. A failure here
+            #     would leave downstream phases without the design while
+            #     this phase reported success — the exact state
+            #     inconsistency the pipeline-integrity rule forbids.
             try:
                 agent_memory.save_phase_output(
                     session_id,
@@ -309,9 +327,15 @@ class SolutionDesignAgent:
                         'input_stats': input_stats,
                     },
                 )
-            except Exception as e:  # noqa: BLE001
-                self.logger.warning(f"save_phase_output failed: {e}")
-                warnings.append("Solution design was not persisted to session memory.")
+            except Exception as e:  # noqa: BLE001 - re-raised below with context
+                self.logger.error(
+                    f"Failed to persist solution design phase output for "
+                    f"session {session_id}: {e}"
+                )
+                raise RuntimeError(
+                    f"Failed to persist solution design phase output for "
+                    f"session {session_id}: {e}"
+                ) from e
 
             # 13. Decision log
             customizations = structured_design.get('customizations') or []
@@ -326,7 +350,6 @@ class SolutionDesignAgent:
                     f"Designed solution with {customization_count} customizations; "
                     f"standard-first ratio {standard_first}"
                     + (" (degraded parse)" if parse_meta['degraded'] else "")
-                    + ("" if sync_ok else " (downstream sync failed)")
                 ),
                 self.config.name,
             )
@@ -886,7 +909,7 @@ class SolutionDesignAgent:
             return default
 
     # ------------------------------------------------------------------ #
-    # Downstream sync
+    # Downstream sync (required — see step 9 in design_solution)
     # ------------------------------------------------------------------ #
     def _sync_downstream(
         self,
@@ -894,15 +917,30 @@ class SolutionDesignAgent:
         design: Dict[str, Any],
         warnings: List[str],
     ) -> bool:
+        """Persist structured solution decisions via project_intelligence.
+
+        This is a required step for phase success, not a best-effort
+        notification: the decision rows produced by
+        sync_solution_decisions_from_structured are what downstream phases
+        (QA, UAT, training), /health, coverage calculations, baselines, and
+        the traceability layer read from. A silent failure here would let
+        the phase output JSON blob claim completion while the authoritative
+        structured view stays empty, which is the state inconsistency the
+        pipeline-integrity rule forbids.
+
+        Returns True on success. Raises RuntimeError on any failure —
+        including the module-import failure — so design_solution's top-level
+        boundary reports the phase as failed rather than returning a
+        misleading success.
+        """
         try:
             from src.services import project_intelligence
         except Exception as e:  # noqa: BLE001
-            self.logger.warning(f"project_intelligence import failed: {e}")
-            warnings.append(
-                "Downstream project intelligence unavailable; solution "
-                "decisions were not synced."
-            )
-            return False
+            self.logger.error(f"project_intelligence import failed: {e}")
+            raise RuntimeError(
+                f"Solution decision persistence unavailable: could not import "
+                f"project_intelligence: {e}"
+            ) from e
 
         try:
             project_intelligence.sync_solution_decisions_from_structured(
@@ -910,9 +948,14 @@ class SolutionDesignAgent:
             )
             return True
         except Exception as e:  # noqa: BLE001
-            self.logger.warning(f"sync_solution_decisions_from_structured failed: {e}")
-            warnings.append("Solution decisions were not synced to project intelligence.")
-            return False
+            self.logger.error(
+                f"sync_solution_decisions_from_structured failed for session "
+                f"{session_id}: {e}"
+            )
+            raise RuntimeError(
+                f"Solution decision persistence failed for session "
+                f"{session_id}: {e}"
+            ) from e
 
     # ------------------------------------------------------------------ #
     # Context + prompt

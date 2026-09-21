@@ -9,36 +9,6 @@ Contract:
     results. Raises GoogleSearchError on any failure: missing package,
     missing API key, network error, timeout, or a SerpAPI error response.
 
-Design notes on this revision:
-
-  * The silent "DEV-STUB" fallback that used to be substituted when
-    `serpapi` wasn't installed has been removed. That stub made every
-    search appear to succeed, and the retriever forwarded its message to
-    the synthesis prompt as if it were real web content. The failure mode
-    is identical to the one llm_client.py was fixed for (per that file's
-    own docstring: "silently swallowed Gemini failures and returned fake
-    '[DEV STUB]' text instead of raising"). The tool now raises
-    GoogleSearchError, which the retriever's try/except turns into a
-    recorded source error and a KB-only answer.
-
-  * The call is bounded by a timeout AND by call_with_retries, so a slow
-    or transiently failing SerpAPI response does not hold the chat
-    thread and does not become a permanent failure on the first blip.
-
-  * SerpAPI error responses (`{"error": "..."}`) are detected and raised,
-    not swallowed. Previously an auth/quota error produced the same
-    "No organic results found" string as a legitimate empty result, so
-    an expired key was indistinguishable from a search that found
-    nothing.
-
-  * A small TTL cache bounds external cost when the same query is asked
-    repeatedly within a short window. Process-local.
-
-  * The `organic_results` list is filtered to remove entries where every
-    field is missing or 'N/A', so a page full of stub results produces
-    an empty string (callers treat as "no results") rather than a
-    wrapper of "N/A" lines.
-
 Configuration (falls back to defaults if the settings field doesn't exist):
     settings.web_search_timeout_seconds        default 10
     settings.web_search_retry_attempts         default 2
@@ -104,6 +74,23 @@ class GoogleSearchError(Exception):
     this as a source-level failure: they should record it and continue
     with whatever other sources produced, not surface the error text to
     the user as if it were content."""
+
+
+# ---------------------------------------------------------------------------
+# Field coercion
+# ---------------------------------------------------------------------------
+def _as_field_string(value: Any) -> str:
+    """Coerce a SerpAPI result field to a string.
+
+    Only strings are accepted. Any other type - int, float, list, dict,
+    or None - is treated as missing and returns "". This prevents a
+    malformed individual record from crashing formatting with
+    AttributeError and taking down valid sibling records in the same
+    response. Does NOT fabricate content: missing stays missing.
+    """
+    if isinstance(value, str):
+        return value.strip()
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -290,19 +277,28 @@ class GoogleSearchTool:
 
         Entries where every field is missing or 'N/A' are dropped: a
         result page with only stub entries yields an empty string, which
-        the caller treats as "no usable results." """
+        the caller treats as "no usable results."
+
+        Fields are coerced with `_as_field_string`, so a malformed
+        individual record (non-string title/link/snippet) is skipped
+        rather than crashing formatting and losing the response's valid
+        siblings. A malformed-record count is logged at DEBUG so the
+        condition is observable without spamming normal runs."""
         formatted: List[str] = []
+        skipped = 0
 
         for result in organic_results[:_MAX_RESULTS_RETURNED]:
             if not isinstance(result, dict):
+                skipped += 1
                 continue
 
-            title = (result.get("title") or "").strip()
-            link = (result.get("link") or "").strip()
-            snippet = (result.get("snippet") or "").strip()
+            title = _as_field_string(result.get("title"))
+            link = _as_field_string(result.get("link"))
+            snippet = _as_field_string(result.get("snippet"))
 
             # Skip entries with no usable content.
             if not any([title, link, snippet]):
+                skipped += 1
                 continue
 
             parts = []
@@ -313,5 +309,12 @@ class GoogleSearchTool:
             if snippet:
                 parts.append(f"Snippet: {snippet}")
             formatted.append("\n".join(parts))
+
+        if skipped:
+            logger.debug(
+                "Skipped malformed search results",
+                skipped=skipped,
+                kept=len(formatted),
+            )
 
         return "\n---\n".join(formatted)
