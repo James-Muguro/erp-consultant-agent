@@ -1392,12 +1392,26 @@ def download_document(
     filename: str,
     current_user: User = Depends(get_current_user),
 ):
+    """Download a generated document.
+
+    The URL path identifies the artifact by `filename`, but the filename
+    is NOT part of the GeneratedDocument logical identity - the writer
+    mints a fresh filename on every regeneration (see sub-stage 1 of the
+    document-integrity hardening). The requested filename is therefore
+    used only as a *pointer*: it resolves to the row it names, that row's
+    (phase, label) establishes the logical identity, and the CURRENT
+    (is_current=True) artifact for that identity is what gets returned.
+
+    This guarantees the endpoint never serves a superseded (stale)
+    artifact when a newer current artifact exists for the same logical
+    document, without changing the endpoint's public signature."""
     _get_owned_session(session_id, current_user)
 
     db = SessionLocal()
     try:
         from src.db.models import GeneratedDocument
-        record = (
+
+        requested = (
             db.query(GeneratedDocument)
             .filter(
                 GeneratedDocument.session_id == session_id,
@@ -1405,16 +1419,91 @@ def download_document(
             )
             .first()
         )
+        if not requested:
+            raise HTTPException(
+                status_code=404,
+                detail="Document not found for this session",
+            )
+
+        # The row we found may be the current row or a historical one;
+        # either way, its (phase, label) is the logical identity. Now
+        # fetch the current artifact for that exact identity. Filtering
+        # on session_id, phase, label, and is_current together is what
+        # makes the selection deterministic and session-isolated.
+        requested_phase = requested.phase
+        requested_label = requested.label
+
+        current_rows = (
+            db.query(GeneratedDocument)
+            .filter(
+                GeneratedDocument.session_id == session_id,
+                GeneratedDocument.phase == requested_phase,
+                GeneratedDocument.label == requested_label,
+                GeneratedDocument.is_current.is_(True),
+            )
+            .limit(2)
+            .all()
+        )
     finally:
         db.close()
 
-    if not record:
-        raise HTTPException(status_code=404, detail="Document not found for this session")
+    if not current_rows:
+        # Stale-only state: the requested filename exists, but no row for
+        # its logical identity is current. Do not fall back to the stale
+        # row - that would recreate the exact defect this endpoint is
+        # hardened against. Use the endpoint's existing 404 behavior.
+        logger.warning(
+            "Generated document requested but no current artifact exists",
+            session_id=session_id,
+            requested_filename=filename,
+            phase=requested_phase,
+            label=requested_label,
+        )
+        raise HTTPException(
+            status_code=404,
+            detail="Document not found for this session",
+        )
+
+    if len(current_rows) > 1:
+        # Database-integrity violation: two rows claim to be current for
+        # the same logical identity. Selecting one arbitrarily would hide
+        # the violation and could serve the wrong artifact. Fail
+        # explicitly so the state can be repaired. The GeneratedDocument
+        # model does not currently enforce "one current row per identity"
+        # at the DB level; this is the read-side guard until it does.
+        logger.error(
+            "Multiple current artifacts for the same logical document identity",
+            session_id=session_id,
+            requested_filename=filename,
+            phase=requested_phase,
+            label=requested_label,
+            current_row_ids=[r.id for r in current_rows],
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Document integrity violation: multiple current artifacts "
+                "exist for this document identity."
+            ),
+        )
+
+    current = current_rows[0]
+
+    logger.info(
+        "Serving current generated document",
+        session_id=session_id,
+        requested_filename=filename,
+        served_filename=current.filename,
+        phase=current.phase,
+        label=current.label,
+        document_id=current.id,
+        redirected=current.filename != filename,
+    )
 
     return Response(
-        content=record.content,
-        media_type=record.content_type,
-        headers=_attachment_headers(record.filename),
+        content=current.content,
+        media_type=current.content_type,
+        headers=_attachment_headers(current.filename),
     )
 
 

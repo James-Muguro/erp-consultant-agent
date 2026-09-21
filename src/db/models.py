@@ -66,7 +66,14 @@ class SessionRecord(Base):
     session_id = Column(String, primary_key=True)
     # Nullable for backward compatibility with sessions created before Stage 2
     # (auth) existed. Every session created from this point on always sets it.
-    user_id = Column(String, ForeignKey("users.id"), nullable=True, index=True)
+    # ON DELETE SET NULL matches the database constraint established by
+    # migration 9ec08dd1761d, so a user deletion nulls this reference
+    # rather than blocking the delete.
+    user_id = Column(
+        String,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
     project_name = Column(String, index=True, nullable=False)
     module = Column(String, nullable=False)
     erp_system = Column(String, nullable=False)
@@ -109,7 +116,13 @@ class Feedback(Base):
     __tablename__ = "feedback"
 
     id = Column(String, primary_key=True)
-    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    # ON DELETE SET NULL + nullable matches migration 9ec08dd1761d: a user
+    # deletion nulls this reference rather than blocking the delete.
+    user_id = Column(
+        String,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
     session_id = Column(
         String, ForeignKey("sessions.session_id", ondelete="CASCADE"),
         nullable=True, index=True,
@@ -129,7 +142,41 @@ class GeneratedDocument(Base):
     (output/documents/), which is wiped on every Render redeploy or
     free-tier idle-restart - this table is the fix. The actual file
     bytes live here; local disk is now only a transient scratch space
-    used during generation, never the source of truth for downloads."""
+    used during generation, never the source of truth for downloads.
+
+    Regeneration lifecycle: the platform's overarching principle is
+    history-over-overwrite (see SolutionBaseline), so a regenerated
+    document does not delete the prior row - the prior row has
+    is_current flipped to False and remains queryable as history.
+    `is_current` is therefore the single authoritative selector for the
+    artifact a user should receive: download logic MUST filter on
+    is_current = True for the given (session_id, phase, label). The
+    composite index ix_generated_documents_session_phase_label backs
+    that lookup. `updated_at` exists so a same-second regeneration has
+    a deterministic ordering key if a full history is ever displayed.
+
+    Logical artifact identity is (session_id, phase, label). This is
+    derived from the existing callers, not invented here: `phase` is
+    the document-type/phase identifier and `label` carries the
+    instance (e.g. a process name for process-mapping phase, or the
+    phase constant itself for singleton documents).
+
+    The invariant "at most one current row per logical identity" is
+    enforced at the database level by a partial unique index over
+    (session_id, phase, label) WHERE is_current. Historical rows
+    (is_current=False) are exempt, so a regenerated document coexists
+    with its predecessors. The writer still flips the prior row's
+    is_current to False before inserting the new current row (so the
+    common sequential case succeeds without a conflict), and the
+    database constraint is what guarantees safety when two concurrent
+    regenerations race - one transaction will raise IntegrityError,
+    which the writer must surface as a real persistence failure rather
+    than swallow.
+
+    Physical artifact cleanup (deleting bytes on disk for a row that
+    has been superseded) is NOT this model's responsibility - see the
+    storage layer. This model only tracks metadata and content bytes.
+    """
     __tablename__ = "generated_documents"
 
     id = Column(String, primary_key=True)
@@ -139,6 +186,16 @@ class GeneratedDocument(Base):
     )
     phase = Column(String, nullable=False)
     label = Column(String, nullable=False)
+    # The authoritative artifact for a logical document. At most one
+    # row per (session_id, phase, label) may have is_current=true;
+    # the partial unique index below enforces this at the database
+    # level. Regeneration flips the prior row to False and inserts a
+    # new True row in the same transaction. server_default is provided
+    # so the migration backfilling pre-existing rows is trivial.
+    is_current = Column(
+        Boolean, nullable=False, default=True,
+        server_default=text("true"), index=True,
+    )
     filename = Column(String, nullable=False)
     content_type = Column(
         String, nullable=False,
@@ -146,6 +203,41 @@ class GeneratedDocument(Base):
     )
     content = Column(LargeBinary, nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    # Set on every write. Populated for pre-existing rows by the
+    # migration from created_at. Provides a deterministic tie-breaker
+    # for same-second regenerations and a stable ordering key if the
+    # full version history is ever rendered.
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, default=_utcnow,
+        onupdate=_utcnow,
+    )
+
+    __table_args__ = (
+        # Backs the "select the current artifact for this logical
+        # document" query: WHERE session_id=? AND phase=? AND label=?
+        # (AND is_current=true). The single-column session_id index
+        # above remains for cross-phase scans.
+        Index(
+            "ix_generated_documents_session_phase_label",
+            "session_id", "phase", "label",
+        ),
+        # Database-enforced invariant: at most one CURRENT row per
+        # logical document identity (session_id, phase, label).
+        # Historical rows (is_current=False) are exempt from the
+        # constraint, so a regenerated document coexists with its
+        # predecessors. This is what makes concurrent regenerations
+        # safe: if two transactions both try to insert/keep a current
+        # row for the same identity, one succeeds and the other raises
+        # IntegrityError, which the writer must surface as a real
+        # persistence failure rather than swallow.
+        Index(
+            "ix_generated_documents_session_phase_label_current",
+            "session_id", "phase", "label",
+            unique=True,
+            postgresql_where=text("is_current"),
+            sqlite_where=text("is_current"),
+        ),
+    )
 
 
 class ProjectDocument(Base):
@@ -173,7 +265,13 @@ class ProjectDocument(Base):
         String, ForeignKey("sessions.session_id", ondelete="CASCADE"),
         nullable=False, index=True,
     )
-    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    # ON DELETE SET NULL + nullable matches migration 9ec08dd1761d: a user
+    # deletion nulls this reference rather than blocking the delete.
+    user_id = Column(
+        String,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
     filename = Column(String, nullable=False)
     storage_key = Column(String, nullable=False, unique=True)
     content_type = Column(String, nullable=False)
@@ -284,6 +382,18 @@ class RequirementItemRecord(Base):
         # failure rather than a silent traceability bug.
         UniqueConstraint("session_id", "external_code",
                          name="uq_requirement_session_external_code"),
+        # Database-enforced invariant: at most one CURRENT version per
+        # lineage. Historical versions (is_current=False) are exempt and
+        # may accumulate without limit. Established by migration
+        # 8b69bcaa614c. The single-column lineage_id index from the
+        # column declaration above remains for history lookups.
+        Index(
+            "ix_requirement_items_lineage_current",
+            "lineage_id",
+            unique=True,
+            postgresql_where=text("is_current"),
+            sqlite_where=text("is_current"),
+        ),
     )
 
 
@@ -337,6 +447,18 @@ class ProcessStepRecord(Base):
         # single row.
         UniqueConstraint("session_id", "external_code",
                          name="uq_process_step_session_external_code"),
+        # Database-enforced invariant: at most one CURRENT version per
+        # lineage. Historical versions (is_current=False) are exempt.
+        # Established by migration 598aff673b1b. The single-column
+        # lineage_id index from the column declaration above remains
+        # for history lookups.
+        Index(
+            "ix_process_steps_lineage_current",
+            "lineage_id",
+            unique=True,
+            postgresql_where=text("is_current"),
+            sqlite_where=text("is_current"),
+        ),
     )
 
 
@@ -385,6 +507,18 @@ class SolutionDecision(Base):
 
     __table_args__ = (
         Index("ix_solution_decisions_session_type", "session_id", "decision_type"),
+        # Database-enforced invariant: at most one CURRENT version per
+        # lineage. Historical versions (is_current=False) are exempt.
+        # Established by migration 8b69bcaa614c. The single-column
+        # lineage_id index from the column declaration above remains
+        # for history lookups.
+        Index(
+            "ix_solution_decisions_lineage_current",
+            "lineage_id",
+            unique=True,
+            postgresql_where=text("is_current"),
+            sqlite_where=text("is_current"),
+        ),
     )
 
 
@@ -530,7 +664,13 @@ class ReviewAction(Base):
         String, ForeignKey("sessions.session_id", ondelete="CASCADE"),
         nullable=False, index=True,
     )
-    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    # ON DELETE SET NULL + nullable matches migration 9ec08dd1761d: a user
+    # deletion nulls this reference rather than blocking the delete.
+    user_id = Column(
+        String,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     object_type = Column(String, nullable=False)  # requirement, solution_decision, process_step
     object_id = Column(String, nullable=False)
     action = Column(String, nullable=False)  # approved, rejected, corrected

@@ -3,27 +3,12 @@ Document Generator Tool - Creates formatted Word documents for ERP projects,
 persisted durably in Postgres (see GeneratedDocument) rather than relying on
 local disk, which Render wipes on every redeploy or free-tier idle-restart.
 
-Rendering note:
-
-  Every agent's structured output is a superset of what earlier versions of
-  this file rendered. The schema work done across the agent reviews added
-  fields the agents are instructed to fill (rationale, source, status,
-  open_questions, per-step preconditions/verification/common_errors, UAT
-  user_role/business_process/acceptance_criteria, structured decision and
-  integration points, master_data, security, technical_specs, and so on).
-  Before this revision most of those were silently dropped from the
-  rendered .docx, which meant the delivered document was thinner than the
-  data behind it. The added sections below close that gap.
-
-  Design principles preserved from the original:
-    - Section headings and "None specified." fallback for empty lists are
-      unchanged in style.
-    - Every pre-existing section still renders exactly as before.
-    - The structure is a formatting layer over structured data - no new
-      derivation of content happens here.
 """
 from __future__ import annotations
 
+import hashlib
+import os
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,6 +23,158 @@ from src.config.settings import settings
 from src.utils.logger import AgentLogger
 
 ACCENT_COLOR = RGBColor(0x1F, 0x5F, 0x4A)  # matches the frontend's pine-green accent
+
+
+# ----------------------------------------------------------------------
+# Filename / path-component safety
+#
+# The local file is transient (see module docstring); the durable artifact
+# lives in Postgres. But the file on disk is the *source bytes* copied into
+# that durable record by _persist_to_db, so its path must be deterministic,
+# session-isolated, and incapable of escaping self.output_dir even when
+# upstream values (project name, process name, session ID) are untrusted.
+# ----------------------------------------------------------------------
+
+_UNSAFE_CHARS_RE = re.compile(r'[\x00-\x1f\x7f]')   # NUL, C0 controls, DEL
+_PATH_SEPS_RE = re.compile(r'[\\/]+')                # /, \, and runs thereof
+_WHITESPACE_RE = re.compile(r'\s+')
+
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {'CON', 'PRN', 'AUX', 'NUL'}
+    | {f'COM{i}' for i in range(1, 10)}
+    | {f'LPT{i}' for i in range(1, 10)}
+)
+
+
+def _truncate_utf8(text: str, max_bytes: int) -> str:
+    """Truncate `text` to fit within `max_bytes` once UTF-8 encoded,
+    without splitting a multi-byte codepoint. Returns "" if even one
+    codepoint does not fit."""
+    encoded = text.encode('utf-8')
+    if len(encoded) <= max_bytes:
+        return text
+    cut = encoded[:max_bytes]
+    while cut:
+        try:
+            return cut.decode('utf-8')
+        except UnicodeDecodeError:
+            cut = cut[:-1]
+    return ""
+
+
+def _sanitize_component(
+    value: Any,
+    *,
+    fallback: str,
+    max_bytes: int = 64,
+) -> str:
+    """Produce a safe, single path-component from an untrusted string.
+
+    Guarantees:
+      * no path separators (`/`, `\\`) remain
+      * no NUL bytes or other control characters
+      * empty / whitespace-only / all-punctuation inputs yield `fallback`
+      * leading/trailing `.` and `-` are stripped (no hidden files, no `..`)
+      * Windows reserved device names are escaped with a leading `_`
+      * length is bounded to `max_bytes` (UTF-8), with a short hash suffix
+        so two distinct long inputs sharing a prefix do not collide
+      * valid Unicode is preserved (no transliteration)
+
+    The returned value is a single filename component. It never contains
+    a separator and can never resolve outside of its parent directory.
+    """
+    if value is None:
+        return fallback
+    text = str(value)
+
+    # Strip control chars (incl. NUL) — these can truncate or confuse the FS.
+    text = _UNSAFE_CHARS_RE.sub('', text)
+
+    # Normalize whitespace runs (incl. tabs, newlines) to '_'.
+    text = _WHITESPACE_RE.sub('_', text.strip())
+
+    # Collapse path separators to a single '-' so no separator survives.
+    text = _PATH_SEPS_RE.sub('-', text)
+
+    # Strip leading/trailing '.' and '-' — kills '..', hidden files, and
+    # empty-looking residue from separator collapsing.
+    text = text.strip('.-')
+
+    if not text:
+        return fallback
+
+    # Windows reserved device name (even with an extension).
+    stem = text.split('.', 1)[0].upper()
+    if stem in _WINDOWS_RESERVED_NAMES:
+        text = f"_{text}"
+
+    # Byte-aware length bounding with a hash suffix for uniqueness.
+    encoded = text.encode('utf-8')
+    if len(encoded) > max_bytes:
+        digest = hashlib.sha256(str(value).encode('utf-8')).hexdigest()[:8]
+        suffix = f"_{digest}"
+        budget = max_bytes - len(suffix.encode('ascii'))
+        head = _truncate_utf8(text, max(0, budget))
+        text = f"{head}{suffix}"
+
+    return text
+
+
+def _process_scoped_label(base: str, process_name: Any) -> str:
+    """Compose a deterministic, collision-safe `label` for a generated
+    document whose logical identity within GeneratedDocument is scoped to
+    a specific process (e.g. a training user manual for a named process).
+
+    GeneratedDocument's logical identity is (session_id, phase, label).
+    Using a constant label like "user_manual" for every process would
+    collapse two distinct processes' manuals into one logical document:
+    regenerating process B would supersede process A's current artifact.
+
+    The label produced here:
+      * is stable across regenerations of the same process name (so the
+        second generation supersedes the first rather than creating a
+        new logical artifact),
+      * differs between distinct process names, including names whose
+        filesystem-safe sanitizations coincide (e.g. `Procure / Pay` and
+        `Procure \\ Pay` both sanitize to `Procure-Pay` in the filename
+        helper — the short digest of the raw pre-sanitization string
+        disambiguates them here),
+      * contains no path separators, NUL bytes, or control characters,
+      * is bounded (sanitized name part capped at 48 UTF-8 bytes; total
+        label stays well below any practical VARCHAR / TEXT bound).
+
+    The digest is computed from the raw `process_name`, not its sanitized
+    form, so two distinct raw inputs cannot collide on the digest merely
+    because sanitization made them equal.
+    """
+    safe = _sanitize_component(process_name, fallback="unnamed", max_bytes=48)
+    digest = hashlib.sha256(str(process_name).encode('utf-8')).hexdigest()[:8]
+    return f"{base}_{safe}_{digest}"
+
+
+def _atomic_save_docx(doc: Document, final_path: Path) -> None:
+    """Save a python-docx Document to `final_path` atomically.
+
+    Writes to a uniquely-named temp sibling in the same directory and then
+    `os.replace`s into place. os.replace is atomic on POSIX and on Windows
+    (same volume), so a crash mid-write cannot leave a truncated file at
+    `final_path` that a subsequent reader could mistake for a complete
+    artifact, and concurrent writers cannot interleave partial bytes.
+
+    On failure the temp file is cleaned up on a best-effort basis and the
+    original exception is re-raised unchanged.
+    """
+    tmp_path = final_path.parent / f".{final_path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        doc.save(str(tmp_path))
+        os.replace(str(tmp_path), str(final_path))
+    except BaseException:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _utcnow() -> datetime:
@@ -188,30 +325,84 @@ class DocumentGenerator:
     # Persistence
     # ------------------------------------------------------------------
     def _persist_to_db(self, session_id: str, phase: str, label: str, filepath: str) -> None:
-        """Read the just-written file's bytes and store them in Postgres.
+        """Persist the just-written document to Postgres and enforce the
+        GeneratedDocument lifecycle contract: exactly one is_current=True
+        row per logical artifact identity (session_id, phase, label).
+
         This, not the local file, is the durable source of truth used by
         download_document - the local copy is transient and may not exist
-        by the time someone downloads it, especially after a redeploy."""
+        by the time someone downloads it, especially after a redeploy.
+
+        Regeneration is atomic within a single transaction:
+            1. UPDATE the prior current row(s) for the exact identity,
+               setting is_current=False
+            2. INSERT the new row with is_current=True
+            3. COMMIT both as one logical operation
+
+        If step 2 fails, the transaction is rolled back and the prior
+        current row remains is_current=True - a failed regeneration must
+        never leave the identity without a current artifact.
+
+        The WHERE clause on step 1 is scoped to the exact
+        (session_id, phase, label) so this cannot clear another label's
+        current row, nor another session's row. Historical rows are only
+        touched on the is_current flag and their own updated_at; content
+        and created_at are never modified.
+        """
+        from sqlalchemy import update as sa_update
+
         from src.db.base import SessionLocal
         from src.db.models import GeneratedDocument
 
         with open(filepath, 'rb') as f:
             content = f.read()
 
+        new_id = uuid.uuid4().hex
+
         db = SessionLocal()
         try:
+            # Step 1: clear the current row(s) for THIS exact logical
+            # identity. A single bulk UPDATE issued immediately inside the
+            # transaction that will also carry the INSERT. If the INSERT
+            # fails below, the rollback undoes this UPDATE too.
+            db.execute(
+                sa_update(GeneratedDocument)
+                .where(
+                    GeneratedDocument.session_id == session_id,
+                    GeneratedDocument.phase == phase,
+                    GeneratedDocument.label == label,
+                    GeneratedDocument.is_current.is_(True),
+                )
+                .values(is_current=False, updated_at=_utcnow())
+            )
+
+            # Step 2: insert the new current row.
             record = GeneratedDocument(
-                id=uuid.uuid4().hex,
+                id=new_id,
                 session_id=session_id,
                 phase=phase,
                 label=label,
+                is_current=True,
                 filename=Path(filepath).name,
                 content=content,
             )
             db.add(record)
+
+            # Step 3: commit both as one transaction.
             db.commit()
+        except Exception:
+            # Roll back so a failed insert does not leave the prior
+            # current row already cleared.
+            db.rollback()
+            raise
         finally:
             db.close()
+
+        self.logger.log_tool_usage(
+            "persist_generated_document",
+            {'session': session_id, 'phase': phase, 'label': label},
+            f"Persisted document {new_id}",
+        )
 
     def _save(
         self,
@@ -222,13 +413,41 @@ class DocumentGenerator:
         phase: Optional[str] = None,
         label: Optional[str] = None,
     ) -> str:
-        safe_name = name.replace(' ', '_').replace('/', '-')
-        filename = f"{prefix}_{safe_name}_{_utcnow().strftime('%Y%m%d_%H%M%S')}.docx"
+        """Save `doc` to a deterministic, session-isolated, path-safe file.
+
+        Artifact identity is:
+            <doc-type prefix> + <sanitized session_id> + <sanitized name>
+            + <UTC timestamp>  + <short uuid>
+        Each field is sanitized independently so a hostile or malformed
+        value in any one of them cannot escape self.output_dir, collide
+        across sessions, or collide across same-second calls.
+
+        The uuid suffix guarantees that two calls in the same wall-clock
+        second — even for the same session, prefix and name — produce
+        distinct filenames rather than silently overwriting each other.
+        The write itself is atomic (temp file + os.replace)."""
+        safe_prefix = _sanitize_component(
+            prefix, fallback="document", max_bytes=48,
+        )
+        safe_name = _sanitize_component(
+            name, fallback="unnamed", max_bytes=64,
+        )
+        safe_session = _sanitize_component(
+            session_id, fallback="no-session", max_bytes=48,
+        ) if session_id else "no-session"
+
+        timestamp = _utcnow().strftime('%Y%m%d_%H%M%S')
+        unique = uuid.uuid4().hex[:8]
+        filename = f"{safe_prefix}_{safe_session}_{safe_name}_{timestamp}_{unique}.docx"
+
         filepath = self.output_dir / filename
-        doc.save(str(filepath))
+
+        _atomic_save_docx(doc, filepath)
 
         if session_id:
-            self._persist_to_db(session_id, phase or prefix, label or prefix, str(filepath))
+            self._persist_to_db(
+                session_id, phase or prefix, label or prefix, str(filepath),
+            )
         else:
             self.logger.warning(
                 f"Document generated without session_id - not persisted to DB, "
@@ -839,9 +1058,14 @@ class DocumentGenerator:
                 doc.add_heading("Tips", level=3)
                 self._add_bullet_list(doc, tips)
 
+        # Label must be process-scoped: with a constant label, a second
+        # process's manual in the same session would collide on the
+        # GeneratedDocument logical identity (session_id, phase, label)
+        # and supersede the first process's current artifact.
         filepath = self._save(
             doc, "user_manual", process_name, session_id=session_id,
-            phase="training", label="user_manual",
+            phase="training",
+            label=_process_scoped_label("user_manual", process_name),
         )
         self.logger.log_tool_usage(
             "generate_user_manual",
