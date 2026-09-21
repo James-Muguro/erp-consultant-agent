@@ -25,6 +25,13 @@ class Settings(BaseSettings):
         LLM layer has a chance to exhaust its retries and fall back. The
         exact tier count isn't knowable here (dependencies on which keys
         are set), so this checks the conservative bound.
+
+    Scope note: Settings describes configuration only. Whether a
+    provider is actually usable at runtime (API key AND a non-empty
+    model) is enforced by the LLM layer, not here. Consequently, an
+    API key without a matching model is a valid, constructible Settings
+    object; the runtime LLM wrapper will skip such a tier rather than
+    send an invalid request.
     """
 
     model_config = SettingsConfigDict(
@@ -57,27 +64,27 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     # Model identifiers
     # ------------------------------------------------------------------ #
-    # NOTE: these must be valid model IDs for the respective providers,
-    # verified against each provider's current model list. A wrong model
-    # name causes every call on that tier to 400 and fall through to the
-    # next tier - a silent cost shift from free to paid providers rather
-    # than a loud error. The startup log line emitted by
-    # describe_llm_configuration() is the fastest way to spot this.
-    gemini_model: str = Field(
-        default="gemini-2.5-flash",
-        description="Gemini model ID (verify against Google's current model list)",
+    # These are environment-driven only - there are no hardcoded defaults.
+    # Set via GEMINI_MODEL, GROQ_MODEL, OPENAI_MODEL, ANTHROPIC_MODEL.
+    # A missing (None) value is valid at Settings-construction time; the
+    # runtime LLM layer is responsible for treating a provider with an
+    # API key but no configured model as unavailable. A model explicitly
+    # supplied as whitespace-only is rejected by validation.
+    gemini_model: Optional[str] = Field(
+        None,
+        description="Gemini model ID (from GEMINI_MODEL; no built-in default)",
     )
-    groq_model: str = Field(
-        default="llama-3.3-70b-versatile",
-        description="Groq model ID (verify against Groq's current model list)",
+    groq_model: Optional[str] = Field(
+        None,
+        description="Groq model ID (from GROQ_MODEL; no built-in default)",
     )
-    openai_model: str = Field(
-        default="gpt-4o",
-        description="OpenAI model ID (verify against OpenAI's current model list)",
+    openai_model: Optional[str] = Field(
+        None,
+        description="OpenAI model ID (from OPENAI_MODEL; no built-in default)",
     )
-    anthropic_model: str = Field(
-        default="claude-sonnet-4-5",
-        description="Anthropic model ID (verify against Anthropic's current model list)",
+    anthropic_model: Optional[str] = Field(
+        None,
+        description="Anthropic model ID (from ANTHROPIC_MODEL; no built-in default)",
     )
 
     # ------------------------------------------------------------------ #
@@ -244,7 +251,13 @@ class Settings(BaseSettings):
     def configured_llm_providers(self) -> List[str]:
         """Ordered list of configured LLM providers, matching the fallback
         order used by HybridLLMClient. Useful for startup logging and for
-        diagnosing why a call landed on a paid tier."""
+        diagnosing why a call landed on a paid tier.
+
+        A provider is listed when its API key is present. Whether the
+        provider also has a usable model configured is a runtime concern
+        enforced by the LLM layer, not by Settings - the Settings test
+        contract allows constructing a Settings object with an API key
+        and no matching model field."""
         providers: List[str] = []
         if self.gemini_api_key:
             providers.append("gemini")
@@ -292,14 +305,33 @@ class Settings(BaseSettings):
 
     @field_validator("gemini_model", "groq_model", "openai_model", "anthropic_model")
     @classmethod
-    def _validate_model_name(cls, v: str) -> str:
-        """Basic sanity: model names must be non-empty and free of whitespace.
-        A typo like 'gpt-4o ' (trailing space) will fail on every call with
-        an opaque 400 that gets logged as a tier failure, so catching it at
-        startup is much better than discovering it in production."""
-        if not v or not v.strip():
-            raise ValueError("model name must be non-empty")
+    def _validate_model_name(cls, v: Optional[str]) -> Optional[str]:
+        """Model identifiers are environment-driven only - no hardcoded
+        defaults exist anywhere.
+
+        Distinguishes three cases so tests using partial provider
+        configuration keep working while a genuinely bad value still
+        fails loudly at construction time:
+          * None            -> valid; the provider's model is simply not
+                               configured. Runtime availability is decided
+                               by the LLM layer, not by Settings.
+          * non-empty str   -> valid; returned stripped of surrounding
+                               whitespace. Internal whitespace still
+                               raises (a stray space inside a model name
+                               fails on every provider call with an
+                               opaque 400).
+          * whitespace-only -> invalid; raises ValueError so an env var
+                               that was set to "" or "   " surfaces at
+                               startup rather than silently deactivating
+                               a tier the operator thought was live."""
+        if v is None:
+            return None
         stripped = v.strip()
+        if not stripped:
+            raise ValueError(
+                "model name must be a non-empty string (whitespace-only "
+                "values are rejected)"
+            )
         if any(c.isspace() for c in stripped):
             raise ValueError(f"model name must not contain whitespace: {v!r}")
         return stripped
@@ -308,7 +340,10 @@ class Settings(BaseSettings):
     def _require_at_least_one_llm_provider(self) -> "Settings":
         """The hybrid LLM wrapper can run with any single configured provider.
         Requiring Gemini specifically was a false constraint - a deployment
-        using only OpenAI or only Groq is legitimate."""
+        using only OpenAI or only Groq is legitimate. A provider counts as
+        configured here when its API key is present; whether it also has a
+        usable model configured is a runtime concern enforced by the LLM
+        layer, not by Settings."""
         if not self.configured_llm_providers:
             raise ValueError(
                 "At least one LLM provider must be configured. Set one of: "
@@ -376,6 +411,11 @@ class Settings(BaseSettings):
         use. In particular, this surfaces a wrong model name (which fails
         silently at call time and shifts load to a paid tier) as a config
         line you can eyeball.
+
+        Note: `providers` lists every provider with an API key present,
+        regardless of whether its model is configured. A provider whose
+        model is None is reported by the LLM layer at runtime as
+        unavailable; see HybridLLMClient.
         """
         return {
             "providers": self.configured_llm_providers,

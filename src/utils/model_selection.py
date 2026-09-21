@@ -1,32 +1,24 @@
 """
 Task-aware model profile definitions.
 
-Profiles describe the kind of work being requested without choosing a
-provider or model yet. Provider fallback remains owned by HybridLLMClient.
+Profiles describe the kind of work being requested. They intentionally do
+NOT choose a provider or a model: provider fallback and provider model
+identifiers are owned entirely by HybridLLMClient, which reads them from
+environment-backed settings (settings.gemini_model, settings.groq_model,
+settings.openai_model, settings.anthropic_model).
 
-A profile is a routing *hint*, not a correctness contract:
-  - If a profile specifies a model override for a provider, HybridLLMClient
-    uses it for that provider.
-  - If a profile has no override for a provider (or no profile is
-    available at all), the caller falls back to that provider's default
-    model from settings. Empty overrides are therefore a valid, common
-    state - they mean "no routing opinion; use the provider default."
-  - An invalid or unrecognized task hint degrades to the same default-
-    model behavior and logs a warning, rather than raising. Task categories
-    are a tuning knob; a bad value must never take down an LLM call.
+Task categories remain a pure classification: they label the kind of work
+being requested, but they no longer carry any model identifiers and cannot
+override the model any provider uses.
 
-Valid provider keys are the ones HybridLLMClient supports:
+Valid provider keys (kept for callers that import them):
     'gemini', 'groq', 'openai', 'anthropic'
-Spelling is enforced at ModelTaskProfile construction time, so a typo in
-an override map fails loudly at import (or at the explicit configuration
-call) rather than silently returning None from model_for() at call time.
 """
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
-from types import MappingProxyType
 from typing import Mapping, Optional
 
 logger = logging.getLogger(__name__)
@@ -42,10 +34,10 @@ class TaskCategory(str, Enum):
 # ---------------------------------------------------------------------------
 # Provider keys — single source of truth
 # ---------------------------------------------------------------------------
-# HybridLLMClient uses these exact strings when calling model_for(). Kept
-# here so typo'd overrides fail at construction rather than silently
-# returning None at call time, and so callers can import a constant rather
-# than write a bare string literal.
+# HybridLLMClient uses these exact strings. Kept here so callers can import
+# a constant rather than write a bare string literal. These are provider
+# identifiers, not model identifiers - model identifiers come exclusively
+# from environment-backed settings.
 PROVIDER_GEMINI = "gemini"
 PROVIDER_GROQ = "groq"
 PROVIDER_OPENAI = "openai"
@@ -61,70 +53,38 @@ SUPPORTED_PROVIDERS = frozenset({
 
 @dataclass(frozen=True)
 class ModelTaskProfile:
+    """A task profile is a classification only.
+
+    It carries no provider model identifiers and cannot override any
+    provider's configured model. Providers choose their model exclusively
+    from environment-backed settings (settings.<provider>_model).
+    """
+
     category: TaskCategory
-    model_overrides: Mapping[str, str] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        # Wrap the mapping so a "frozen" dataclass truly can't have its
-        # overrides mutated in place. dict(default_factory) is still a
-        # mutable dict on its own; MappingProxyType closes that gap.
-        if not isinstance(self.model_overrides, MappingProxyType):
-            object.__setattr__(
-                self,
-                "model_overrides",
-                MappingProxyType(dict(self.model_overrides)),
-            )
-
-        unknown = set(self.model_overrides) - SUPPORTED_PROVIDERS
-        if unknown:
-            raise ValueError(
-                f"ModelTaskProfile for {self.category.value!r} has overrides "
-                f"for unknown provider(s): {sorted(unknown)}. "
-                f"Supported providers: {sorted(SUPPORTED_PROVIDERS)}"
-            )
-        for provider, model in self.model_overrides.items():
-            if not isinstance(model, str) or not model.strip():
-                raise ValueError(
-                    f"ModelTaskProfile for {self.category.value!r}: override "
-                    f"for provider {provider!r} must be a non-empty string, "
-                    f"got {model!r}"
-                )
 
     def model_for(self, provider: str) -> Optional[str]:
-        """Return the model override for `provider`, or None if this
-        profile has no opinion (caller should use the provider default)."""
-        return self.model_overrides.get(provider)
+        """Compatibility shim.
+
+        Provider model identifiers must come exclusively from
+        environment-backed settings; task profiles must not override them.
+        This method therefore always returns None, which instructs callers
+        to use the provider's configured model.
+        """
+        return None
 
     @property
     def has_overrides(self) -> bool:
-        return bool(self.model_overrides)
+        return False
 
     def __repr__(self) -> str:  # pragma: no cover - cosmetic
-        if self.model_overrides:
-            return (
-                f"ModelTaskProfile(category={self.category.value!r}, "
-                f"overrides={dict(self.model_overrides)!r})"
-            )
         return f"ModelTaskProfile(category={self.category.value!r}, no overrides)"
 
 
 # ---------------------------------------------------------------------------
 # Default profiles
 # ---------------------------------------------------------------------------
-# These start empty by design: an empty override map means "use the provider
-# default model from settings for this task category." A blank profile is a
-# valid, working state, not a bug or a TODO.
-#
-# To populate, either:
-#   (a) edit the overrides below, or
-#   (b) call set_task_profile_overrides(...) once at startup (e.g. from
-#       settings or environment-driven config).
-#
-# Populating a category is the right place to encode a deliberate routing
-# decision — e.g. "for HIGH_REASONING on OpenAI, always use gpt-4o rather
-# than gpt-4o-mini." Without overrides, model selection is entirely
-# controlled by settings.<provider>_model defaults, which is a fine setup
-# for a single-environment deployment.
+# Profiles are intentionally empty of any model information. Every provider
+# model is chosen from environment-backed settings only.
 TASK_PROFILES: dict[TaskCategory, ModelTaskProfile] = {
     category: ModelTaskProfile(category=category)
     for category in TaskCategory
@@ -139,11 +99,11 @@ def resolve_task_profile(
     Accepts a TaskCategory, its string value ('high_reasoning', ...), its
     enum name ('HIGH_REASONING', ...), or None.
 
-    Returns None — meaning "no routing opinion; use provider defaults" —
-    if `task` is None, unrecognized, or an unsupported type. Never raises
-    on bad input: a routing hint failing should degrade to the default
-    model, not fail the entire LLM call. Unknown values are logged at
-    WARNING so misconfiguration is visible in logs, not silent.
+    Returns None — meaning "no routing opinion; use provider-configured
+    models from settings" — if `task` is None, unrecognized, or an
+    unsupported type. Never raises on bad input: a routing hint failing
+    should degrade gracefully, not fail the entire LLM call. Unknown
+    values are logged at WARNING so misconfiguration is visible in logs.
     """
     if task is None:
         return None
@@ -183,46 +143,40 @@ def set_task_profile_overrides(
     category: TaskCategory,
     overrides: Mapping[str, str],
 ) -> ModelTaskProfile:
-    """Replace a category's overrides.
+    """Deprecated no-op retained for backward compatibility.
 
-    Intended for startup configuration (e.g. reading from settings or
-    environment variables). Validates the override map the same way
-    ModelTaskProfile construction does, so an invalid provider name or
-    empty model string raises here rather than silently returning None
-    from model_for() at call time.
+    Provider model identifiers are now controlled exclusively through
+    environment-backed settings (GEMINI_MODEL / GROQ_MODEL / OPENAI_MODEL /
+    ANTHROPIC_MODEL). Task profiles must not override them, so any
+    overrides passed here are ignored and logged at WARNING.
 
-    Returns the new profile. The previous profile object remains valid for
-    any code still holding a reference, but new resolve_task_profile calls
-    will return the new object.
-
-    Note: this mutates the module-level TASK_PROFILES mapping. It should
-    be called during process startup, before concurrent agent work begins.
+    Returns the (unchanged) profile for the given category.
     """
     if not isinstance(category, TaskCategory):
         raise TypeError(
             f"category must be a TaskCategory, got {type(category).__name__}"
         )
-    profile = ModelTaskProfile(category=category, model_overrides=dict(overrides))
-    TASK_PROFILES[category] = profile
-    logger.info(
-        "Task profile updated: %s -> %s",
-        category.value,
-        dict(profile.model_overrides) or "(no overrides; use provider defaults)",
-    )
-    return profile
+    if overrides:
+        logger.warning(
+            "set_task_profile_overrides called for %s with overrides %r - "
+            "ignored. Provider model identifiers are now controlled only by "
+            "environment-backed settings (settings.<provider>_model).",
+            category.value,
+            dict(overrides),
+        )
+    return TASK_PROFILES[category]
 
 
 def describe_task_profiles() -> dict[str, dict[str, str]]:
     """Return a log-friendly summary of the current profiles.
 
-    Intended for startup diagnostics, so operators can see which categories
-    are actually routed to specific models and which are falling through to
-    provider defaults. Example output:
+    Every category is always empty now, since task profiles no longer
+    carry model identifiers. The shape is preserved for callers that
+    expect ``{category: {provider: model}}``.
+
+    Example output:
 
         {"high_reasoning": {}, "standard_agent": {},
          "structured_generation": {}, "lightweight": {}}
     """
-    return {
-        category.value: dict(TASK_PROFILES[category].model_overrides)
-        for category in TaskCategory
-    }
+    return {category.value: {} for category in TaskCategory}

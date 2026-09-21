@@ -2,39 +2,6 @@
 FastAPI wrapper for ERP Orchestrator with hybrid LLM support
 (Gemini + Groq + GPT-4 + Claude fallback).
 
-Notes on this revision:
-
-  * Privacy: user message content is no longer written to application
-    logs. Chat requests log message length and shape, not content.
-    Content can be inspected via the DB-backed conversation history if
-    a support case requires it, subject to whatever access controls
-    apply there.
-
-  * Rate limiting: keyed on the true client IP (honoring X-Forwarded-For
-    when behind a trusted proxy) rather than the immediate peer, which
-    behind a load balancer is the LB itself. Expensive endpoints (chat,
-    phase execution, uploads, report generation) have their own tighter
-    limits than the general per-route default.
-
-  * Request body size is bounded by a middleware that checks
-    Content-Length before the body is read. File uploads additionally
-    stream-read with a hard cap, so a hostile body can't be buffered
-    into memory.
-
-  * Log correlation: request_id is bound at the edge; user_id and
-    session_id are bound as soon as they are known, so every log line
-    emitted within a request is greppable by any of the three. No
-    clear_contextvars() - outer context is preserved.
-
-  * Phase execution accepts a phase-parameters body (stakeholder input,
-    process name, roles) and maps orchestrator failures to appropriate
-    HTTP statuses instead of a blanket 500.
-
-  * Account deletion routes through session_service.delete_session per
-    owned session, so object storage and profile picture cleanup run as
-    they do for a single-project delete.
-
-  * No HTTP-level behavior changes for existing successful paths.
 """
 from __future__ import annotations
 
@@ -463,6 +430,95 @@ def extract_text(response: Any) -> str:
     if isinstance(response, str):
         return response
     return str(response)
+
+
+def _reference_data_fallback(data: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Compose a fallback answer from already-retrieved reference data.
+
+    Used when every LLM provider has failed: rather than discarding the
+    knowledge-base/web results that info_retriever already returned (and
+    returning a generic "trouble summarizing" message), we surface the
+    retrieved reference material directly.
+
+    Constraints honored:
+      * Does NOT call any LLM.
+      * Does NOT fabricate facts - only reuses what retrieval produced.
+      * Preserves source attribution when the retrieval response carries
+        a `sources` field.
+      * Returns None when there is no usable reference content, so the
+        caller can fall through to an explicit failure message.
+
+    The shape of `data` matches what src.tools.info_retriever.info_retriever
+    returns: a dict that may carry `kb_results`, `web_results`, and
+    `sources`. This helper is intentionally defensive about the concrete
+    shape of individual entries (str vs. dict vs. other)."""
+    if not isinstance(data, dict):
+        return None
+
+    def _as_text(item: Any) -> Optional[str]:
+        if item is None:
+            return None
+        if isinstance(item, str):
+            stripped = item.strip()
+            return stripped or None
+        if isinstance(item, dict):
+            for key in ("content", "text", "snippet", "answer", "summary", "body"):
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    title = (
+                        item.get("title")
+                        or item.get("source")
+                        or item.get("url")
+                    )
+                    if isinstance(title, str) and title.strip():
+                        return f"{title.strip()}: {value.strip()}"
+                    return value.strip()
+            return None
+        try:
+            return str(item).strip() or None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _iter_bucket(bucket: Any) -> List[Any]:
+        if bucket is None:
+            return []
+        if isinstance(bucket, dict):
+            return list(bucket.values())
+        if isinstance(bucket, (list, tuple)):
+            return list(bucket)
+        return [bucket]
+
+    parts: List[str] = []
+    for key in ("kb_results", "web_results"):
+        for entry in _iter_bucket(data.get(key)):
+            text = _as_text(entry)
+            if text:
+                parts.append(text)
+
+    if not parts:
+        return None
+
+    source_labels: List[str] = []
+    for entry in _iter_bucket(data.get("sources")):
+        if isinstance(entry, str) and entry.strip():
+            source_labels.append(entry.strip())
+        elif isinstance(entry, dict):
+            label = (
+                entry.get("title")
+                or entry.get("url")
+                or entry.get("source")
+            )
+            if isinstance(label, str) and label.strip():
+                source_labels.append(label.strip())
+
+    header = (
+        "I wasn't able to synthesize a full answer right now, but here is "
+        "the reference material I retrieved for your question:"
+    )
+    body = "\n\n".join(parts)
+    if source_labels:
+        body = body + "\n\nSources: " + "; ".join(source_labels)
+    return header + "\n\n" + body
 
 
 def _derive_chat_title(message: str) -> str:
@@ -2033,8 +2089,17 @@ def chat(
         response = llm_instance.generate_content(prompt, generation_config=generation_config)
         final_answer = extract_text(response)
     except Exception as e:  # noqa: BLE001
+        # All LLM providers failed. Do NOT discard the reference data that
+        # info_retriever already returned - surface it through the existing
+        # fallback path instead. No second LLM request is made, and no
+        # facts are invented. If there is no usable reference data, keep an
+        # explicit failure message.
         logger.error("Error during final answer synthesis", error=str(e))
-        final_answer = "I found some information, but I had trouble summarizing it."
+        fallback_answer = _reference_data_fallback(data)
+        if fallback_answer is not None:
+            final_answer = fallback_answer
+        else:
+            final_answer = "I found some information, but I had trouble summarizing it."
 
     agent_memory.session_service.add_to_conversation(
         session_id, role="user", content=req.message,
@@ -2382,9 +2447,17 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
                 full_answer_parts.append(text)
                 yield ev('text_delta', text=text)
         except Exception as e:  # noqa: BLE001
+            # Every LLM provider failed before yielding anything. Rather
+            # than discard the reference data retrieved above, surface it
+            # through the same text_delta/event stream. Guarded by
+            # `not full_answer_parts` so we never duplicate or contradict
+            # partial output that already reached the client. No second
+            # LLM request is made and no facts are invented.
             logger.error("Error during streamed answer synthesis", error=str(e))
             if not full_answer_parts:
-                fallback = "I found some information, but I had trouble summarizing it."
+                fallback = _reference_data_fallback(data) or (
+                    "I found some information, but I had trouble summarizing it."
+                )
                 full_answer_parts.append(fallback)
                 yield ev('text_delta', text=fallback)
 

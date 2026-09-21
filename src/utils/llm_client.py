@@ -18,6 +18,13 @@ set of attributes HybridLLMClient's normalizer consumes:
                      which agents should treat as a quality warning)
     .raw            the raw google-genai GenerateContentResponse
 
+Model identifier resolution order for this client:
+    1. generation_config["model"] when supplied and non-empty
+    2. settings.gemini_model (sourced from GEMINI_MODEL) when (1) is not
+       supplied or is not a usable non-empty string
+If neither provides a non-empty model, a RuntimeError is raised. There
+is no hardcoded Gemini model name in this file.
+
 Note on naming: this class is imported in src/utils/llm.py as
 `GeminiLLMClient` for clarity. Its historical name (LLMClient) predates
 the hybrid wrapper. Renaming the class here would break that import, so
@@ -157,6 +164,30 @@ def _validate_response_schema(response_schema: Any) -> None:
     )
 
 
+def _resolve_model(generation_config: Dict[str, Any]) -> str:
+    """Resolve the Gemini model identifier using the documented order:
+
+        1. generation_config["model"] when supplied and non-empty
+        2. settings.gemini_model (sourced from GEMINI_MODEL)
+
+    Neither path supplies a hardcoded default; if both are missing or
+    non-usable, a RuntimeError is raised so callers know a Gemini model
+    must be configured rather than silently sending an invalid request."""
+    supplied = generation_config.get("model")
+    if isinstance(supplied, str) and supplied.strip():
+        return supplied.strip()
+
+    configured = getattr(settings, "gemini_model", None)
+    if isinstance(configured, str) and configured.strip():
+        return configured.strip()
+
+    raise RuntimeError(
+        "A Gemini model must be configured: set GEMINI_MODEL (populating "
+        "settings.gemini_model) or pass generation_config['model'] with a "
+        "non-empty model identifier."
+    )
+
+
 class LLMClient:
     """Thin wrapper around the Gemini API only. Raises on any failure -
     it does not fall back to another provider itself."""
@@ -181,7 +212,7 @@ class LLMClient:
         temperature = generation_config.get("temperature", self.temperature)
         max_tokens = generation_config.get("max_output_tokens", settings.max_tokens)
         response_schema = generation_config.get("response_schema")
-        model = generation_config.get("model", settings.gemini_model)
+        model = _resolve_model(generation_config)
 
         _validate_response_schema(response_schema)
 
@@ -244,11 +275,14 @@ class LLMClient:
         HybridLLMClient streaming fallback can move on to the next tier.
         A mid-stream failure is not retried or fallen back - the caller
         has already seen partial output; see the wrapper's docstring.
+
+        Model resolution follows the same order as generate_content:
+        generation_config["model"] first, then settings.gemini_model.
         """
         generation_config = generation_config or {}
         temperature = generation_config.get("temperature", self.temperature)
         max_tokens = generation_config.get("max_output_tokens", settings.max_tokens)
-        model = generation_config.get("model", settings.gemini_model)
+        model = _resolve_model(generation_config)
 
         stream = self.gemini_client.models.generate_content_stream(
             model=model,

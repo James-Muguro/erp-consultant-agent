@@ -9,6 +9,17 @@ plus the chat endpoint) already catch exceptions from this call and
 turn them into a proper structured error or a friendly fallback
 message, so a real failure is never silently presented as real output.
 
+Provider model identifiers are controlled exclusively through
+environment-backed settings:
+    Gemini    -> settings.gemini_model
+    Groq      -> settings.groq_model
+    OpenAI    -> settings.openai_model
+    Anthropic -> settings.anthropic_model
+A provider is considered configured only when BOTH its API credential and
+its model setting are present. A missing model disables that tier rather
+than sending an invalid request; task profiles are not consulted for
+model identifiers (they no longer carry any).
+
 Schema-requesting agents get best-effort JSON-schema hinting on every
 tier (not decode-constrained strict mode everywhere) - if a fallback
 tier's JSON doesn't perfectly validate, each agent's own heuristic
@@ -38,7 +49,6 @@ from openai import OpenAI
 from src.config.settings import settings
 from src.utils.resilience import call_with_retries, DEFAULT_RETRY_BASE_DELAY
 from src.utils.logger import get_logger
-from src.utils.model_selection import resolve_task_profile
 
 try:
     from anthropic import Anthropic
@@ -110,6 +120,15 @@ def _normalize_finish_reason(reason: Optional[str]) -> Optional[str]:
     if "content_filter" in r or "safety" in r or "blocked" in r:
         return "content_filter"
     return r
+
+
+def _is_configured_model(value: Optional[str]) -> bool:
+    """True when `value` is a non-empty string. Used to double-check, at
+    call time, that a provider still has a model configured before we
+    send a request. A tier whose model went missing after construction
+    is skipped cleanly rather than sending an invalid model to the
+    provider (which would surface as an opaque 400 and burn the tier)."""
+    return isinstance(value, str) and bool(value.strip())
 
 
 def _openai_compatible_call(
@@ -232,37 +251,47 @@ def _anthropic_usage(resp) -> Optional[dict]:
 class HybridLLMClient:
     """Unified LLM client with a 4-tier fallback chain: Gemini, Groq,
     OpenAI, Anthropic. Raises RuntimeError if all tiers fail or are
-    unconfigured."""
+    unconfigured.
+
+    A tier is configured only when BOTH its API credential and its
+    environment-driven model setting are present."""
 
     def __init__(self, temperature: float = 0.7):
         self.temperature = temperature
 
-        # Tier 1: Gemini
-        try:
-            self.gemini = GeminiLLMClient(temperature=temperature)
-            self.use_gemini = True
-            logger.info("HybridLLM: Gemini client initialized")
-        except Exception as e:
-            logger.warning(f"HybridLLM: Failed to initialize Gemini client: {e}")
+        # Tier 1: Gemini (configured only when API key + model are set)
+        if settings.gemini_api_key and settings.gemini_model:
+            try:
+                self.gemini = GeminiLLMClient(temperature=temperature)
+                self.use_gemini = True
+                logger.info("HybridLLM: Gemini client initialized")
+            except Exception as e:
+                logger.warning(f"HybridLLM: Failed to initialize Gemini client: {e}")
+                self.gemini = None
+                self.use_gemini = False
+        else:
             self.gemini = None
             self.use_gemini = False
 
         # Tier 2: Groq (free tier, OpenAI-compatible endpoint)
         self.groq_client = (
             OpenAI(api_key=settings.groq_api_key, base_url="https://api.groq.com/openai/v1")
-            if settings.groq_api_key else None
+            if (settings.groq_api_key and settings.groq_model) else None
         )
         if self.groq_client:
             logger.info("HybridLLM: Groq fallback client initialized")
 
         # Tier 3: OpenAI
-        self.openai_client = OpenAI(api_key=settings.openai_api_key) if settings.openai_api_key else None
+        self.openai_client = (
+            OpenAI(api_key=settings.openai_api_key)
+            if (settings.openai_api_key and settings.openai_model) else None
+        )
         if self.openai_client:
             logger.info("HybridLLM: OpenAI fallback client initialized")
 
         # Tier 4: Anthropic Claude
         self.anthropic_client = None
-        if ANTHROPIC_AVAILABLE and settings.anthropic_api_key:
+        if ANTHROPIC_AVAILABLE and settings.anthropic_api_key and settings.anthropic_model:
             self.anthropic_client = Anthropic(api_key=settings.anthropic_api_key)
             logger.info("HybridLLM: Anthropic fallback client initialized")
 
@@ -272,7 +301,19 @@ class HybridLLMClient:
     def _try_anthropic(self, prompt, max_tokens, response_schema, model=None):
         # Anthropic Python SDK v1.0+ removed temperature/top_p/top_k from
         # Messages.create() entirely - no sampling control available here.
-        resolved_model = model or settings.anthropic_model
+        #
+        # Model resolution: the caller-supplied `model` argument is
+        # honored when it is a non-empty string; otherwise we fall back
+        # to settings.anthropic_model. Neither path is hardcoded. If no
+        # model is available, we refuse to send an invalid request rather
+        # than let Anthropic reject it with an opaque error.
+        resolved_model = model if _is_configured_model(model) else settings.anthropic_model
+        if not _is_configured_model(resolved_model):
+            raise RuntimeError(
+                "Anthropic model is not configured. Set ANTHROPIC_MODEL "
+                "(exposed as settings.anthropic_model)."
+            )
+
         if response_schema is not None:
             tool_name = "emit_" + response_schema.__name__
             resp = self.anthropic_client.messages.create(
@@ -454,12 +495,16 @@ class HybridLLMClient:
         exponential backoff) before falling through to the next tier, and
         each individual attempt is bounded to settings.llm_call_timeout_seconds
         - see src/utils/resilience.py for what that timeout does and
-        doesn't guarantee."""
+        doesn't guarantee.
+
+        Provider model identifiers come only from environment-backed
+        settings (settings.<provider>_model); task profiles do not override
+        them. A tier whose model setting has gone missing is skipped
+        cleanly rather than sending an invalid model to the provider."""
         generation_config = generation_config or {}
         temperature = generation_config.get("temperature", self.temperature)
         max_tokens = generation_config.get("max_output_tokens", settings.max_tokens)
         response_schema = generation_config.get("response_schema")
-        task_profile = resolve_task_profile(generation_config.get("task"))
 
         retry_kwargs = dict(
             max_attempts=settings.llm_retry_attempts,
@@ -468,115 +513,128 @@ class HybridLLMClient:
 
         # -------- Tier 1: Gemini --------
         if self.use_gemini and self.gemini:
-            start = time.time()
-            try:
-                gemini_config = dict(generation_config)
-                # `task` is a routing hint for this wrapper, not a Gemini
-                # SDK parameter. We've already resolved the model below.
-                gemini_config.pop("task", None)
-                if task_profile and task_profile.model_for("gemini"):
-                    gemini_config["model"] = task_profile.model_for("gemini")
-                resp = call_with_retries(
-                    self.gemini.generate_content,
-                    prompt,
-                    generation_config=gemini_config,
-                    **retry_kwargs,
-                )
-                normalized = self._normalize_gemini_response(resp, gemini_config)
-                self._log_llm_call("gemini", start, normalized)
-                return normalized
-            except Exception as e:
+            gemini_model = settings.gemini_model
+            if not _is_configured_model(gemini_model):
                 logger.warning(
-                    f"HybridLLM: Gemini generation failed after retries, "
-                    f"trying Groq: {e}"
+                    "HybridLLM: Gemini model is not configured; skipping "
+                    "Gemini tier."
                 )
+            else:
+                start = time.time()
+                try:
+                    gemini_config = dict(generation_config)
+                    # `task` is a routing hint for this wrapper, not a Gemini
+                    # SDK parameter. The model is always the environment-driven
+                    # settings.gemini_model.
+                    gemini_config.pop("task", None)
+                    gemini_config["model"] = gemini_model
+                    resp = call_with_retries(
+                        self.gemini.generate_content,
+                        prompt,
+                        generation_config=gemini_config,
+                        **retry_kwargs,
+                    )
+                    normalized = self._normalize_gemini_response(resp, gemini_config)
+                    self._log_llm_call("gemini", start, normalized)
+                    return normalized
+                except Exception as e:
+                    logger.warning(
+                        f"HybridLLM: Gemini generation failed after retries, "
+                        f"trying Groq: {e}"
+                    )
 
         # -------- Tier 2: Groq --------
         if self.groq_client:
-            start = time.time()
-            try:
-                # Groq caps output far lower than Gemini/OpenAI. Clamp
-                # rather than let the request 400 and burn the tier.
-                groq_max_tokens = min(max_tokens, _GROQ_MAX_OUTPUT_TOKENS_CAP)
-                groq_model = (
-                    task_profile.model_for("groq")
-                    if task_profile and task_profile.model_for("groq")
-                    else settings.groq_model
-                )
-                groq_call = functools.partial(
-                    _openai_compatible_call, provider="groq"
-                )
-                resp = call_with_retries(
-                    groq_call,
-                    self.groq_client,
-                    groq_model,
-                    prompt,
-                    temperature,
-                    groq_max_tokens,
-                    response_schema,
-                    **retry_kwargs,
-                )
-                self._log_llm_call("groq", start, resp)
-                return resp
-            except Exception as e:
+            groq_model = settings.groq_model
+            if not _is_configured_model(groq_model):
                 logger.warning(
-                    f"HybridLLM: Groq generation failed after retries, "
-                    f"trying OpenAI: {e}"
+                    "HybridLLM: Groq model is not configured; skipping "
+                    "Groq tier."
                 )
+            else:
+                start = time.time()
+                try:
+                    # Groq caps output far lower than Gemini/OpenAI. Clamp
+                    # rather than let the request 400 and burn the tier.
+                    groq_max_tokens = min(max_tokens, _GROQ_MAX_OUTPUT_TOKENS_CAP)
+                    groq_call = functools.partial(
+                        _openai_compatible_call, provider="groq"
+                    )
+                    resp = call_with_retries(
+                        groq_call,
+                        self.groq_client,
+                        groq_model,
+                        prompt,
+                        temperature,
+                        groq_max_tokens,
+                        response_schema,
+                        **retry_kwargs,
+                    )
+                    self._log_llm_call("groq", start, resp)
+                    return resp
+                except Exception as e:
+                    logger.warning(
+                        f"HybridLLM: Groq generation failed after retries, "
+                        f"trying OpenAI: {e}"
+                    )
 
         # -------- Tier 3: OpenAI --------
         if self.openai_client:
-            start = time.time()
-            try:
-                openai_model = (
-                    task_profile.model_for("openai")
-                    if task_profile and task_profile.model_for("openai")
-                    else settings.openai_model
-                )
-                openai_call = functools.partial(
-                    _openai_compatible_call, provider="openai"
-                )
-                resp = call_with_retries(
-                    openai_call,
-                    self.openai_client,
-                    openai_model,
-                    prompt,
-                    temperature,
-                    max_tokens,
-                    response_schema,
-                    **retry_kwargs,
-                )
-                self._log_llm_call("openai", start, resp)
-                return resp
-            except Exception as e:
+            openai_model = settings.openai_model
+            if not _is_configured_model(openai_model):
                 logger.warning(
-                    f"HybridLLM: OpenAI generation failed after retries, "
-                    f"trying Anthropic: {e}"
+                    "HybridLLM: OpenAI model is not configured; skipping "
+                    "OpenAI tier."
                 )
+            else:
+                start = time.time()
+                try:
+                    openai_call = functools.partial(
+                        _openai_compatible_call, provider="openai"
+                    )
+                    resp = call_with_retries(
+                        openai_call,
+                        self.openai_client,
+                        openai_model,
+                        prompt,
+                        temperature,
+                        max_tokens,
+                        response_schema,
+                        **retry_kwargs,
+                    )
+                    self._log_llm_call("openai", start, resp)
+                    return resp
+                except Exception as e:
+                    logger.warning(
+                        f"HybridLLM: OpenAI generation failed after retries, "
+                        f"trying Anthropic: {e}"
+                    )
 
         # -------- Tier 4: Anthropic --------
         if self.anthropic_client:
-            start = time.time()
-            try:
-                anthropic_model = (
-                    task_profile.model_for("anthropic")
-                    if task_profile and task_profile.model_for("anthropic")
-                    else None
+            anthropic_model = settings.anthropic_model
+            if not _is_configured_model(anthropic_model):
+                logger.warning(
+                    "HybridLLM: Anthropic model is not configured; skipping "
+                    "Anthropic tier."
                 )
-                resp = call_with_retries(
-                    self._try_anthropic,
-                    prompt,
-                    max_tokens,
-                    response_schema,
-                    anthropic_model,
-                    **retry_kwargs,
-                )
-                self._log_llm_call("anthropic", start, resp)
-                return resp
-            except Exception as e:
-                logger.error(
-                    f"HybridLLM: Anthropic generation failed after retries: {e}"
-                )
+            else:
+                start = time.time()
+                try:
+                    resp = call_with_retries(
+                        self._try_anthropic,
+                        prompt,
+                        max_tokens,
+                        response_schema,
+                        anthropic_model,
+                        **retry_kwargs,
+                    )
+                    self._log_llm_call("anthropic", start, resp)
+                    return resp
+                except Exception as e:
+                    logger.error(
+                        f"HybridLLM: Anthropic generation failed after retries: {e}"
+                    )
 
         logger.error("HybridLLM: No LLM backend succeeded")
         raise RuntimeError(
@@ -588,8 +646,18 @@ class HybridLLMClient:
     # Streaming
     # ------------------------------------------------------------------ #
     def _try_anthropic_stream(self, prompt, max_tokens, model=None):
+        # Same model resolution order as _try_anthropic: honor the
+        # caller-supplied model when it's a usable non-empty string,
+        # otherwise fall back to settings.anthropic_model. Never
+        # hardcoded.
+        resolved_model = model if _is_configured_model(model) else settings.anthropic_model
+        if not _is_configured_model(resolved_model):
+            raise RuntimeError(
+                "Anthropic model is not configured. Set ANTHROPIC_MODEL "
+                "(exposed as settings.anthropic_model)."
+            )
         with self.anthropic_client.messages.stream(
-            model=model or settings.anthropic_model,
+            model=resolved_model,
             max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}],
         ) as stream:
@@ -608,7 +676,12 @@ class HybridLLMClient:
         So a mid-stream failure re-raises after logging; only a failure
         that happens before any chunk is yielded moves on to the next tier.
         No response_schema support - schema enforcement is incompatible
-        with token-by-token streaming on all four providers."""
+        with token-by-token streaming on all four providers.
+
+        Provider model identifiers come only from environment-backed
+        settings (settings.<provider>_model). A tier whose model setting
+        has gone missing is skipped cleanly, mirroring the non-streaming
+        path."""
         generation_config = generation_config or {}
 
         if generation_config.get("response_schema") is not None:
@@ -620,7 +693,6 @@ class HybridLLMClient:
 
         temperature = generation_config.get("temperature", self.temperature)
         max_tokens = generation_config.get("max_output_tokens", settings.max_tokens)
-        task_profile = resolve_task_profile(generation_config.get("task"))
 
         def _run(chunk_source):
             yielded_any = False
@@ -657,84 +729,96 @@ class HybridLLMClient:
             raise last_exc
 
         if self.use_gemini and self.gemini:
-            try:
-                gemini_config = dict(generation_config)
-                gemini_config.pop("task", None)
-                if task_profile and task_profile.model_for("gemini"):
-                    gemini_config["model"] = task_profile.model_for("gemini")
-                yield from _run_tier_with_retry(
-                    lambda: self.gemini.generate_content_stream(prompt, gemini_config),
-                    "Gemini",
-                )
-                return
-            except _TierFailedBeforeFirstChunk as e:
+            gemini_model = settings.gemini_model
+            if not _is_configured_model(gemini_model):
                 logger.warning(
-                    f"HybridLLM: Gemini stream failed after retries, trying "
-                    f"Groq: {e.__cause__}"
+                    "HybridLLM: Gemini model is not configured; skipping "
+                    "Gemini stream tier."
                 )
+            else:
+                try:
+                    gemini_config = dict(generation_config)
+                    gemini_config.pop("task", None)
+                    gemini_config["model"] = gemini_model
+                    yield from _run_tier_with_retry(
+                        lambda: self.gemini.generate_content_stream(prompt, gemini_config),
+                        "Gemini",
+                    )
+                    return
+                except _TierFailedBeforeFirstChunk as e:
+                    logger.warning(
+                        f"HybridLLM: Gemini stream failed after retries, trying "
+                        f"Groq: {e.__cause__}"
+                    )
 
         if self.groq_client:
-            try:
-                groq_max_tokens = min(max_tokens, _GROQ_MAX_OUTPUT_TOKENS_CAP)
-                groq_model = (
-                    task_profile.model_for("groq")
-                    if task_profile and task_profile.model_for("groq")
-                    else settings.groq_model
-                )
-                yield from _run_tier_with_retry(
-                    lambda: _openai_compatible_stream(
-                        self.groq_client, groq_model, prompt, temperature,
-                        groq_max_tokens,
-                    ),
-                    "Groq",
-                )
-                return
-            except _TierFailedBeforeFirstChunk as e:
+            groq_model = settings.groq_model
+            if not _is_configured_model(groq_model):
                 logger.warning(
-                    f"HybridLLM: Groq stream failed after retries, trying "
-                    f"OpenAI: {e.__cause__}"
+                    "HybridLLM: Groq model is not configured; skipping "
+                    "Groq stream tier."
                 )
+            else:
+                try:
+                    groq_max_tokens = min(max_tokens, _GROQ_MAX_OUTPUT_TOKENS_CAP)
+                    yield from _run_tier_with_retry(
+                        lambda: _openai_compatible_stream(
+                            self.groq_client, groq_model, prompt, temperature,
+                            groq_max_tokens,
+                        ),
+                        "Groq",
+                    )
+                    return
+                except _TierFailedBeforeFirstChunk as e:
+                    logger.warning(
+                        f"HybridLLM: Groq stream failed after retries, trying "
+                        f"OpenAI: {e.__cause__}"
+                    )
 
         if self.openai_client:
-            try:
-                openai_model = (
-                    task_profile.model_for("openai")
-                    if task_profile and task_profile.model_for("openai")
-                    else settings.openai_model
-                )
-                yield from _run_tier_with_retry(
-                    lambda: _openai_compatible_stream(
-                        self.openai_client, openai_model, prompt, temperature,
-                        max_tokens,
-                    ),
-                    "OpenAI",
-                )
-                return
-            except _TierFailedBeforeFirstChunk as e:
+            openai_model = settings.openai_model
+            if not _is_configured_model(openai_model):
                 logger.warning(
-                    f"HybridLLM: OpenAI stream failed after retries, trying "
-                    f"Anthropic: {e.__cause__}"
+                    "HybridLLM: OpenAI model is not configured; skipping "
+                    "OpenAI stream tier."
                 )
+            else:
+                try:
+                    yield from _run_tier_with_retry(
+                        lambda: _openai_compatible_stream(
+                            self.openai_client, openai_model, prompt, temperature,
+                            max_tokens,
+                        ),
+                        "OpenAI",
+                    )
+                    return
+                except _TierFailedBeforeFirstChunk as e:
+                    logger.warning(
+                        f"HybridLLM: OpenAI stream failed after retries, trying "
+                        f"Anthropic: {e.__cause__}"
+                    )
 
         if self.anthropic_client:
-            try:
-                anthropic_model = (
-                    task_profile.model_for("anthropic")
-                    if task_profile and task_profile.model_for("anthropic")
-                    else None
+            anthropic_model = settings.anthropic_model
+            if not _is_configured_model(anthropic_model):
+                logger.warning(
+                    "HybridLLM: Anthropic model is not configured; skipping "
+                    "Anthropic stream tier."
                 )
-                yield from _run_tier_with_retry(
-                    lambda: self._try_anthropic_stream(
-                        prompt, max_tokens, anthropic_model
-                    ),
-                    "Anthropic",
-                )
-                return
-            except _TierFailedBeforeFirstChunk as e:
-                logger.error(
-                    f"HybridLLM: Anthropic stream failed after retries: "
-                    f"{e.__cause__}"
-                )
+            else:
+                try:
+                    yield from _run_tier_with_retry(
+                        lambda: self._try_anthropic_stream(
+                            prompt, max_tokens, anthropic_model
+                        ),
+                        "Anthropic",
+                    )
+                    return
+                except _TierFailedBeforeFirstChunk as e:
+                    logger.error(
+                        f"HybridLLM: Anthropic stream failed after retries: "
+                        f"{e.__cause__}"
+                    )
 
         logger.error("HybridLLM: No LLM backend succeeded (streaming)")
         raise RuntimeError(
