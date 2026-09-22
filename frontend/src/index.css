@@ -1,22 +1,6 @@
 @import "tailwindcss";
 
 @theme {
-  /* Color: a working ledger, not a marketing gradient. Cool paper, one
-     accent (pine green - the color of classic green-bar accounting
-     ledger paper), flat surfaces instead of shadow-and-radius soup.
-
-     Text tiers (all pass WCAG AA on both paper and surface):
-       ink       #1B221F  ~15:1 on paper
-       ink-muted #4E5A54  ~6.7:1 on paper
-       ink-faint #636D66  ~5.0:1 on paper
-
-     Border tiers:
-       border        #DBDED7  decorative only (card edges, dividers,
-                              table lines). ~1.3:1 on surface - NOT for
-                              interactive component boundaries.
-       border-strong #8B968F  for interactive boundaries (input fields,
-                              buttons with visible outlines). ~3.1:1 on
-                              surface - passes WCAG 1.4.11. */
   --color-paper: #F2F3F0;
   --color-surface: #FFFFFF;
   --color-ink: #1B221F;
@@ -38,8 +22,14 @@
 }
 
 @layer base {
+  /* The app shell owns its own scrolling regions. Document-level scroll
+     is disabled entirely so no browser chrome quirk, zoom level, or
+     devtools dock can move the whole interface together. Any surface
+     that needs to scroll must use an explicit overflow-y-auto container
+     (the chat messages panel, the sidebar nav, workspace tabs). */
   html, body, #root {
     height: 100%;
+    overflow: hidden;
   }
   body {
     background-color: var(--color-paper);
@@ -61,6 +51,15 @@
   }
 }
 
+/* Height that matches the *visible* viewport, not the layout viewport.
+   100dvh respects browser chrome (mobile address bar, docked devtools).
+   100vh is the fallback for browsers that predate dvh - it is listed
+   first so a dvh-aware browser takes the second declaration. */
+.app-viewport {
+  height: 100vh;
+  height: 100dvh;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
@@ -69,18 +68,11 @@
   }
 }
 
-/* Safe-area support for notched/home-indicator devices. The
-   `max(env(...), baseline)` form guarantees a minimum padding on
-   devices without a notch. These classes set padding directly and are
-   unlayered, so they take precedence over Tailwind's py-* utilities
-   on the same element - apply them only where you do not also want
-   Tailwind's padding-top / padding-bottom. */
 .safe-top    { padding-top:    max(env(safe-area-inset-top),    0.625rem); }
 .safe-bottom { padding-bottom: max(env(safe-area-inset-bottom), 0.625rem); }
 .safe-left   { padding-left:   max(env(safe-area-inset-left),   0px); }
 .safe-right  { padding-right:  max(env(safe-area-inset-right),  0px); }
 
-/* Minimal typography for markdown-rendered assistant messages. */
 .prose-chat p { margin: 0 0 0.6em; }
 .prose-chat p:last-child { margin-bottom: 0; }
 .prose-chat ul, .prose-chat ol { margin: 0 0 0.6em; padding-left: 1.25em; }

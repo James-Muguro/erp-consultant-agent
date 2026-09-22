@@ -97,11 +97,6 @@ export function AppLayout() {
     [refreshProjects],
   );
 
-  // The API call runs inside `onConfirm` so a failure (409 on already
-  // archived, 401 on expired session, network) keeps the dialog open
-  // with the error inline. This matches the delete handler below. The
-  // previous version of this handler called `confirm()` and then did
-  // nothing — the archive request was never sent.
   const handleArchiveProject = useCallback(
     async (id: string) => {
       const project = projects.find((p) => p.session_id === id);
@@ -144,7 +139,11 @@ export function AppLayout() {
   );
 
   return (
-    <div className="flex h-screen bg-paper">
+    // `app-viewport` uses 100dvh (with 100vh fallback). The document is
+    // locked to the visible viewport via overflow:hidden on html/body/
+    // #root, so the whole interface can never scroll as a unit. All
+    // scrolling happens inside explicit overflow-y-auto regions.
+    <div className="app-viewport flex bg-paper">
       <Sidebar
         projects={projects}
         activeSessionId={sessionId ?? null}
