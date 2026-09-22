@@ -4,10 +4,27 @@ Configuration settings for ERP Consultant Agent.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import ClassVar, List, Optional
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# ---------------------------------------------------------------------------
+# Repository root, resolved from this file's location
+# ---------------------------------------------------------------------------
+# `src/config/settings.py` → parent `src/config` → parent `src` → parent root.
+# Computed from `__file__` (an absolute path once imported) rather than from
+# the process's current working directory, so the value is stable no matter
+# where the process was launched from. Every relative path in the settings
+# below is anchored to this constant, which eliminates the class of bug
+# where the server and an ad-hoc script agree on the *setting* but
+# disagree on the *physical directory* because their CWDs differ. This is
+# what made profile-picture uploads appear to vanish: the file was written
+# to the server's CWD-relative output/profile_pictures/, and a later read
+# from a different CWD-relative path resolved to a different directory.
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 class Settings(BaseSettings):
@@ -32,10 +49,18 @@ class Settings(BaseSettings):
     Changing a model requires only an environment-variable change
     (GEMINI_MODEL / GROQ_MODEL / OPENAI_MODEL / ANTHROPIC_MODEL), with no
     Python code change.
+
+    Path anchoring: output_dir, logs_dir, and the .env file location are
+    all resolved against _REPO_ROOT (this file's grandparent directory),
+    not the process's current working directory. See _make_paths_absolute
+    below for the validator that enforces this.
     """
 
     model_config = SettingsConfigDict(
-        env_file='.env',
+        # Anchored to the repository root, not the process CWD. A server
+        # started from a subdirectory would otherwise load a different
+        # .env than the one the developer edits.
+        env_file=str(_REPO_ROOT / '.env'),
         env_file_encoding='utf-8',
         case_sensitive=False,
         extra='ignore',
@@ -176,6 +201,8 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     # Directories
     # ------------------------------------------------------------------ #
+    # Both are anchored to _REPO_ROOT by _make_paths_absolute below when
+    # they are relative. Absolute values are passed through unchanged.
     output_dir: str = Field(default="output")
     logs_dir: str = Field(default="logs")
 
@@ -238,6 +265,7 @@ class Settings(BaseSettings):
         description="Access token lifetime in minutes (default 24h). No refresh-token flow yet - "
                     "a user simply logs in again once expired.",
     )
+
     # ------------------------------------------------------------------ #
     # Properties
     # ------------------------------------------------------------------ #
@@ -348,6 +376,30 @@ class Settings(BaseSettings):
             raise ValueError(f"model name must not contain whitespace: {v!r}")
         return stripped
 
+    @field_validator("output_dir", "logs_dir")
+    @classmethod
+    def _make_paths_absolute(cls, v: str) -> str:
+        """Resolve relative directory paths against the repository root,
+        never the process's current working directory.
+
+        An unanchored relative path resolves differently depending on
+        where the process was started. In practice that means the server
+        and any ad-hoc script (a migration, a shell one-liner, a test
+        run) can agree on the setting while disagreeing on the physical
+        directory - files written by one are invisible to the other. That
+        is exactly the class of bug that made uploaded profile pictures
+        appear to disappear: the upload wrote to <server-CWD>/output/
+        profile_pictures/ and a later read from a different resolved
+        directory 404'd.
+
+        Absolute paths (production configuration, container WORKDIR-based
+        paths) are returned unchanged.
+        """
+        path = Path(v)
+        if path.is_absolute():
+            return str(path)
+        return str((_REPO_ROOT / path).resolve())
+
     @model_validator(mode="after")
     def _require_at_least_one_llm_provider(self) -> "Settings":
         """The hybrid LLM wrapper can run with any single fully-configured
@@ -405,7 +457,12 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     def init_directories(self) -> None:
         """Create output, log, and SQLite parent directories. Call once at
-        application startup."""
+        application startup.
+
+        All paths are absolute by the time they reach this method (see
+        _make_paths_absolute), so directory creation is independent of the
+        process's current working directory.
+        """
         os.makedirs(self.output_dir, exist_ok=True)
         os.makedirs(self.logs_dir, exist_ok=True)
 
@@ -415,8 +472,13 @@ class Settings(BaseSettings):
         if self.database_url.startswith("sqlite:///"):
             db_path = self.database_url[len("sqlite:///"):]
             if db_path and db_path != ":memory:":
-                parent = os.path.dirname(db_path)
-                if parent:
+                # Anchor a relative SQLite path the same way output_dir and
+                # logs_dir are anchored. Absolute paths pass through.
+                db_p = Path(db_path)
+                if not db_p.is_absolute():
+                    db_p = _REPO_ROOT / db_p
+                parent = db_p.parent
+                if parent and str(parent):
                     os.makedirs(parent, exist_ok=True)
 
     def describe_llm_configuration(self) -> dict:
@@ -449,6 +511,10 @@ class Settings(BaseSettings):
             },
             "concurrency": {
                 "llm_max_concurrent_calls": self.llm_max_concurrent_calls,
+            },
+            "paths": {
+                "output_dir": self.output_dir,
+                "logs_dir": self.logs_dir,
             },
         }
 
