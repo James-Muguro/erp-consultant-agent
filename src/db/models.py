@@ -425,7 +425,32 @@ class SolutionDecision(Base):
 
 
 class TestCaseRecord(Base):
-    """Unchanged from prior turn."""
+    """Structured QA / UAT test cases.
+
+    CANONICAL IDENTITY: (session_id, test_type, external_code).
+
+    `test_type` is part of the key because QA and UAT both emit short
+    sequential external codes (TC-001, TC-002, ...) per generation; the
+    same session may hold a QA case TC-001 and a UAT case TC-001 as
+    distinct rows, and both must coexist. The writer
+    (sync_test_cases_from_structured) upserts on exactly this triple via
+    PostgreSQL INSERT ... ON CONFLICT (session_id, test_type,
+    external_code) DO UPDATE, so the constraint below is also the index
+    used for conflict resolution and no additional index is required.
+
+    Test cases are NOT versioned: there is no lineage_id / version /
+    is_current column here, unlike RequirementItemRecord,
+    ProcessStepRecord, and SolutionDecision. Regeneration updates the
+    existing row's content fields in place, preserving its physical id,
+    created_at, and needs_retest flag. That statefulness is why
+    history-over-overwrite does not apply to this table.
+
+    The prior full-table UniqueConstraint uq_test_case_session_external_code
+    over (session_id, external_code) was incorrect - it prevented QA and
+    UAT from coexisting under a shared code namespace. It is replaced by
+    uq_test_case_session_type_external_code, which reflects the actual
+    identity of a test case.
+    """
     __tablename__ = "test_case_records"
 
     id = Column(String, primary_key=True)
@@ -450,13 +475,31 @@ class TestCaseRecord(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("session_id", "external_code",
-                         name="uq_test_case_session_external_code"),
+        # Canonical identity of a test case. Also serves as the index
+        # used by the ON CONFLICT clause in sync_test_cases_from_structured.
+        # The column order matters for PostgreSQL's ON CONFLICT
+        # inference and must match the writer.
+        UniqueConstraint("session_id", "test_type", "external_code",
+                         name="uq_test_case_session_type_external_code"),
     )
 
 
 class TrainingStepRecord(Base):
-    """Unchanged from prior turn."""
+    """Structured training manual steps.
+
+    CANONICAL IDENTITY: (session_id, external_code).
+
+    Training steps are NOT versioned: there is no lineage_id / version /
+    is_current column here. Regeneration updates the existing row's
+    content fields in place (title, instructions, role, verification,
+    prerequisites), preserving its physical id and created_at. This
+    matches the contract implemented by
+    sync_training_steps_from_structured in the service layer.
+
+    The unique constraint uq_training_step_session_external_code is
+    therefore correct as-is and is not changed by the test-case
+    reconciliation migration.
+    """
     __tablename__ = "training_step_records"
 
     id = Column(String, primary_key=True)

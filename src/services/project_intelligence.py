@@ -65,6 +65,31 @@ regenerations of the same identity cannot both commit a current row;
 the loser raises a real PostgreSQL IntegrityError, which the service
 propagates rather than swallowing.
 
+Test cases and training steps are NOT versioned by this module, and
+their sync functions use a different persistence contract:
+
+TestCaseRecord
+    Canonical identity is (session_id, test_type, external_code), which
+    is enforced by the unique constraint `uq_test_case_session_type_external_code`.
+    `test_type` is part of the identity because QA and UAT both emit
+    short sequential external codes (TC-001, TC-002, ...) per generation,
+    and their namespaces must not collide. The sync writes via PostgreSQL
+    INSERT ... ON CONFLICT DO UPDATE keyed on (session_id, test_type,
+    external_code): regeneration updates the existing row's content
+    fields in place, preserving its physical id, created_at, needs_retest,
+    and — after the sync's in-transaction trace-link refresh — its
+    trace-link edges. Concurrent regenerations of the same identity are
+    serialized by the row lock PostgreSQL acquires during ON CONFLICT
+    conflict resolution; there is no lookup-then-insert race window.
+
+TrainingStepRecord
+    Canonical identity is (session_id, external_code), enforced by
+    `uq_training_step_session_external_code`. The sync uses a lookup
+    then UPDATE-in-place or INSERT contract, keyed on that pair; the
+    physical id and created_at are preserved on regeneration, and trace
+    links are refreshed in a post-commit step so that `uq_trace_link_edge`
+    does not reject re-created edges.
+
 Explicit user-triggered revisions (revise_requirement,
 record_actual_solution, revise_process_step) also create new versions
 in the same lineage; they are unchanged by this docstring update.
@@ -872,6 +897,38 @@ def get_solution_decisions(
 def sync_test_cases_from_structured(
     session_id: str, test_type: str, structured_test_cases: List[Dict[str, Any]]
 ) -> List[str]:
+    """Persist test cases for a session, keyed on the canonical identity
+    (session_id, test_type, external_code) that
+    `uq_test_case_session_type_external_code` enforces in the database.
+
+    `test_type` is part of the identity because QA and UAT both emit
+    short sequential external codes (TC-001, TC-002, ...) per generation;
+    without it, the second agent to run for a given session collides with
+    the first on the uniqueness constraint.
+
+    Regeneration policy: on regeneration, a test case whose incoming `id`
+    matches an existing row in the same session and test_type is UPDATED
+    in place rather than colliding on the INSERT. The physical row id,
+    created_at, and needs_retest flag are preserved; only the content
+    fields (scenario, priority, expected_result, user_role,
+    business_process, acceptance_criteria, related_design_component) are
+    refreshed, and updated_at is set to the server's now().
+
+    Concurrency: the write uses PostgreSQL's INSERT ... ON CONFLICT
+    DO UPDATE, keyed on (session_id, test_type, external_code). This is
+    atomic: two racing regenerations of the same identity cannot both
+    INSERT; one inserts, the other updates. The previous lookup-then-
+    INSERT/UPDATE pattern had a race window between the SELECT and the
+    INSERT; the upsert does not.
+
+    Trace links for every test case written by this call are deleted and
+    re-created in the same transaction, so link changes between runs are
+    reflected and `uq_trace_link_edge` does not reject re-created edges.
+    Concurrent writers serialize on the row lock PostgreSQL acquires
+    during ON CONFLICT conflict resolution.
+    """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
     created_ids: List[str] = []
     pending_req_links: List[tuple] = []
     pending_step_links: List[tuple] = []
@@ -881,28 +938,93 @@ def sync_test_cases_from_structured(
         for tc in structured_test_cases or []:
             if not isinstance(tc, dict):
                 continue
-            tid = uuid.uuid4().hex
-            db.add(TestCaseRecord(**_filter_model_kwargs(
-                TestCaseRecord,
-                {
-                    "id": tid,
-                    "session_id": session_id,
-                    "test_type": test_type,
-                    "external_code": tc.get("id"),
-                    "scenario": tc.get("scenario", ""),
-                    "priority": tc.get("priority", "Medium"),
-                    "expected_result": tc.get("expected_result"),
-                    "user_role": tc.get("user_role"),
-                    "business_process": tc.get("business_process"),
-                    "acceptance_criteria": tc.get("acceptance_criteria"),
-                    "related_design_component": tc.get("related_design_component"),
-                },
-            )))
+
+            tc_code_raw = tc.get("id")
+            tc_code_norm: Optional[str] = None
+            if tc_code_raw not in (None, ""):
+                candidate = str(tc_code_raw).strip()
+                if candidate:
+                    tc_code_norm = candidate
+
+            if tc_code_norm is not None:
+                # Upsert keyed on the canonical identity. The DO UPDATE
+                # SET clause deliberately omits id, session_id, test_type,
+                # external_code, created_at, and needs_retest: those
+                # columns carry the row's persistent identity and
+                # execution state, which must survive regeneration.
+                new_id = uuid.uuid4().hex
+                ins = pg_insert(TestCaseRecord).values(
+                    id=new_id,
+                    session_id=session_id,
+                    test_type=test_type,
+                    external_code=tc_code_norm,
+                    scenario=tc.get("scenario", ""),
+                    priority=tc.get("priority", "Medium"),
+                    expected_result=tc.get("expected_result"),
+                    user_role=tc.get("user_role"),
+                    business_process=tc.get("business_process"),
+                    acceptance_criteria=tc.get("acceptance_criteria"),
+                    related_design_component=tc.get("related_design_component"),
+                    needs_retest=False,
+                )
+                stmt = ins.on_conflict_do_update(
+                    index_elements=["session_id", "test_type", "external_code"],
+                    set_={
+                        "scenario": ins.excluded.scenario,
+                        "priority": ins.excluded.priority,
+                        "expected_result": ins.excluded.expected_result,
+                        "user_role": ins.excluded.user_role,
+                        "business_process": ins.excluded.business_process,
+                        "acceptance_criteria": ins.excluded.acceptance_criteria,
+                        "related_design_component": ins.excluded.related_design_component,
+                        "updated_at": func.now(),
+                    },
+                ).returning(TestCaseRecord.id)
+                tid = db.execute(stmt).scalar_one()
+            else:
+                # No canonical code: insert fresh, exactly as before.
+                # PostgreSQL permits multiple NULL external_code rows for
+                # the same (session_id, test_type), so these never
+                # conflict with anything, including each other.
+                tid = uuid.uuid4().hex
+                db.add(TestCaseRecord(**_filter_model_kwargs(
+                    TestCaseRecord,
+                    {
+                        "id": tid,
+                        "session_id": session_id,
+                        "test_type": test_type,
+                        "external_code": None,
+                        "scenario": tc.get("scenario", ""),
+                        "priority": tc.get("priority", "Medium"),
+                        "expected_result": tc.get("expected_result"),
+                        "user_role": tc.get("user_role"),
+                        "business_process": tc.get("business_process"),
+                        "acceptance_criteria": tc.get("acceptance_criteria"),
+                        "related_design_component": tc.get("related_design_component"),
+                    },
+                )))
+
             created_ids.append(tid)
             pending_req_links.append((tid, tc.get("related_requirement_ids") or []))
             pending_step_links.append((tid, tc.get("related_process_step_ids") or []))
             if tc.get("execution_status") == "failed":
                 pending_failures.append((tid, tc))
+
+        # Delete prior trace links for every test case written by this
+        # call before re-linking. For freshly inserted rows this is a
+        # no-op (their physical ids are brand-new uuids). For regenerated
+        # rows it removes the prior links so that (a) link changes between
+        # runs are reflected, and (b) uq_trace_link_edge does not reject
+        # re-created edges. Runs in the same transaction as the upsert,
+        # so concurrent regenerations of the same test case serialize on
+        # the row lock acquired during ON CONFLICT conflict resolution.
+        if created_ids:
+            db.query(TraceLink).filter(
+                TraceLink.session_id == session_id,
+                TraceLink.source_type == "test_case",
+                TraceLink.source_id.in_(created_ids),
+            ).delete(synchronize_session=False)
+
         db.commit()
 
     for tc_id, codes in pending_req_links:
@@ -1028,9 +1150,33 @@ def mark_test_case_retested(session_id: str, test_case_id: str) -> bool:
 def sync_training_steps_from_structured(
     session_id: str, structured_materials: Dict[str, Any]
 ) -> List[str]:
+    """Persist training steps for a session, keyed on the canonical
+    identity (session_id, external_code) that
+    `uq_training_step_session_external_code` enforces in the database.
+
+    Regeneration policy: on regeneration, a training step whose incoming
+    `id` matches an existing row in this session is UPDATED in place
+    rather than colliding on the INSERT. The physical row id and
+    created_at are preserved; only the content fields (title,
+    instructions, role, verification, prerequisites) are refreshed.
+    updated_at is set by the model's onupdate. This is the same
+    UPDATE-in-place contract used by sync_test_cases_from_structured, and
+    for the same reason: the training tables are not versioned, but
+    re-running the training generation for a session must not fail on a
+    plain INSERT that collides with the prior run.
+
+    Steps with no usable external_code insert fresh rows, exactly as
+    before. PostgreSQL permits multiple NULL external_code rows for the
+    same session, so code-less steps remain add-only and do not collide.
+
+    Trace links for regenerated training steps are deleted and re-created
+    from the incoming payload, so link changes between runs are
+    reflected and duplicate edges do not violate `uq_trace_link_edge`.
+    """
     created_ids: List[str] = []
     pending_req_links: List[tuple] = []
     pending_step_links: List[tuple] = []
+    regenerated_ids: List[str] = []
 
     with _db_session() as db:
         user_manual = structured_materials.get("user_manual") or {}
@@ -1038,23 +1184,50 @@ def sync_training_steps_from_structured(
             steps = user_manual.get("steps") or []
         else:
             steps = []
+
         for step in steps:
             if not isinstance(step, dict):
                 continue
-            sid = uuid.uuid4().hex
-            db.add(TrainingStepRecord(**_filter_model_kwargs(
-                TrainingStepRecord,
-                {
-                    "id": sid,
-                    "session_id": session_id,
-                    "title": step.get("title", ""),
-                    "instructions": step.get("instructions"),
-                    "external_code": step.get("id"),
-                    "role": step.get("role"),
-                    "verification": step.get("verification"),
-                    "prerequisites": step.get("preconditions"),
-                },
-            )))
+
+            step_code_raw = step.get("id")
+            step_code_norm: Optional[str] = None
+            if step_code_raw not in (None, ""):
+                candidate = str(step_code_raw).strip()
+                if candidate:
+                    step_code_norm = candidate
+
+            existing: Optional[TrainingStepRecord] = None
+            if step_code_norm:
+                existing = (
+                    db.query(TrainingStepRecord)
+                    .filter(
+                        TrainingStepRecord.session_id == session_id,
+                        TrainingStepRecord.external_code == step_code_norm,
+                    )
+                    .first()
+                )
+
+            content_fields = _filter_model_kwargs(TrainingStepRecord, {
+                "title": step.get("title", ""),
+                "instructions": step.get("instructions"),
+                "external_code": step_code_norm,
+                "role": step.get("role"),
+                "verification": step.get("verification"),
+                "prerequisites": step.get("preconditions"),
+            })
+
+            if existing is not None:
+                for k, v in content_fields.items():
+                    setattr(existing, k, v)
+                sid = existing.id
+                regenerated_ids.append(sid)
+            else:
+                sid = uuid.uuid4().hex
+                db.add(TrainingStepRecord(**_filter_model_kwargs(
+                    TrainingStepRecord,
+                    {"id": sid, "session_id": session_id, **content_fields},
+                )))
+
             created_ids.append(sid)
             pending_req_links.append((sid, step.get("related_requirement_ids") or []))
             pending_step_links.append((sid, step.get("related_process_step_ids") or []))
@@ -1062,6 +1235,19 @@ def sync_training_steps_from_structured(
         _file_open_questions(db, session_id, structured_materials.get("open_questions") or [])
 
         db.commit()
+
+    # Delete prior trace links for regenerated training steps before
+    # re-linking. Training links may be to requirements or to process
+    # steps; both are stored with source_type='training_step', so the
+    # filter below covers both without distinguishing them.
+    if regenerated_ids:
+        with _db_session() as db:
+            db.query(TraceLink).filter(
+                TraceLink.session_id == session_id,
+                TraceLink.source_type == "training_step",
+                TraceLink.source_id.in_(regenerated_ids),
+            ).delete(synchronize_session=False)
+            db.commit()
 
     for step_id, codes in pending_req_links:
         if not codes:
