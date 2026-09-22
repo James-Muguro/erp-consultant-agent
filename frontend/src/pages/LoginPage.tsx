@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useAuth } from "../context/AuthContext";
 import { ApiError } from "../api/client";
 
@@ -9,6 +9,11 @@ export function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const emailRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    emailRef.current?.focus();
+  }, []);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -21,7 +26,17 @@ export function LoginPage() {
         await signup(email, password);
       }
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Something went wrong. Try again.");
+      if (err instanceof ApiError) {
+        // ApiError.message is user-safe (Step 1 hardening). It carries the
+        // backend's own wording for credentials failures ("Incorrect email
+        // or password"), rate limits, and validation errors. `kind` and
+        // `retryAfterSeconds` are available if we later want a distinct
+        // presentation per failure category; for now the message is the
+        // right thing to show.
+        setError(err.message);
+      } else {
+        setError("Something went wrong. Try again.");
+      }
     } finally {
       setSubmitting(false);
     }
@@ -61,15 +76,19 @@ export function LoginPage() {
             </button>
           </div>
 
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form onSubmit={handleSubmit} aria-busy={submitting} className="space-y-4">
             <div>
               <label htmlFor="email" className="mb-1 block text-sm text-ink-muted">
                 Email
               </label>
               <input
+                ref={emailRef}
                 id="email"
                 type="email"
                 required
+                autoComplete="email"
+                autoCapitalize="none"
+                autoCorrect="off"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 className="w-full rounded-md border border-border bg-surface px-3 py-2.5 text-base text-ink outline-none focus:border-accent sm:text-sm"
@@ -85,6 +104,7 @@ export function LoginPage() {
                 type="password"
                 required
                 minLength={8}
+                autoComplete={mode === "login" ? "current-password" : "new-password"}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="w-full rounded-md border border-border bg-surface px-3 py-2.5 text-base text-ink outline-none focus:border-accent sm:text-sm"
@@ -93,7 +113,9 @@ export function LoginPage() {
             </div>
 
             {error && (
-              <p role="alert" className="rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">{error}</p>
+              <p role="alert" className="rounded-md bg-danger-soft px-3 py-2 text-sm text-danger">
+                {error}
+              </p>
             )}
 
             <button
