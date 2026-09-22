@@ -12,6 +12,8 @@ export interface ProjectSummary {
   module: string;
   erp_system: string;
   is_casual: boolean;
+  /** True when the project is archived (SessionRecord.archived_at is set). */
+  is_archived: boolean;
   current_phase: string;
   completed_phases: string[];
   phases_completed: number;
@@ -46,17 +48,26 @@ export interface NextAction {
 
 export type ChatRole = "user" | "assistant";
 
+export type TurnState =
+  | { status: "streaming" }
+  | { status: "complete" }
+  | { status: "aborted" }
+  | { status: "failed"; error: string; retryable: boolean };
+
 export interface ChatMessage {
   id: string;
   role: ChatRole;
   text: string;
   createdAt: number;
   documents?: DocumentRef[];
-  isStreaming?: boolean;
-  error?: boolean;
   nextAction?: NextAction | null;
+  turnState?: TurnState;
+  sendParams?: {
+    agentHint?: string;
+    preferWeb?: boolean;
+  };
 }
-/** One parsed Server-Sent Event from /api/chat/stream. */
+
 export interface ChatStreamEvent {
   type:
     | "message_start"
@@ -144,11 +155,16 @@ export interface ProjectIssue {
 export interface ProjectHealth {
   requirements_total: number;
   requirements_by_status: Record<string, number>;
+  /** Rounded to one decimal by the backend (e.g. 85.7). */
   requirements_coverage_pct: number;
   open_issues_total: number;
   open_issues_by_severity: Record<string, number>;
-  uncovered_requirements_count?: number;
-  untested_requirements_count?: number;
+  /** Always present in the current backend response. */
+  uncovered_requirements_count: number;
+  /** Always present in the current backend response. */
+  untested_requirements_count: number;
+  /** True when the project has an active solution baseline. */
+  has_active_baseline: boolean;
 }
 
 export interface CoverageGapRequirement {
