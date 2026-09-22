@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import type { ProjectSummary } from "../types";
 import { useAuth } from "../context/AuthContext";
+import { Avatar } from "./Avatar";
 
 export function Sidebar({
   projects,
@@ -37,7 +38,6 @@ export function Sidebar({
   onRename: (sessionId: string, newName: string) => void;
   onArchive: (sessionId: string) => void;
   onDelete: (sessionId: string) => void;
-  /** Navigates to /settings and closes the mobile drawer if open. */
   onOpenSettings: () => void;
   showArchived: boolean;
   onToggleArchived: () => void;
@@ -116,13 +116,6 @@ export function Sidebar({
   }
 
   const displayName = user?.name || "Your profile";
-  const initials = (user?.name || "??")
-    .trim()
-    .split(/\s+/)
-    .map((part) => part[0])
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
 
   return (
     <>
@@ -291,17 +284,11 @@ export function Sidebar({
           {profileOpen && (
             <div className="absolute bottom-full left-3 right-3 mb-2 overflow-hidden rounded-md border border-border bg-surface shadow-lg">
               <div className="flex items-center gap-2 p-3">
-                {user?.profile_picture_url ? (
-                  <img
-                    src={user.profile_picture_url}
-                    alt=""
-                    className="h-9 w-9 rounded-full object-cover"
-                  />
-                ) : (
-                  <span className="flex h-9 w-9 items-center justify-center rounded-full bg-accent-soft text-xs font-semibold text-accent-strong">
-                    {initials}
-                  </span>
-                )}
+                <Avatar
+                  profilePictureUrl={user?.profile_picture_url}
+                  name={user?.name}
+                  size="md"
+                />
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-medium text-ink">
                     {displayName}
@@ -338,17 +325,11 @@ export function Sidebar({
             className="flex w-full items-center justify-between gap-2 rounded-md p-2 text-left hover:bg-paper"
           >
             <span className="flex min-w-0 items-center gap-2">
-              {user?.profile_picture_url ? (
-                <img
-                  src={user.profile_picture_url}
-                  alt=""
-                  className="h-8 w-8 shrink-0 rounded-full object-cover"
-                />
-              ) : (
-                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent-soft text-[10px] font-semibold text-accent-strong">
-                  {initials}
-                </span>
-              )}
+              <Avatar
+                profilePictureUrl={user?.profile_picture_url}
+                name={user?.name}
+                size="sm"
+              />
               <span className="truncate text-xs text-ink-muted">
                 {displayName}
               </span>

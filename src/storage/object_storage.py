@@ -8,6 +8,12 @@ disk or in the app's own database - Render's disk is ephemeral, and
 consultant-uploaded files (unlike the smaller AI-generated documents in
 GeneratedDocument) can be large enough that a bytea column is the wrong
 tool.
+
+Profile pictures also live here. They used to live on the local disk,
+which worked in development but was wiped on every deploy (the container
+filesystem is ephemeral), leaving the DB pointing at files that no
+longer existed. Moving them here uses the same mechanism as project
+documents with no new infrastructure.
 """
 import boto3
 from botocore.exceptions import ClientError
@@ -135,6 +141,32 @@ def make_storage_key(session_id: str, document_id: str, filename: str) -> str:
     safe_filename = _truncate_utf8(safe_filename, remaining)
 
     return f"{prefix}{safe_filename}"
+
+
+# ---------------------------------------------------------------------------
+# Profile pictures
+# ---------------------------------------------------------------------------
+# Profile pictures use a flat namespace under this prefix: unlike project
+# documents, they don't belong to a session, so the projects/<session>/
+# scheme doesn't apply. Every object lives under
+# profile_pictures/<filename>, where <filename> is the UUID + extension
+# the API generates at upload time.
+PROFILE_PICTURES_PREFIX = "profile_pictures"
+
+
+def make_profile_picture_key(filename: str) -> str:
+    """Return the S3 key for a profile picture.
+
+    The filename is sanitized with the same rules used for project
+    document keys, so a malformed value cannot inject extra ``/``
+    separators and escape the ``profile_pictures/`` prefix. The resulting
+    key always contains exactly one ``/`` character.
+    """
+    budget = _MAX_KEY_BYTES - len(PROFILE_PICTURES_PREFIX) - 1
+    safe = _truncate_utf8(_sanitize_key_component(filename), budget)
+    if not safe:
+        raise ValueError("profile picture filename must not be empty")
+    return f"{PROFILE_PICTURES_PREFIX}/{safe}"
 
 
 def upload_bytes(key: str, data: bytes, content_type: str) -> None:

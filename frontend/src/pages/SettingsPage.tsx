@@ -3,6 +3,7 @@ import { Star, Trash2, Upload } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import { useConfirm } from "../context/ConfirmContext";
 import { ApiError, api } from "../api/client";
+import { Avatar } from "../components/Avatar";
 
 export function SettingsPage() {
   const {
@@ -114,29 +115,16 @@ function ProfileSection({
     }
   }
 
-  const initials = (name || "??")
-    .trim()
-    .split(/\s+/)
-    .map((part) => part[0])
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
-
   return (
     <SettingsSection title="Profile">
       <form onSubmit={handleSave} className="space-y-5">
         <div className="flex items-center gap-4">
-          {profilePictureUrl ? (
-            <img
-              src={profilePictureUrl}
-              alt=""
-              className="h-14 w-14 shrink-0 rounded-full border border-border object-cover"
-            />
-          ) : (
-            <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-accent-soft text-sm font-semibold text-accent-strong">
-              {initials}
-            </span>
-          )}
+          <Avatar
+            profilePictureUrl={profilePictureUrl}
+            name={name}
+            size="lg"
+            bordered
+          />
           <div className="min-w-0">
             <label
               htmlFor="settings-picture"
@@ -475,13 +463,6 @@ function FeedbackSection() {
   );
 }
 
-/**
- * Delete-account section. Uses the shared ConfirmDialog via useConfirm
- * so the destructive confirmation is consistent with archive and
- * permanent-project-delete. The API call runs *inside* `onConfirm`, so
- * a failure keeps the dialog open with the error message and the user
- * can retry without re-entering the confirmation from scratch.
- */
 function DangerZoneSection({
   onDeleteAccount,
 }: {

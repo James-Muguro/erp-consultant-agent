@@ -928,6 +928,32 @@ def update_account_settings(
         db, current_user, req.name, current_user.profile_picture_url,
     )
 
+# ---------------------------------------------------------------------------
+# Profile picture handling
+# ---------------------------------------------------------------------------
+_PROFILE_PICTURE_MAX_BYTES = 5 * 1024 * 1024
+_PROFILE_PICTURE_ALLOWED_CONTENT_TYPES = frozenset({
+    "image/jpeg", "image/png", "image/gif", "image/webp",
+})
+_PROFILE_PICTURE_ALLOWED_SUFFIXES = frozenset({
+    ".jpg", ".jpeg", ".png", ".gif", ".webp",
+})
+_PROFILE_PICTURE_CONTENT_TYPE_BY_SUFFIX = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+
+def _extract_profile_picture_filename(url: Optional[str]) -> Optional[str]:
+    """Return the filename portion of a stored profile_picture_url, or
+    None if the URL is empty/malformed. The stored URL shape is
+    ``/api/auth/profile-picture/<filename>``."""
+    if not url:
+        return None
+    filename = url.rsplit("/", 1)[-1]
+    return filename or None
 
 @app.post("/api/auth/profile-picture", response_model=UserOut)
 def upload_profile_picture(
@@ -935,38 +961,165 @@ def upload_profile_picture(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    if file.content_type not in {"image/jpeg", "image/png", "image/gif", "image/webp"}:
-        raise HTTPException(status_code=415, detail="Profile picture must be a supported image")
+    """Upload or replace the current user's profile picture.
+
+    Storage is object storage, not the local filesystem. Previously the
+    file was written under settings.output_dir, which works in
+    development but is erased on every container redeploy - the DB then
+    points at a filename that no longer exists and the browser gets a
+    404. Object storage survives redeploys, same as project document
+    uploads already do.
+
+    Ordering: the object is written first, then the DB row is updated.
+    If the DB commit fails we delete the just-uploaded object so a
+    failed request doesn't leave an orphan. If we did it the other way
+    around, a failed upload would leave the DB pointing at an object
+    that never existed.
+    """
+    if not settings.object_storage_configured:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Profile picture upload isn't available - object storage "
+                "isn't configured on this server."
+            ),
+        )
+
+    if file.content_type not in _PROFILE_PICTURE_ALLOWED_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail="Profile picture must be a supported image",
+        )
 
     suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in {".jpg", ".jpeg", ".png", ".gif", ".webp"}:
-        raise HTTPException(status_code=415, detail="Profile picture must be a supported image")
+    if suffix not in _PROFILE_PICTURE_ALLOWED_SUFFIXES:
+        raise HTTPException(
+            status_code=415,
+            detail="Profile picture must be a supported image",
+        )
 
-    # Bounded read: profile pictures are small, cap at 5MB.
-    content = file.file.read(5 * 1024 * 1024 + 1)
-    if len(content) > 5 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="Profile picture exceeds the 5MB limit")
+    content = file.file.read(_PROFILE_PICTURE_MAX_BYTES + 1)
+    if len(content) > _PROFILE_PICTURE_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="Profile picture exceeds the 5MB limit",
+        )
 
-    picture_dir = Path(settings.output_dir) / "profile_pictures"
-    picture_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"{uuid_lib.uuid4().hex}{suffix}"
-    picture_path = picture_dir / filename
-    with picture_path.open("wb") as destination:
-        destination.write(content)
-
-    return auth_service.update_profile(
-        db, current_user, current_user.name, f"/api/auth/profile-picture/{filename}",
+    # Capture the previous filename before the DB update so the old
+    # object can be cleaned up after the new one is durably persisted.
+    old_filename = _extract_profile_picture_filename(
+        current_user.profile_picture_url
     )
+
+    filename = f"{uuid_lib.uuid4().hex}{suffix}"
+    storage_key = object_storage.make_profile_picture_key(filename)
+    content_type = (
+        _PROFILE_PICTURE_CONTENT_TYPE_BY_SUFFIX.get(suffix)
+        or file.content_type
+        or "application/octet-stream"
+    )
+
+    try:
+        object_storage.upload_bytes(storage_key, content, content_type)
+    except ObjectStorageError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Upload to storage failed: {e}",
+        )
+
+    try:
+        user = auth_service.update_profile(
+            db,
+            current_user,
+            current_user.name,
+            f"/api/auth/profile-picture/{filename}",
+        )
+    except Exception:
+        # The DB write failed after the object was written. Delete the
+        # just-uploaded object so we don't leave an orphan, then let the
+        # original exception propagate so the client sees the real error.
+        try:
+            object_storage.delete_object(storage_key)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Failed to roll back profile picture object after DB failure",
+                storage_key=storage_key,
+            )
+        raise
+
+    # Best-effort cleanup of the previous picture. Failures here are
+    # logged but not raised: the new picture is already saved, and the
+    # user's success is independent of whether we cleaned up the old
+    # file. The orphaned object is harmless and can be swept later.
+    if old_filename:
+        try:
+            object_storage.delete_object(
+                object_storage.make_profile_picture_key(old_filename)
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "Failed to delete previous profile picture from storage",
+                storage_key=old_filename,
+                error=str(e),
+            )
+
+    return user
 
 
 @app.get("/api/auth/profile-picture/{filename}")
 def get_profile_picture(filename: str):
-    if Path(filename).name != filename:
+    """Stream a profile picture from object storage.
+
+    The URL shape is unchanged from the previous local-disk version, so
+    the frontend needs no change. The bytes are fetched from S3 and
+    returned inline; for 5MB-capped images this is fine, and it keeps
+    the bucket private (no signed-URL expiry to manage, no public-read
+    bucket ACLs).
+    """
+    # Reject anything with a path separator. The S3 key is built from a
+    # single segment by make_profile_picture_key; a value containing "/"
+    # or "\" would either be silently neutralized by the sanitizer (which
+    # would resolve to a different key than the caller expects) or look
+    # like a traversal attempt. Rejecting explicitly keeps the endpoint's
+    # contract simple and matches the pre-migration check.
+    if (
+        not filename
+        or Path(filename).name != filename
+        or "/" in filename
+        or "\\" in filename
+    ):
         raise HTTPException(status_code=404, detail="Profile picture not found")
-    picture_path = Path(settings.output_dir) / "profile_pictures" / filename
-    if not picture_path.is_file():
+
+    # A URL pointing at object storage could only have been issued when
+    # storage was configured. If it isn't configured now, the object is
+    # unreachable. Return 404 rather than 503 so the frontend's <img>
+    # falls back to initials - visually identical to "picture missing",
+    # which is the correct user-facing behavior either way.
+    if not settings.object_storage_configured:
         raise HTTPException(status_code=404, detail="Profile picture not found")
-    return FileResponse(path=str(picture_path))
+
+    try:
+        content = object_storage.download_bytes(
+            object_storage.make_profile_picture_key(filename)
+        )
+    except ObjectStorageError:
+        # Includes the "object does not exist" case, which is what we
+        # return for a stale URL left over from a pre-migration upload.
+        raise HTTPException(status_code=404, detail="Profile picture not found")
+
+    suffix = Path(filename).suffix.lower()
+    media_type = _PROFILE_PICTURE_CONTENT_TYPE_BY_SUFFIX.get(
+        suffix, "application/octet-stream"
+    )
+
+    # Profile picture filenames are fresh UUIDs on every upload, so the
+    # URL identifies immutable content. A long max-age is safe and
+    # avoids re-fetching the image on every page navigation.
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 @app.post("/api/auth/password")
@@ -1007,18 +1160,24 @@ def delete_account(
                 session_id=session_id, error=str(e),
             )
 
-    # Profile picture on disk is not tracked in the DB.
-    if current_user.profile_picture_url:
-        pic_filename = current_user.profile_picture_url.rsplit("/", 1)[-1]
-        if pic_filename:
-            pic_path = Path(settings.output_dir) / "profile_pictures" / pic_filename
-            try:
-                pic_path.unlink(missing_ok=True)
-            except Exception as e:  # noqa: BLE001
-                logger.warning(
-                    "Failed to delete profile picture during account deletion",
-                    error=str(e),
-                )
+    # Profile picture lives in object storage, not the local disk. The
+    # URL is what we have; the filename is the last path segment. Delete
+    # is best-effort: an orphaned object is harmless and should not fail
+    # the account deletion.
+    pic_filename = _extract_profile_picture_filename(
+        current_user.profile_picture_url
+    )
+    if pic_filename and settings.object_storage_configured:
+        try:
+            object_storage.delete_object(
+                object_storage.make_profile_picture_key(pic_filename)
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "Failed to delete profile picture from object storage "
+                "during account deletion",
+                error=str(e),
+            )
 
     # Any Feedback rows still present (the cascade may already have taken
     # care of them) plus the user row itself.
