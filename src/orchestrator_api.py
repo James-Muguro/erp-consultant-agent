@@ -16,6 +16,13 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import quote
 
+# ---------------------------------------------------------------------------
+# Frontend bundle location, anchored to the repository root
+# ---------------------------------------------------------------------------.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_FRONTEND_DIST = _REPO_ROOT / "frontend" / "dist"
+_FRONTEND_INDEX = _FRONTEND_DIST / "index.html"
+
 import structlog
 import uvicorn
 from fastapi import (
@@ -322,10 +329,10 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     )
 
 
-if os.path.isdir("frontend/dist/assets"):
+if (_FRONTEND_DIST / "assets").is_dir():
     app.mount(
         "/assets",
-        StaticFiles(directory="frontend/dist/assets"),
+        StaticFiles(directory=str(_FRONTEND_DIST / "assets")),
         name="frontend_assets",
     )
 
@@ -2745,17 +2752,38 @@ def chat_stream(
 # ---------------------------------------------------------------------------
 # UI root
 # ---------------------------------------------------------------------------
-@app.get("/")
-def get_ui():
+
+_SPA_EXCLUDED_PREFIXES = ("api/", "assets/")
+_SPA_EXCLUDED_EXACT = frozenset({
+    "health", "ready", "metrics",
+    "docs", "redoc", "openapi.json",
+})
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+def serve_spa(full_path: str) -> Response:
+    """Serve the SPA's index.html for any client-side route.
+
+    See the module-level note above for the full rationale. The guards
+    below ensure genuine backend 404s keep returning JSON.
+    """
+    if full_path.startswith(_SPA_EXCLUDED_PREFIXES):
+        raise HTTPException(status_code=404, detail="Not Found")
+    if full_path in _SPA_EXCLUDED_EXACT:
+        raise HTTPException(status_code=404, detail="Not Found")
+
     try:
-        with open('frontend/dist/index.html', 'r', encoding='utf-8') as f:
+        with _FRONTEND_INDEX.open("r", encoding="utf-8") as f:
             html = f.read()
         return HTMLResponse(content=html, status_code=200)
     except FileNotFoundError:
         return HTMLResponse(
-            content='<h3>ERP Orchestrator API</h3>'
-                    '<p>Frontend not built yet - run <code>npm run build</code> in frontend/. '
-                    'API docs: <a href="/docs">/docs</a>.</p>',
+            content=(
+                "<h3>ERP Orchestrator API</h3>"
+                "<p>Frontend not built yet - run <code>npm run build</code> "
+                "in <code>frontend/</code>. API docs: "
+                '<a href="/docs">/docs</a>.</p>'
+            ),
             status_code=200,
         )
 
