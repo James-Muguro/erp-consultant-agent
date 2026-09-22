@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Link, useParams } from "react-router-dom";
 import { HealthOverview } from "./HealthOverview";
 import { RequirementsList } from "./RequirementsList";
 import { ProcessStepsList } from "./ProcessStepsList";
@@ -8,7 +8,15 @@ import { IssuesList } from "./IssuesList";
 import { UploadsPanel } from "./UploadsPanel";
 import { DeliverablesPanel } from "./DeliverablesPanel";
 
-type Tab = "overview" | "requirements" | "process" | "solution" | "testing" | "issues" | "deliverables" | "documents";
+type Tab =
+  | "overview"
+  | "requirements"
+  | "process"
+  | "solution"
+  | "testing"
+  | "issues"
+  | "deliverables"
+  | "documents";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -21,8 +29,17 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "documents", label: "Uploads" },
 ];
 
+function isTab(value: string | undefined): value is Tab {
+  return value !== undefined && TABS.some((t) => t.id === value);
+}
+
 export function ProjectWorkspace({ sessionId }: { sessionId: string }) {
-  const [tab, setTab] = useState<Tab>("overview");
+  const { tab: rawTab } = useParams<{ tab?: string }>();
+  const tab: Tab = isTab(rawTab) ? rawTab : "overview";
+
+  function tabPath(id: Tab): string {
+    return id === "overview" ? `/p/${sessionId}` : `/p/${sessionId}/${id}`;
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -31,19 +48,24 @@ export function ProjectWorkspace({ sessionId }: { sessionId: string }) {
         aria-label="Project sections"
         className="flex gap-1 overflow-x-auto border-b border-border bg-surface px-3 py-2 sm:px-4"
       >
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            role="tab"
-            aria-selected={tab === t.id}
-            onClick={() => setTab(t.id)}
-            className={`shrink-0 rounded-md px-3 py-2 text-sm transition-colors sm:py-1.5 ${
-              tab === t.id ? "bg-accent-soft text-accent-strong" : "text-ink-muted hover:bg-paper"
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
+        {TABS.map((t) => {
+          const isActive = tab === t.id;
+          return (
+            <Link
+              key={t.id}
+              to={tabPath(t.id)}
+              role="tab"
+              aria-selected={isActive}
+              className={`shrink-0 rounded-md px-3 py-2 text-sm transition-colors sm:py-1.5 ${
+                isActive
+                  ? "bg-accent-soft text-accent-strong"
+                  : "text-ink-muted hover:bg-paper"
+              }`}
+            >
+              {t.label}
+            </Link>
+          );
+        })}
       </nav>
 
       <div className="flex-1 overflow-y-auto p-4 sm:p-6">
