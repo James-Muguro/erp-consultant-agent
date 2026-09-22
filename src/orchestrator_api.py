@@ -1093,13 +1093,17 @@ def list_projects(
     include_archived: bool = False,
     current_user: User = Depends(get_current_user),
 ):
-    session_ids = agent_memory.session_service.list_sessions_for_user(
+    """List the authenticated user's projects.
+
+    One query for the whole listing, including each project's archived
+    state. Previously this did a SELECT for session IDs, then a
+    per-session summary lookup - an N+1 that would have gotten worse if
+    is_archived had been added as another per-session call.
+    """
+    summaries = agent_memory.session_service.list_project_summaries_for_user(
         current_user.id, include_archived=include_archived,
     )
-    summaries = [
-        agent_memory.session_service.get_session_summary(sid) for sid in session_ids
-    ]
-    return {"projects": [s for s in summaries if s]}
+    return {"projects": summaries}
 
 
 @app.post("/api/projects/start")

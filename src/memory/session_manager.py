@@ -638,6 +638,69 @@ class DbSessionService(InMemorySessionService):
         finally:
             db.close()
 
+    def list_project_summaries_for_user(
+        self, user_id: str, include_archived: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Return per-project summary dicts for one user's sessions, in a
+        single query.
+
+        Replaces the two-step list_sessions_for_user() + per-session
+        get_session_summary() pattern that the projects-list route used to
+        use. That pattern was already an N+1: one SELECT for the session
+        IDs, then one SELECT per session (on cache miss) to load the JSON
+        the summary is built from. Adding is_archived via a per-session
+        lookup would have doubled the per-project cost. Both the summary
+        content (from SessionRecord.data) and the archived flag (from
+        SessionRecord.archived_at) come from the same row, so no second
+        round trip is needed.
+
+        Records whose stored JSON cannot be deserialized are skipped with
+        a logged error, matching the previous route behavior, which
+        filtered falsy summaries out of the response rather than failing
+        the whole listing.
+        """
+        from src.db.models import SessionRecord
+        from sqlalchemy import select
+
+        db = self._db_session_factory()
+        try:
+            query = select(SessionRecord).where(
+                SessionRecord.user_id == user_id
+            )
+            if not include_archived:
+                query = query.where(SessionRecord.archived_at.is_(None))
+            records = db.execute(
+                query.order_by(SessionRecord.updated_at.desc())
+            ).scalars().all()
+        finally:
+            db.close()
+
+        summaries: List[Dict[str, Any]] = []
+        for record in records:
+            try:
+                session = SessionState.from_dict(record.data)
+            except Exception as e:  # noqa: BLE001
+                self.logger.error(
+                    f"Failed to deserialize session {record.session_id}: {e}"
+                )
+                continue
+            summaries.append({
+                'session_id': session.session_id,
+                'project_name': session.project_name,
+                'module': session.module,
+                'erp_system': session.erp_system,
+                'is_casual': session.is_casual,
+                'is_archived': record.archived_at is not None,
+                'current_phase': session.current_phase,
+                'completed_phases': session.completed_phases,
+                'phases_completed': len(session.completed_phases),
+                'total_conversations': len(session.conversation_history),
+                'total_decisions': len(session.decisions_log),
+                'created_at': session.created_at.isoformat(),
+                'last_updated': session.updated_at.isoformat(),
+            })
+        return summaries
+
     def rename_session(
         self, session_id: str, new_project_name: str,
     ) -> Optional[SessionState]:
