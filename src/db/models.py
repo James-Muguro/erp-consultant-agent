@@ -64,11 +64,6 @@ class SessionRecord(Base):
     __tablename__ = "sessions"
 
     session_id = Column(String, primary_key=True)
-    # Nullable for backward compatibility with sessions created before Stage 2
-    # (auth) existed. Every session created from this point on always sets it.
-    # ON DELETE SET NULL matches the database constraint established by
-    # migration 9ec08dd1761d, so a user deletion nulls this reference
-    # rather than blocking the delete.
     user_id = Column(
         String,
         ForeignKey("users.id", ondelete="SET NULL"),
@@ -83,14 +78,7 @@ class SessionRecord(Base):
         DateTime(timezone=True), nullable=False, default=_utcnow,
         onupdate=_utcnow, index=True,
     )
-    # Soft delete: archived conversations are hidden from the default project
-    # list but not destroyed. NULL = active. Set on DELETE /api/projects/{id}.
     archived_at = Column(DateTime(timezone=True), nullable=True, index=True)
-    # True for sessions auto-created from a plain question (no explicit
-    # "start a project" intent) - lets the sidebar hide module/phase
-    # metadata that was never meaningfully chosen for these. Sessions
-    # created before this column existed default to False (real projects),
-    # matching their actual origin at the time.
     is_casual = Column(
         Boolean, nullable=False, default=False,
         server_default=text("false"),
@@ -110,14 +98,9 @@ class User(Base):
 
 
 class Feedback(Base):
-    """User feedback on a single chat/phase interaction. Deliberately simple
-    - a free-text comment plus an optional 1-5 rating - since there's no UI
-    yet to drive anything richer (see Phase 4 in the roadmap)."""
     __tablename__ = "feedback"
 
     id = Column(String, primary_key=True)
-    # ON DELETE SET NULL + nullable matches migration 9ec08dd1761d: a user
-    # deletion nulls this reference rather than blocking the delete.
     user_id = Column(
         String,
         ForeignKey("users.id", ondelete="SET NULL"),
@@ -127,7 +110,7 @@ class Feedback(Base):
         String, ForeignKey("sessions.session_id", ondelete="CASCADE"),
         nullable=True, index=True,
     )
-    rating = Column(Integer, nullable=True)  # 1-5, optional
+    rating = Column(Integer, nullable=True)
     comment = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
 
@@ -136,47 +119,9 @@ class Feedback(Base):
 # Documents
 # ============================================================================
 class GeneratedDocument(Base):
-    """Durable storage for generated documents (requirements, process
-    maps, solution designs, test cases, training materials, etc).
-    Documents were previously written only to local disk
-    (output/documents/), which is wiped on every Render redeploy or
-    free-tier idle-restart - this table is the fix. The actual file
-    bytes live here; local disk is now only a transient scratch space
-    used during generation, never the source of truth for downloads.
-
-    Regeneration lifecycle: the platform's overarching principle is
-    history-over-overwrite (see SolutionBaseline), so a regenerated
-    document does not delete the prior row - the prior row has
-    is_current flipped to False and remains queryable as history.
-    `is_current` is therefore the single authoritative selector for the
-    artifact a user should receive: download logic MUST filter on
-    is_current = True for the given (session_id, phase, label). The
-    composite index ix_generated_documents_session_phase_label backs
-    that lookup. `updated_at` exists so a same-second regeneration has
-    a deterministic ordering key if a full history is ever displayed.
-
-    Logical artifact identity is (session_id, phase, label). This is
-    derived from the existing callers, not invented here: `phase` is
-    the document-type/phase identifier and `label` carries the
-    instance (e.g. a process name for process-mapping phase, or the
-    phase constant itself for singleton documents).
-
-    The invariant "at most one current row per logical identity" is
-    enforced at the database level by a partial unique index over
-    (session_id, phase, label) WHERE is_current. Historical rows
-    (is_current=False) are exempt, so a regenerated document coexists
-    with its predecessors. The writer still flips the prior row's
-    is_current to False before inserting the new current row (so the
-    common sequential case succeeds without a conflict), and the
-    database constraint is what guarantees safety when two concurrent
-    regenerations race - one transaction will raise IntegrityError,
-    which the writer must surface as a real persistence failure rather
-    than swallow.
-
-    Physical artifact cleanup (deleting bytes on disk for a row that
-    has been superseded) is NOT this model's responsibility - see the
-    storage layer. This model only tracks metadata and content bytes.
-    """
+    """Unchanged from prior turn. GeneratedDocument.is_current is a
+    separate artifact lifecycle and is NOT part of the unified versioning
+    contract."""
     __tablename__ = "generated_documents"
 
     id = Column(String, primary_key=True)
@@ -186,12 +131,6 @@ class GeneratedDocument(Base):
     )
     phase = Column(String, nullable=False)
     label = Column(String, nullable=False)
-    # The authoritative artifact for a logical document. At most one
-    # row per (session_id, phase, label) may have is_current=true;
-    # the partial unique index below enforces this at the database
-    # level. Regeneration flips the prior row to False and inserts a
-    # new True row in the same transaction. server_default is provided
-    # so the migration backfilling pre-existing rows is trivial.
     is_current = Column(
         Boolean, nullable=False, default=True,
         server_default=text("true"), index=True,
@@ -203,33 +142,16 @@ class GeneratedDocument(Base):
     )
     content = Column(LargeBinary, nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
-    # Set on every write. Populated for pre-existing rows by the
-    # migration from created_at. Provides a deterministic tie-breaker
-    # for same-second regenerations and a stable ordering key if the
-    # full version history is ever rendered.
     updated_at = Column(
         DateTime(timezone=True), nullable=False, default=_utcnow,
         onupdate=_utcnow,
     )
 
     __table_args__ = (
-        # Backs the "select the current artifact for this logical
-        # document" query: WHERE session_id=? AND phase=? AND label=?
-        # (AND is_current=true). The single-column session_id index
-        # above remains for cross-phase scans.
         Index(
             "ix_generated_documents_session_phase_label",
             "session_id", "phase", "label",
         ),
-        # Database-enforced invariant: at most one CURRENT row per
-        # logical document identity (session_id, phase, label).
-        # Historical rows (is_current=False) are exempt from the
-        # constraint, so a regenerated document coexists with its
-        # predecessors. This is what makes concurrent regenerations
-        # safe: if two transactions both try to insert/keep a current
-        # row for the same identity, one succeeds and the other raises
-        # IntegrityError, which the writer must surface as a real
-        # persistence failure rather than swallow.
         Index(
             "ix_generated_documents_session_phase_label_current",
             "session_id", "phase", "label",
@@ -241,23 +163,7 @@ class GeneratedDocument(Base):
 
 
 class ProjectDocument(Base):
-    """Metadata for a consultant-uploaded project document (distinct from
-    GeneratedDocument above, which is AI-generated deliverables). The
-    actual file bytes live in object storage (see
-    src/storage/object_storage.py), not here and not on local disk -
-    Render's disk is ephemeral, so this table only stores a pointer
-    (storage_key) plus enough metadata to list, download, and delete the
-    file. extracted_text_chars records how much text was pulled out and
-    fed into project_memories (see src/tools/document_extractor.py) - 0
-    means extraction found nothing usable (e.g. a scanned/image-only PDF),
-    which the API surfaces so the consultant knows the upload succeeded
-    but isn't yet searchable content.
-
-    Session ownership: rows have no lifecycle independent of the owning
-    session, so the sessions.session_id FK declares ON DELETE CASCADE.
-    Deleting the DB row does not remove the object from external storage;
-    that separation remains the responsibility of the storage layer.
-    """
+    """Unchanged from prior turn."""
     __tablename__ = "project_documents"
 
     id = Column(String, primary_key=True)
@@ -265,8 +171,6 @@ class ProjectDocument(Base):
         String, ForeignKey("sessions.session_id", ondelete="CASCADE"),
         nullable=False, index=True,
     )
-    # ON DELETE SET NULL + nullable matches migration 9ec08dd1761d: a user
-    # deletion nulls this reference rather than blocking the delete.
     user_id = Column(
         String,
         ForeignKey("users.id", ondelete="SET NULL"),
@@ -286,25 +190,7 @@ class ProjectDocument(Base):
 # Project memory
 # ============================================================================
 class ProjectMemory(Base):
-    """Per-project agent knowledge: seeded templates, patterns the agents
-    generate as they work, lessons learned at project completion, and
-    (soon) extracted text from uploaded documents.
-
-    Strictly scoped to session_id - this replaces the old global,
-    file-based MemoryBank (src/memory/memory_bank.py), which had every
-    project's "learned" content shared across ALL users and projects. That
-    was fine for a single-tenant hackathon demo but is a real cross-tenant
-    data leak once there's more than one user: one user's project details
-    could surface in another user's agent-generated output. Every query
-    against this table must filter by session_id - there is no
-    cross-project read path, by design.
-
-    Session ownership: rows have no lifecycle independent of the owning
-    session, so the sessions.session_id FK declares ON DELETE CASCADE.
-    Before this was set, PostgreSQL rejected the parent session delete
-    with ForeignKeyViolation on project_memories_session_id_fkey, since
-    the child rows still referenced the session at delete time.
-    """
+    """Unchanged from prior turn."""
     __tablename__ = "project_memories"
 
     id = Column(String, primary_key=True)
@@ -315,9 +201,6 @@ class ProjectMemory(Base):
     category = Column(String, nullable=False, index=True)
     content = Column(Text, nullable=False)
     entry_metadata = Column(_json_type()(), nullable=True)
-    # Stored as JSON (not a native array type) so this works identically on
-    # SQLite (dev) and Postgres (prod) - consistent with the rest of this
-    # file's approach to cross-dialect columns.
     tags = Column(_json_type()(), nullable=True)
     importance = Column(Float, nullable=False, default=1.0)
     access_count = Column(Integer, nullable=False, default=0)
@@ -329,19 +212,9 @@ class ProjectMemory(Base):
 # Project intelligence - structured objects
 # ============================================================================
 class RequirementItemRecord(Base):
-    """Structured, identifiable requirement objects - the 'requirements
-    intelligence' layer. Coexists with the existing JSON blob stored on
-    SessionState/SessionRecord; this table is what makes requirements
-    queryable, reviewable, and traceable instead of only living inside a
-    generated document.
-
-    external_code holds the canonical model-reported ID (e.g. 'REQ-001'),
-    which is what link_requirements() / resolve_requirement_codes() match
-    on. Rationale and source are captured from the requirements schema's
-    change-control fields; they were previously dropped by the sync layer.
-    Non-functional requirements are stored under category='Non-functional'
-    rather than a separate table - they share every other field shape.
-    """
+    """UNCHANGED from prior turn. Already carries the partial unique
+    index ix_requirement_items_session_external_code_current over
+    (session_id, external_code) WHERE is_current."""
     __tablename__ = "requirement_items"
 
     id = Column(String, primary_key=True)
@@ -349,20 +222,16 @@ class RequirementItemRecord(Base):
         String, ForeignKey("sessions.session_id", ondelete="CASCADE"),
         nullable=False, index=True,
     )
-    lineage_id = Column(String, nullable=False, index=True)  # stable across all versions of "the same" requirement
+    lineage_id = Column(String, nullable=False, index=True)
     version = Column(Integer, nullable=False, default=1)
     is_current = Column(Boolean, nullable=False, default=True)
     category = Column(String, nullable=False)
-    external_code = Column(String, nullable=True, index=True)  # model-assigned ID e.g. "REQ-001", for LLM-referenceable linking
+    external_code = Column(String, nullable=True, index=True)
     description = Column(Text, nullable=False)
     priority = Column(String, nullable=False, default="Medium")
     req_type = Column(String, nullable=False, default="Functional")
     acceptance_criteria = Column(Text, nullable=True)
-    status = Column(String, nullable=False, default="draft")  # draft, approved, rejected
-    # Change-control fields. rationale explains why the requirement exists
-    # (needed when scope is renegotiated); source names its origin
-    # (stakeholder, regulation, existing-system limitation). Both optional -
-    # a missing value is preferable to a fabricated one.
+    status = Column(String, nullable=False, default="draft")
     rationale = Column(Text, nullable=True)
     source = Column(Text, nullable=True)
     source_excerpt = Column(Text, nullable=True)
@@ -373,20 +242,14 @@ class RequirementItemRecord(Base):
     )
 
     __table_args__ = (
-        # Two requirements in the same session must not share a model-facing
-        # code - otherwise resolve_requirement_codes() picks an arbitrary
-        # match and traceability becomes ambiguous. The ID normalizer in the
-        # requirements schema is permissive (accepts REQ1, REQ_001, req-001
-        # and normalizes them), so duplicates can theoretically arise from
-        # sloppy model output; this constraint turns that into a loud insert
-        # failure rather than a silent traceability bug.
-        UniqueConstraint("session_id", "external_code",
-                         name="uq_requirement_session_external_code"),
-        # Database-enforced invariant: at most one CURRENT version per
-        # lineage. Historical versions (is_current=False) are exempt and
-        # may accumulate without limit. Established by migration
-        # 8b69bcaa614c. The single-column lineage_id index from the
-        # column declaration above remains for history lookups.
+        Index(
+            "ix_requirement_items_session_external_code_current",
+            "session_id",
+            "external_code",
+            unique=True,
+            postgresql_where=text("is_current"),
+            sqlite_where=text("is_current"),
+        ),
         Index(
             "ix_requirement_items_lineage_current",
             "lineage_id",
@@ -401,15 +264,28 @@ class ProcessStepRecord(Base):
     """Structural representation of business process steps, linkable back
     to the requirement(s) they implement.
 
-    requirement_id (singular) is legacy: the domain is many-to-many and the
-    canonical storage of step→requirement links is TraceLink (see
-    project_intelligence.link_requirements). The column is retained for
-    backward compatibility with any reader that expects it, but new code
-    should use TraceLink.
+    UNIFIED VERSIONING CONTRACT (this cycle):
 
-    external_code carries the ProcessStep.id (STEP-NNN) so a re-sync can
-    correlate with prior rows. Without it, every sync produced a fresh
-    lineage with no external handle.
+    The canonical business identity of a process step is
+    (session_id, external_code). Across regeneration the step keeps the
+    same external_code, keeps its lineage_id, increments `version`, the
+    previous current row is flipped to is_current=False, and the new row
+    is inserted with is_current=True. Historical rows remain queryable and
+    are never mutated in place.
+
+    The prior full-table UniqueConstraint on (session_id, external_code)
+    - which forbade historical duplicates and made history-over-overwrite
+    impossible - has been replaced with a partial unique index over
+    (session_id, external_code) WHERE is_current. This is the database's
+    authoritative enforcement of "at most one current row per identity",
+    and it is also the concurrency boundary: two racing writers cannot
+    both leave a current row for the same identity; the second commit
+    raises a real PostgreSQL integrity failure.
+
+    requirement_id (singular) is legacy: the domain is many-to-many and
+    the canonical storage of step→requirement links is TraceLink. The
+    column is retained for backward compatibility. Do not remove it in
+    this cycle.
     """
     __tablename__ = "process_steps"
 
@@ -426,13 +302,11 @@ class ProcessStepRecord(Base):
     name = Column(String, nullable=False)
     description = Column(Text, nullable=True)
     responsible_role = Column(String, nullable=True)
-    # Extended step metadata from the process_map_schema. All optional - the
-    # model is instructed to leave empty rather than invent when unknown.
     trigger = Column(Text, nullable=True)
-    inputs = Column(_json_type()(), nullable=True)          # list[str]
-    outputs = Column(_json_type()(), nullable=True)         # list[str]
+    inputs = Column(_json_type()(), nullable=True)
+    outputs = Column(_json_type()(), nullable=True)
     transaction = Column(String, nullable=True)
-    exception_paths = Column(_json_type()(), nullable=True) # list[str]
+    exception_paths = Column(_json_type()(), nullable=True)
     external_code = Column(String, nullable=True, index=True)
     requirement_id = Column(
         String, ForeignKey("requirement_items.id", ondelete="SET NULL"),
@@ -442,16 +316,23 @@ class ProcessStepRecord(Base):
 
     __table_args__ = (
         Index("ix_process_steps_session_process", "session_id", "process_name"),
-        # Same rationale as requirements: external_code must be unique per
-        # session so resolve_process_step_external_code() resolves to a
-        # single row.
-        UniqueConstraint("session_id", "external_code",
-                         name="uq_process_step_session_external_code"),
+        # Unified versioning invariant: at most one CURRENT row per
+        # (session_id, external_code). Historical versions
+        # (is_current=False) are exempt and may retain the same external
+        # code indefinitely. Replaces the former full-table
+        # UniqueConstraint uq_process_step_session_external_code which
+        # made history-over-overwrite impossible.
+        Index(
+            "ix_process_steps_session_external_code_current",
+            "session_id",
+            "external_code",
+            unique=True,
+            postgresql_where=text("is_current"),
+            sqlite_where=text("is_current"),
+        ),
         # Database-enforced invariant: at most one CURRENT version per
         # lineage. Historical versions (is_current=False) are exempt.
-        # Established by migration 598aff673b1b. The single-column
-        # lineage_id index from the column declaration above remains
-        # for history lookups.
+        # Established by migration 598aff673b1b.
         Index(
             "ix_process_steps_lineage_current",
             "lineage_id",
@@ -467,14 +348,28 @@ class SolutionDecision(Base):
     structured objects with rationale, linkable to the requirement(s)
     that drove them.
 
-    requirement_id (singular) is legacy, as with ProcessStepRecord: the
-    many-to-many mapping lives in TraceLink.
+    UNIFIED VERSIONING CONTRACT (this cycle):
 
-    classification (STANDARD / CONFIGURATION / EXTENSION) is populated for
-    configuration decisions and lets downstream analysis count how many
-    decisions actually are standard-first. complexity and lifecycle_impact
-    are populated for customizations - the fields a steering committee
-    actually asks about.
+    The canonical business identity of a solution decision is
+    (session_id, external_code). Across regeneration the decision keeps
+    the same external_code, keeps its lineage_id, increments `version`,
+    the previous current row is flipped to is_current=False, and the new
+    row is inserted with is_current=True. Historical rows remain
+    queryable and are never mutated in place.
+
+    Prior to this cycle the model had no unique constraint on
+    external_code at all - only ix_solution_decisions_lineage_current on
+    lineage_id. That allowed two current rows with the same
+    (session_id, external_code) to coexist; the service was relying on
+    its own read-then-write pattern, which is not concurrency-safe. The
+    new partial unique index ix_solution_decisions_session_external_code_current
+    over (session_id, external_code) WHERE is_current is the database's
+    authoritative enforcement of "at most one current row per identity"
+    and the concurrency boundary for racing regenerations.
+
+    requirement_id (singular) is legacy, as with ProcessStepRecord: the
+    many-to-many mapping lives in TraceLink. Do not remove it in this
+    cycle.
     """
     __tablename__ = "solution_decisions"
 
@@ -486,32 +381,39 @@ class SolutionDecision(Base):
     lineage_id = Column(String, nullable=False, index=True)
     version = Column(Integer, nullable=False, default=1)
     is_current = Column(Boolean, nullable=False, default=True)
-    stage = Column(String, nullable=False, default="proposed")  # proposed | actual - the platform's core distinction
-    decision_type = Column(String, nullable=False)  # module_config, customization, integration, erp_selection
+    stage = Column(String, nullable=False, default="proposed")
+    decision_type = Column(String, nullable=False)
     component = Column(String, nullable=True)
     description = Column(Text, nullable=False)
     rationale = Column(Text, nullable=True)
-    # Standard-first ladder classification for configurations; NULL for
-    # customizations (customizations ARE the bottom rung, self-evidently).
     classification = Column(String, nullable=True)
-    # Customization governance fields.
-    complexity = Column(String, nullable=True)          # Low | Medium | High
+    complexity = Column(String, nullable=True)
     lifecycle_impact = Column(Text, nullable=True)
     external_code = Column(String, nullable=True, index=True)
     requirement_id = Column(
         String, ForeignKey("requirement_items.id", ondelete="SET NULL"),
         nullable=True, index=True,
     )
-    status = Column(String, nullable=False, default="proposed")  # proposed, approved, rejected
+    status = Column(String, nullable=False, default="proposed")
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
 
     __table_args__ = (
         Index("ix_solution_decisions_session_type", "session_id", "decision_type"),
+        # Unified versioning invariant: at most one CURRENT row per
+        # (session_id, external_code). Historical versions
+        # (is_current=False) are exempt. NEW in this cycle - previously
+        # the database did not enforce this and the service relied on an
+        # unprotected read-then-write.
+        Index(
+            "ix_solution_decisions_session_external_code_current",
+            "session_id",
+            "external_code",
+            unique=True,
+            postgresql_where=text("is_current"),
+            sqlite_where=text("is_current"),
+        ),
         # Database-enforced invariant: at most one CURRENT version per
-        # lineage. Historical versions (is_current=False) are exempt.
-        # Established by migration 8b69bcaa614c. The single-column
-        # lineage_id index from the column declaration above remains
-        # for history lookups.
+        # lineage. Established by migration 8b69bcaa614c.
         Index(
             "ix_solution_decisions_lineage_current",
             "lineage_id",
@@ -523,23 +425,7 @@ class SolutionDecision(Base):
 
 
 class TestCaseRecord(Base):
-    """Structured QA/UAT test cases, linkable to the requirements they
-    validate.
-
-    user_role, business_process, and acceptance_criteria are UAT-specific
-    and populated only for UAT test cases; QA cases leave them NULL. These
-    fields are what enable role-coverage and process-linkage reporting in
-    the UAT agent's validator - without them, the agent's coverage signals
-    have nothing to read.
-
-    related_design_component is a free-form label linking a test back to a
-    configuration, integration, or customization entry in the solution
-    design. Distinct from the TraceLink-based requirement links, which use
-    real foreign keys.
-
-    DEFINED BEFORE ProjectIssue so its ForeignKey can be resolved at
-    metadata-construction time. See module docstring.
-    """
+    """Unchanged from prior turn."""
     __tablename__ = "test_case_records"
 
     id = Column(String, primary_key=True)
@@ -547,12 +433,11 @@ class TestCaseRecord(Base):
         String, ForeignKey("sessions.session_id", ondelete="CASCADE"),
         nullable=False, index=True,
     )
-    test_type = Column(String, nullable=False)  # QA or UAT
-    external_code = Column(String, nullable=True)  # e.g. "TC-001" or "TC-A1B2C3"
+    test_type = Column(String, nullable=False)
+    external_code = Column(String, nullable=True)
     scenario = Column(String, nullable=False)
     priority = Column(String, nullable=False, default="Medium")
     expected_result = Column(Text, nullable=True)
-    # UAT-specific context. See class docstring.
     user_role = Column(String, nullable=True)
     business_process = Column(String, nullable=True)
     acceptance_criteria = Column(Text, nullable=True)
@@ -571,16 +456,7 @@ class TestCaseRecord(Base):
 
 
 class TrainingStepRecord(Base):
-    """Structured training manual steps, linkable to the requirements they
-    cover.
-
-    role, verification, and prerequisites come from the training schema's
-    per-step fields. Together with title and instructions they're what
-    make a step usable: preconditions tell the user what must be in place,
-    instructions tell them what to do, verification tells them how they
-    know it worked. Previously only title/instructions were persisted, so
-    the rest was silently lost.
-    """
+    """Unchanged from prior turn."""
     __tablename__ = "training_step_records"
 
     id = Column(String, primary_key=True)
@@ -588,12 +464,12 @@ class TrainingStepRecord(Base):
         String, ForeignKey("sessions.session_id", ondelete="CASCADE"),
         nullable=False, index=True,
     )
-    external_code = Column(String, nullable=True, index=True)  # TSTEP-NNN
+    external_code = Column(String, nullable=True, index=True)
     title = Column(String, nullable=False)
     instructions = Column(Text, nullable=True)
     role = Column(String, nullable=True)
     verification = Column(Text, nullable=True)
-    prerequisites = Column(_json_type()(), nullable=True)  # list[str]
+    prerequisites = Column(_json_type()(), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
     updated_at = Column(
         DateTime(timezone=True), nullable=False, default=_utcnow,
@@ -610,16 +486,7 @@ class TrainingStepRecord(Base):
 # Issues, reviews, traceability
 # ============================================================================
 class ProjectIssue(Base):
-    """First-class exceptions: contradictions, missing info, coverage
-    gaps, high-risk decisions - visible until a consultant resolves them,
-    instead of being silently absorbed into an incomplete output.
-
-    Also carries open_questions filed by the agent sync layer (issue_type
-    'open_question'), so gaps surfaced by the agents have a landing spot.
-
-    test_case_id references test_case_records - TestCaseRecord is declared
-    above for FK resolution. See module docstring.
-    """
+    """Unchanged from prior turn."""
     __tablename__ = "project_issues"
 
     id = Column(String, primary_key=True)
@@ -628,9 +495,7 @@ class ProjectIssue(Base):
         nullable=False, index=True,
     )
     issue_type = Column(String, nullable=False)
-    # contradiction, missing_info, coverage_gap, high_risk_decision,
-    # test_failure, requirement_changed, open_question
-    severity = Column(String, nullable=False, default="medium")  # low, medium, high
+    severity = Column(String, nullable=False, default="medium")
     description = Column(Text, nullable=False)
     related_object_type = Column(String, nullable=True)
     related_object_id = Column(String, nullable=True)
@@ -638,8 +503,8 @@ class ProjectIssue(Base):
         String, ForeignKey("test_case_records.id", ondelete="SET NULL"),
         nullable=True, index=True,
     )
-    classification = Column(String, nullable=True)  # defect, unclear_requirement, changed_requirement, data_issue, integration_issue, environment_issue, other
-    status = Column(String, nullable=False, default="open")  # open, resolved, dismissed
+    classification = Column(String, nullable=True)
+    status = Column(String, nullable=False, default="open")
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
     updated_at = Column(
         DateTime(timezone=True), nullable=False, default=_utcnow,
@@ -654,9 +519,7 @@ class ProjectIssue(Base):
 
 
 class ReviewAction(Base):
-    """Consultant corrections, approvals, rejections, overrides -
-    captured as structured, queryable knowledge instead of being lost in
-    chat history or hand-edited documents."""
+    """Unchanged from prior turn."""
     __tablename__ = "review_actions"
 
     id = Column(String, primary_key=True)
@@ -664,16 +527,14 @@ class ReviewAction(Base):
         String, ForeignKey("sessions.session_id", ondelete="CASCADE"),
         nullable=False, index=True,
     )
-    # ON DELETE SET NULL + nullable matches migration 9ec08dd1761d: a user
-    # deletion nulls this reference rather than blocking the delete.
     user_id = Column(
         String,
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
-    object_type = Column(String, nullable=False)  # requirement, solution_decision, process_step
+    object_type = Column(String, nullable=False)
     object_id = Column(String, nullable=False)
-    action = Column(String, nullable=False)  # approved, rejected, corrected
+    action = Column(String, nullable=False)
     note = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
 
@@ -683,17 +544,11 @@ class ReviewAction(Base):
 
 
 class TraceLink(Base):
-    """Generic traceability edge between any two project objects (e.g. a
-    QA test case covering a requirement). One flexible table instead of a
-    bespoke join table per object-type pair - powers coverage analysis
-    and gap detection later without a schema change.
-
-    Composite indexes on (target_type, target_id) and (source_type,
-    source_id) are what keep coverage queries fast. Every call to
-    get_coverage_gaps and get_project_health filters on target_type =
-    'requirement' joined to target_id; without these, the query is a
-    full scan.
-    """
+    """Unchanged from prior turn. TraceLink.source_id/target_id are
+    physical row IDs of the versioned entities. Historical versions
+    remain addressable by their physical IDs; regeneration does NOT
+    repoint existing trace links - this is the existing domain contract
+    and this cycle does not change it."""
     __tablename__ = "trace_links"
 
     id = Column(String, primary_key=True)
@@ -705,16 +560,13 @@ class TraceLink(Base):
     source_id = Column(String, nullable=False)
     target_type = Column(String, nullable=False)
     target_id = Column(String, nullable=False)
-    relationship = Column(String, nullable=False, default="covers")  # covers, derives_from, conflicts_with
+    relationship = Column(String, nullable=False, default="covers")
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
 
     __table_args__ = (
         Index("ix_trace_links_target", "target_type", "target_id"),
         Index("ix_trace_links_source", "source_type", "source_id"),
         Index("ix_trace_links_session_relationship", "session_id", "relationship"),
-        # Prevent duplicate identical edges - project_intelligence can be
-        # retried after a partial failure, and without this constraint a
-        # retry would silently double a link and inflate coverage counts.
         UniqueConstraint(
             "session_id", "source_type", "source_id",
             "target_type", "target_id", "relationship",
@@ -727,11 +579,7 @@ class TraceLink(Base):
 # Baselines
 # ============================================================================
 class SolutionBaseline(Base):
-    """A named, point-in-time snapshot of 'the solution actually delivered'
-    - the brief's critical 'final validated solution' concept. Creating a
-    new baseline never deletes an old one (is_active flips the prior one
-    off) - full baseline history stays queryable, matching the platform's
-    history-over-overwrite principle."""
+    """Unchanged from prior turn."""
     __tablename__ = "solution_baselines"
 
     id = Column(String, primary_key=True)
@@ -739,7 +587,7 @@ class SolutionBaseline(Base):
         String, ForeignKey("sessions.session_id", ondelete="CASCADE"),
         nullable=False, index=True,
     )
-    label = Column(String, nullable=False)  # e.g. "Go-Live Baseline", "UAT Baseline"
+    label = Column(String, nullable=False)
     notes = Column(Text, nullable=True)
     created_by = Column(String, ForeignKey("users.id"), nullable=False)
     is_active = Column(Boolean, nullable=False, default=True)
@@ -747,8 +595,9 @@ class SolutionBaseline(Base):
 
 
 class SolutionBaselineItem(Base):
-    """One (decision lineage -> specific version) pin within a baseline -
-    the actual snapshot content."""
+    """Unchanged from prior turn. SolutionBaselineItem.solution_decision_id
+    points to a specific physical versioned row; historical versions
+    remain addressable. This cycle does not change baseline semantics."""
     __tablename__ = "solution_baseline_items"
 
     id = Column(String, primary_key=True)

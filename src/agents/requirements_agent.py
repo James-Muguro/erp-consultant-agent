@@ -218,6 +218,47 @@ class RequirementsAgent:
             # 7. Validate quality and surface it.
             validation_result = self.validate_requirements(structured_requirements)
 
+            # 7b. Global requirement-ID integrity gate. A duplicate ID
+            #     anywhere across the requirement buckets consumed by
+            #     sync_requirements_from_structured() is a hard input-
+            #     integrity failure and must never reach structured
+            #     persistence. The database's unique
+            #     (session_id, external_code) constraint remains a second,
+            #     defensive boundary — it is not the validation mechanism.
+            #     No repair, renumbering, merging, or dropping happens
+            #     here: a duplicate ID requires upstream correction, and
+            #     source fidelity is preserved as-is.
+            duplicate_ids = validation_result.get('duplicate_requirement_ids') or []
+            if duplicate_ids:
+                duration = time.time() - start_time
+                affected_sections = sorted(
+                    {loc for dup in duplicate_ids for loc in dup['locations']}
+                )
+                dup_summary = "; ".join(
+                    f"{dup['id']} (in {', '.join(dup['locations'])})"
+                    for dup in duplicate_ids
+                )
+                msg = (
+                    "Requirements failed integrity validation: duplicate "
+                    f"requirement IDs were found across sections: {dup_summary}. "
+                    "The document was not persisted."
+                )
+                self.logger.error(
+                    "Duplicate requirement ID integrity failure; persistence blocked",
+                    session_id=session_id,
+                    duplicate_ids=[dup['id'] for dup in duplicate_ids],
+                    affected_sections=affected_sections,
+                    validation_stage='post_parse_pre_persistence',
+                )
+                metrics_collector.record_task(self.config.name, False, duration)
+                return {
+                    'success': False,
+                    'error': msg,
+                    'validation': validation_result,
+                    'warnings': warnings + [msg],
+                    'duration': duration,
+                }
+
             # 8. Structured requirements persistence. This is a required
             #    step, not best-effort: a phase that cannot persist its
             #    structured output must not report success, otherwise
@@ -760,6 +801,83 @@ class RequirementsAgent:
         return structured
 
     # ------------------------------------------------------------------ #
+    # Global requirement-ID duplicate detection
+    # ------------------------------------------------------------------ #
+    # These use the already-normalized ID values present in
+    # structured_requirements — there is no second normalization system
+    # here, and no distinction is drawn between raw and normalized IDs.
+    # If the schema already folds "REQ1" / "REQ-001" / "req-001" to the
+    # same canonical value, or already converts a missing/invalid ID to a
+    # placeholder such as "REQ-000", that canonical value is simply treated
+    # as an ordinary ID for uniqueness purposes.
+
+    @staticmethod
+    def _iter_requirement_records(section_value: Any) -> List[Tuple[Optional[str], Dict[str, Any]]]:
+        """
+        Yield (category, record) pairs for a requirement bucket, tolerant of
+        the existing accepted shapes:
+          - a dict of category -> list of requirement dicts (normal shape,
+            currently used by functional_requirements)
+          - a flat list of requirement dicts (degraded parsing, or the
+            normal shape for the other buckets)
+        Non-dict records (e.g. plain strings, or malformed/empty buckets)
+        are ignored — only records with an actual ID participate in the
+        uniqueness comparison.
+        """
+        records: List[Tuple[Optional[str], Dict[str, Any]]] = []
+        if isinstance(section_value, dict):
+            for category, items in section_value.items():
+                if isinstance(items, list):
+                    for item in items:
+                        if isinstance(item, dict):
+                            records.append((str(category), item))
+        elif isinstance(section_value, list):
+            for item in section_value:
+                if isinstance(item, dict):
+                    records.append((None, item))
+        return records
+
+    def _detect_duplicate_requirement_ids(
+        self, requirements: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """
+        Scan every requirement bucket consumed by
+        sync_requirements_from_structured() and return the set of IDs that
+        appear more than once, each with the section/category locations
+        where they were found. Returns [] when every ID is unique.
+        """
+        buckets = (
+            'functional_requirements',
+            'non_functional_requirements',
+            'technical_requirements',
+            'integration_requirements',
+            'reporting_requirements',
+        )
+
+        id_locations: Dict[str, List[str]] = {}
+        for bucket in buckets:
+            section_value = requirements.get(bucket)
+            if not section_value:
+                continue
+            for category, record in self._iter_requirement_records(section_value):
+                req_id = record.get('id')
+                if not req_id:
+                    # No ID on this record — not a candidate for the
+                    # uniqueness comparison.
+                    continue
+                req_id = str(req_id)
+                location = bucket if category is None else f"{bucket}/{category}"
+                id_locations.setdefault(req_id, []).append(location)
+
+        duplicates = [
+            {'id': req_id, 'locations': locations}
+            for req_id, locations in id_locations.items()
+            if len(locations) > 1
+        ]
+        duplicates.sort(key=lambda d: d['id'])
+        return duplicates
+
+    # ------------------------------------------------------------------ #
     # Quality validation
     # ------------------------------------------------------------------ #
     def validate_requirements(self, requirements: Dict[str, Any]) -> Dict[str, Any]:
@@ -798,15 +916,22 @@ class RequirementsAgent:
                 f"Only {total_reqs} functional requirements defined — verify sufficiency"
             )
 
-        # Duplicate ID detection.
-        ids: List[str] = []
-        for cat_reqs in func_reqs.values():
-            if isinstance(cat_reqs, list):
-                for r in cat_reqs:
-                    if isinstance(r, dict) and r.get('id'):
-                        ids.append(str(r['id']))
-        if len(ids) != len(set(ids)):
-            result['warnings'].append("Duplicate requirement IDs detected")
+        # Duplicate ID detection — global across every requirement bucket
+        # that feeds sync_requirements_from_structured(), not just
+        # functional_requirements. A single duplicate anywhere in the
+        # document is a blocking integrity failure: it is exactly what
+        # causes the persistence layer's unique (session_id, external_code)
+        # constraint to reject the write, so it must be caught here first.
+        duplicate_ids = self._detect_duplicate_requirement_ids(requirements)
+        result['duplicate_requirement_ids'] = duplicate_ids
+        if duplicate_ids:
+            result['is_valid'] = False
+            for dup in duplicate_ids:
+                result['issues'].append(
+                    f"Duplicate requirement ID '{dup['id']}' found in: "
+                    f"{', '.join(dup['locations'])}. Persistence must not "
+                    "proceed until this is resolved upstream."
+                )
 
         # TBD / assumption density signal.
         blob = str(requirements).lower()
