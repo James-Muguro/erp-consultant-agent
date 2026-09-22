@@ -22,14 +22,17 @@
 }
 
 @layer base {
-  /* The app shell owns its own scrolling regions. Document-level scroll
-     is disabled entirely so no browser chrome quirk, zoom level, or
-     devtools dock can move the whole interface together. Any surface
-     that needs to scroll must use an explicit overflow-y-auto container
-     (the chat messages panel, the sidebar nav, workspace tabs). */
+  /* `overflow: clip` (unlike `hidden`) makes the element genuinely
+     unscrollable - it has no scroll mechanism, so neither the user nor
+     any script can scroll it. `hidden` blocks user scroll but still
+     leaves a programmatic scroll position, which is what allowed a
+     `scrollIntoView` call in ChatPanel to shift the whole document off
+     screen. The `overflow: hidden` line before it is the fallback for
+     browsers that do not support `clip`. */
   html, body, #root {
     height: 100%;
     overflow: hidden;
+    overflow: clip;
   }
   body {
     background-color: var(--color-paper);
@@ -50,7 +53,6 @@
     outline-offset: -2px;
   }
 }
-
 /* Height that matches the *visible* viewport, not the layout viewport.
    100dvh respects browser chrome (mobile address bar, docked devtools).
    100vh is the fallback for browsers that predate dvh - it is listed

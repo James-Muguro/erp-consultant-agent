@@ -36,7 +36,6 @@ export function ChatPanel({
 }) {
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const nearBottomRef = useRef(true);
 
@@ -47,9 +46,23 @@ export function ChatPanel({
     nearBottomRef.current = distance < AUTO_SCROLL_THRESHOLD_PX;
   }
 
+  // Auto-scroll the messages container to its bottom.
+  //
+  // Previous implementation used `bottomRef.current.scrollIntoView(...)`.
+  // `scrollIntoView` scrolls EVERY scrollable ancestor of the target —
+  // including the document element — to bring the target into view. In
+  // this app that meant scrolling <html> whenever it had any scrollable
+  // overflow, which shifted the whole viewport off-screen and produced
+  // the "blank area below the composer" the user reported.
+  //
+  // Setting scrollTop on the messages container is a scroll of exactly
+  // one element, by us, on the element we actually want scrolled. It
+  // can never affect any ancestor.
   useEffect(() => {
     if (!nearBottomRef.current) return;
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
   }, [messages, activity]);
 
   useEffect(() => {
@@ -88,13 +101,6 @@ export function ChatPanel({
     .find((m) => m.role === "assistant")?.id;
 
   return (
-    // `flex-1 min-h-0` — do NOT add `h-full`. This element has a
-    // sibling (the ProjectTabs bar) inside a flex-col parent, so
-    // `height: 100%` would resolve to the parent's full height
-    // (including the tabs area) while `flex-1` allocates only the
-    // remaining space. That conflict is what produced a scroll
-    // container taller than the viewport, showing a large blank area
-    // below the messages. `flex-1` is the only one that should be here.
     <div className="flex min-h-0 flex-1 flex-col">
       <div
         ref={scrollRef}
@@ -129,7 +135,6 @@ export function ChatPanel({
               />
             ))}
             {sending && activity.length > 0 && <AgentActivity steps={activity} />}
-            <div ref={bottomRef} />
           </div>
         )}
       </div>
