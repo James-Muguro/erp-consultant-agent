@@ -7,6 +7,8 @@ import { ProjectStartCard } from "./ProjectStartCard";
 import type { ChatMessage, NextAction } from "../types";
 import type { AgentActivityStep } from "../hooks/useChat";
 
+// Distance from the bottom (in px) within which we consider the user
+// "following along" and auto-scroll new content into view.
 const AUTO_SCROLL_THRESHOLD_PX = 120;
 
 export function ChatPanel({
@@ -86,8 +88,19 @@ export function ChatPanel({
     .find((m) => m.role === "assistant")?.id;
 
   return (
-    <div className="flex h-full flex-1 flex-col">
-      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto">
+    // `flex-1 min-h-0` — do NOT add `h-full`. This element has a
+    // sibling (the ProjectTabs bar) inside a flex-col parent, so
+    // `height: 100%` would resolve to the parent's full height
+    // (including the tabs area) while `flex-1` allocates only the
+    // remaining space. That conflict is what produced a scroll
+    // container taller than the viewport, showing a large blank area
+    // below the messages. `flex-1` is the only one that should be here.
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        className="flex-1 min-h-0 overflow-y-auto"
+      >
         {showProjectStart ? (
           <ProjectStartCard
             action={projectStartAction!}
@@ -121,7 +134,7 @@ export function ChatPanel({
         )}
       </div>
 
-      <div className="border-t border-border bg-surface px-3 py-3 md:px-6 md:py-4">
+      <div className="shrink-0 border-t border-border bg-surface px-3 py-3 md:px-6 md:py-4">
         <div className="mx-auto max-w-3xl">
           <div className="mb-2 flex items-center gap-2">
             <button

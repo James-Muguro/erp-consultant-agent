@@ -97,6 +97,11 @@ export function AppLayout() {
     [refreshProjects],
   );
 
+  // The API call runs inside `onConfirm` so a failure (409 on already
+  // archived, 401 on expired session, network) keeps the dialog open
+  // with the error inline. This matches the delete handler below. The
+  // previous version of this handler called `confirm()` and then did
+  // nothing — the archive request was never sent.
   const handleArchiveProject = useCallback(
     async (id: string) => {
       const project = projects.find((p) => p.session_id === id);
@@ -106,6 +111,9 @@ export function AppLayout() {
         description:
           "You can restore it later by showing archived projects in the sidebar.",
         confirmLabel: "Archive",
+        onConfirm: async () => {
+          await api.archiveProject(id);
+        },
       });
       if (!confirmed) return;
       if (sessionId === id) navigate("/");

@@ -42,11 +42,14 @@ export function ProjectWorkspace({ sessionId }: { sessionId: string }) {
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    // `flex-1 min-h-0` — do NOT add `h-full`. Same reasoning as
+    // ChatPanel: this element has a sibling (the tab bar) inside a
+    // flex-col parent, so `height: 100%` and `flex-1` disagree.
+    <div className="flex min-h-0 flex-1 flex-col">
       <nav
         role="tablist"
         aria-label="Project sections"
-        className="flex gap-1 overflow-x-auto border-b border-border bg-surface px-3 py-2 sm:px-4"
+        className="flex shrink-0 gap-1 overflow-x-auto border-b border-border bg-surface px-3 py-2 sm:px-4"
       >
         {TABS.map((t) => {
           const isActive = tab === t.id;
@@ -68,7 +71,7 @@ export function ProjectWorkspace({ sessionId }: { sessionId: string }) {
         })}
       </nav>
 
-      <div className="flex-1 overflow-y-auto p-4 sm:p-6">
+      <div className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6">
         <div className="mx-auto max-w-3xl" role="tabpanel">
           {tab === "overview" && <HealthOverview sessionId={sessionId} />}
           {tab === "requirements" && <RequirementsList sessionId={sessionId} />}
