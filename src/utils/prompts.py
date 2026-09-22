@@ -126,6 +126,25 @@ COVERAGE RULES:
   to make a section look populated. An empty section with a clear open
   question is more useful to the implementation team than a padded one.
 
+REQUIREMENT ID RULES:
+- Requirement IDs must be GLOBALLY unique across the entire document.
+  Assign them as a single continuous sequence - REQ-001, REQ-002,
+  REQ-003, and so on - spanning every section and every category.
+- Do NOT restart numbering inside each functional category. If
+  functional_requirements/Finance uses REQ-001 through REQ-006, then
+  functional_requirements/Procurement must continue from REQ-007. It
+  must not begin a fresh REQ-001.
+- Continue the same sequence across functional_requirements,
+  non_functional_requirements, technical_requirements,
+  integration_requirements, and reporting_requirements. The same ID must
+  never appear in two places, in the same section or in two different
+  ones.
+- A duplicate ID is a hard integrity failure. The entire document is
+  rejected before persistence and none of the analysis is saved, so
+  emitting even one duplicate guarantees the run fails and must be
+  redone. If you are uncertain how many IDs a later section will need,
+  err on the side of continuing the sequence rather than restarting it.
+
 Produce:
 - Structured requirements grounded strictly in the stakeholder input above.
 - A summary of key functional areas actually mentioned.

@@ -9,9 +9,9 @@ fallback tiers, so:
   * Fields must be simple enough for provider structured-output support.
     That means: no regex `pattern=` on Field(), no numeric `ge=`/`le=`
     constraints on non-integers, no arbitrary unions. Validation that
-    providers don't understand is implemented as `@field_validator`s,
-    which do NOT appear in the generated JSON Schema and run only after
-    the model returns.
+    providers don't understand is implemented as `@field_validator`s and
+    `@model_validator`s, which do NOT appear in the generated JSON Schema
+    and run only after the model returns.
   * Defaults are chosen so the schema is usable when the model omits a
     field the guardrails requested but couldn't produce. Every field
     except the two required narrative sections has a default.
@@ -20,13 +20,30 @@ fallback tiers, so:
   * `to_legacy_dict()` produces the flat dict shape that document
     generators and downstream consumers already expect; new fields are
     additive to that shape and do not change existing keys.
+
+Cross-document invariants — most importantly "requirement IDs are
+globally unique" — live on `RequirementsDocument` as `@model_validator`s.
+The validator runs after field validation on the constructed model and
+raises `ValidationError` on violation. The Requirements Agent's
+`_parse_and_validate()` catches that error and routes the raw JSON into
+`_repair_json`, giving the model an automatic second chance with the
+exact conflict text fed back. This is deliberately earlier than the
+agent's own `validate_requirements()` post-check, which is retained as a
+belt-and-suspenders guard against the case where a caller bypasses the
+pydantic path.
 """
 from __future__ import annotations
 
 import re
 from typing import Any, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -107,9 +124,13 @@ def _normalize_requirement_id(value: Any) -> str:
     a single odd id shouldn't invalidate the entire document.
 
     Note: this can in principle produce duplicate IDs (e.g. REQ1 and
-    REQ-001 both normalize to REQ-001). The requirements agent's
-    validate_requirements() checks for duplicates and raises a warning,
-    so collisions surface for review rather than silently propagating.
+    REQ-001 both normalize to REQ-001). The document-level
+    `_check_global_id_uniqueness` model validator on RequirementsDocument
+    catches any such collision after the schema parses and routes the
+    raw JSON back through the agent's `_repair_json` pass, giving the
+    model an automatic chance to renumber. If repair still can't
+    resolve it, the agent's own `validate_requirements()` catches the
+    collision as a hard integrity failure before persistence.
     """
     if value is None:
         return "REQ-000"
@@ -327,6 +348,78 @@ class RequirementsDocument(BaseModel):
                     "before the requirements can be considered complete. "
                     "Populate this rather than inventing specifics for unknowns.",
     )
+
+    # ------------------------------------------------------------------ #
+    # Cross-document invariants
+    # ------------------------------------------------------------------ #
+    @model_validator(mode="after")
+    def _check_global_id_uniqueness(self) -> "RequirementsDocument":
+        """Requirement IDs must be globally unique across the entire
+        document. The model occasionally restarts numbering at REQ-001
+        inside each functional category (and again inside each top-level
+        bucket), which is a hard integrity failure for the persistence
+        layer: `sync_requirements_from_structured()` writes each record
+        with its `id` as `external_code`, and the unique
+        `(session_id, external_code)` constraint then rejects the write.
+
+        Raising here, rather than merely warning later, is deliberate:
+        the Requirements Agent's `_parse_and_validate()` catches the
+        resulting `ValidationError` and routes the raw JSON into its
+        `_repair_json` pass, giving the model an automatic second
+        attempt with the exact conflict text fed back. The agent's own
+        `validate_requirements()` duplicate check is retained as a
+        second boundary; this validator just makes the failure visible
+        at the earliest possible layer.
+
+        The check itself performs no normalization, no renumbering, no
+        merging, and no dropping: it only reports conflicts. Any
+        correction of the underlying IDs is the model's job during the
+        repair pass, so source fidelity is preserved when the schema
+        does pass.
+        """
+        id_locations: dict[str, list[str]] = {}
+
+        def _register(req_id: str, location: str) -> None:
+            id_locations.setdefault(req_id, []).append(location)
+
+        for category in self.functional_requirements:
+            for req in category.requirements:
+                _register(req.id, f"functional_requirements/{category.category}")
+        for req in self.non_functional_requirements:
+            _register(req.id, "non_functional_requirements")
+        for req in self.technical_requirements:
+            _register(req.id, "technical_requirements")
+        for req in self.integration_requirements:
+            _register(req.id, "integration_requirements")
+        for req in self.reporting_requirements:
+            _register(req.id, "reporting_requirements")
+
+        duplicates = {
+            rid: locs for rid, locs in id_locations.items() if len(locs) > 1
+        }
+        if not duplicates:
+            return self
+
+        # Cap the reported conflicts so a pathological response does not
+        # produce a megabyte-long error message; the agent's own
+        # duplicate detector reports the full set if repair still fails.
+        max_report = 10
+        ordered = sorted(duplicates)
+        parts = [
+            f"{rid} (in {', '.join(duplicates[rid])})"
+            for rid in ordered[:max_report]
+        ]
+        if len(ordered) > max_report:
+            parts.append(f"...and {len(ordered) - max_report} more")
+
+        raise ValueError(
+            "Duplicate requirement IDs are not allowed. Every requirement "
+            "ID must be globally unique across the entire document — a "
+            "single continuous REQ-001, REQ-002, ... sequence spanning "
+            "every functional category and every top-level section, with "
+            "no restart inside any category. Conflicts found: "
+            + "; ".join(parts)
+        )
 
     # ------------------------------------------------------------------ #
     # Legacy conversion
