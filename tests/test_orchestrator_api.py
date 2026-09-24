@@ -33,6 +33,11 @@ Notes on test behavior:
     doesn't matter for these tests — the endpoint passes whatever it
     receives straight to the synthesis prompt builder, which
     stringifies dict entries.
+  * Signup requests include an explicit `account_type`. Every fixture
+    and every inline signup uses `functional_consultant`, whose
+    permission set covers the project-scoped operations these tests
+    exercise (create, rename, archive, permanent delete, phase
+    execution, document generation, chat, feedback).
 """
 from __future__ import annotations
 
@@ -63,11 +68,18 @@ def client():
 def _new_user_headers(client: TestClient) -> dict:
     """Sign up a fresh, unique user and return Authorization headers.
     Every call creates a distinct account, so tests never see each
-    other's projects and parallel runs can't collide."""
+    other's projects and parallel runs can't collide.
+
+    The account type is `functional_consultant`, whose permission set
+    covers every project-scoped operation exercised by this file."""
     email = f"test-{uuid.uuid4().hex[:12]}@example.com"
     r = client.post(
         '/api/auth/signup',
-        json={'email': email, 'password': 'testpassword123'},
+        json={
+            'email': email,
+            'password': 'testpassword123',
+            'account_type': 'functional_consultant',
+        },
     )
     assert r.status_code == 200, r.text
     token = r.json()['access_token']
@@ -148,12 +160,18 @@ class TestSecurityHeaders:
 def test_signup_login_me(client):
     email = f"test-{uuid.uuid4().hex[:12]}@example.com"
 
-    r = client.post('/api/auth/signup', json={'email': email, 'password': 'testpassword123'})
+    signup_payload = {
+        'email': email,
+        'password': 'testpassword123',
+        'account_type': 'functional_consultant',
+    }
+
+    r = client.post('/api/auth/signup', json=signup_payload)
     assert r.status_code == 200
     token = r.json()['access_token']
 
     # Duplicate signup is rejected
-    r = client.post('/api/auth/signup', json={'email': email, 'password': 'testpassword123'})
+    r = client.post('/api/auth/signup', json=signup_payload)
     assert r.status_code == 409
 
     # Login with correct credentials
@@ -168,7 +186,12 @@ def test_signup_login_me(client):
     # /me works with a valid token
     r = client.get('/api/auth/me', headers={'Authorization': f'Bearer {login_token}'})
     assert r.status_code == 200
-    assert r.json()['email'] == email
+    body = r.json()
+    assert body['email'] == email
+    # Application role from signup is reflected on /me.
+    assert body['roles'] == ['functional_consultant']
+    # No organization membership was created by an individual signup.
+    assert body['organizations'] == []
 
     # /me rejects a missing token
     r = client.get('/api/auth/me')
@@ -181,17 +204,37 @@ def test_signup_login_me(client):
 
 def test_signup_rejects_short_password(client):
     """The schema requires at least 12 characters. A one-character
-    password is rejected with 422 (schema-level), not 200."""
+    password is rejected with 422 (schema-level), not 200.
+
+    `account_type` is supplied so the 422 is unambiguously caused by
+    the short password rather than by a missing account type."""
     email = f"test-{uuid.uuid4().hex[:12]}@example.com"
-    r = client.post('/api/auth/signup', json={'email': email, 'password': 'a'})
+    r = client.post(
+        '/api/auth/signup',
+        json={
+            'email': email,
+            'password': 'a',
+            'account_type': 'functional_consultant',
+        },
+    )
     assert r.status_code == 422
 
 
 def test_signup_rejects_common_password(client):
     """A known-weak password is rejected by the schema validator.
-    'password1234' is long enough (12 chars) but is on the blocklist."""
+    'password1234' is long enough (12 chars) but is on the blocklist.
+
+    `account_type` is supplied so the 422 is unambiguously caused by
+    the blocklist rather than by a missing account type."""
     email = f"test-{uuid.uuid4().hex[:12]}@example.com"
-    r = client.post('/api/auth/signup', json={'email': email, 'password': 'password1234'})
+    r = client.post(
+        '/api/auth/signup',
+        json={
+            'email': email,
+            'password': 'password1234',
+            'account_type': 'functional_consultant',
+        },
+    )
     assert r.status_code == 422
 
 

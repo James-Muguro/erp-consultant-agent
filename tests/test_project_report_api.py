@@ -27,6 +27,11 @@ Fixtures:
   * report_session
                  starts a project, yields its id, deletes it on
                  teardown.
+
+Signup note:
+  Every signup uses account_type='functional_consultant'. That role
+  holds DOCUMENTS_GENERATE and PROJECT_CREATE, which are required by
+  the report route and the fixture's project creation.
 """
 from __future__ import annotations
 
@@ -56,7 +61,11 @@ def auth_headers(client):
     email = f"test-{uuid.uuid4().hex[:12]}@example.com"
     r = client.post(
         '/api/auth/signup',
-        json={'email': email, 'password': 'testpassword123'},
+        json={
+            'email': email,
+            'password': 'testpassword123',
+            'account_type': 'functional_consultant',
+        },
     )
     assert r.status_code == 200, r.text
     token = r.json()['access_token']
@@ -103,7 +112,11 @@ class TestReportAuthorization:
         other_email = f"test-{uuid.uuid4().hex[:12]}@example.com"
         r = client.post(
             '/api/auth/signup',
-            json={'email': other_email, 'password': 'testpassword123'},
+            json={
+                'email': other_email,
+                'password': 'testpassword123',
+                'account_type': 'functional_consultant',
+            },
         )
         other_headers = {'Authorization': f"Bearer {r.json()['access_token']}"}
 

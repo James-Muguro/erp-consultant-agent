@@ -49,6 +49,9 @@ Notes:
     oversized-file test verifies the outcome (413) — the mechanism
     (not buffering 2MB into memory) is a production-perf property
     that would need a mock on the underlying read to assert directly.
+  * Every signup uses account_type='functional_consultant'. That role
+    holds UPLOADS_READ, UPLOADS_WRITE, and PROJECT_CREATE, which are
+    required by the upload routes and the fixture's project creation.
 """
 from __future__ import annotations
 
@@ -85,7 +88,11 @@ def auth_headers(client):
     email = f"test-{uuid.uuid4().hex[:12]}@example.com"
     r = client.post(
         '/api/auth/signup',
-        json={'email': email, 'password': 'testpassword123'},
+        json={
+            'email': email,
+            'password': 'testpassword123',
+            'account_type': 'functional_consultant',
+        },
     )
     assert r.status_code == 200, r.text
     token = r.json()['access_token']
@@ -174,7 +181,11 @@ class TestUpload:
         other_email = f"test-{uuid.uuid4().hex[:12]}@example.com"
         r = client.post(
             '/api/auth/signup',
-            json={'email': other_email, 'password': 'testpassword123'},
+            json={
+                'email': other_email,
+                'password': 'testpassword123',
+                'account_type': 'functional_consultant',
+            },
         )
         other_headers = {'Authorization': f"Bearer {r.json()['access_token']}"}
 
@@ -293,7 +304,11 @@ class TestListDownloadDelete:
         other_email = f"test-{uuid.uuid4().hex[:12]}@example.com"
         r = client.post(
             '/api/auth/signup',
-            json={'email': other_email, 'password': 'testpassword123'},
+            json={
+                'email': other_email,
+                'password': 'testpassword123',
+                'account_type': 'functional_consultant',
+            },
         )
         other_headers = {'Authorization': f"Bearer {r.json()['access_token']}"}
 
@@ -325,7 +340,11 @@ class TestListDownloadDelete:
         other_email = f"test-{uuid.uuid4().hex[:12]}@example.com"
         r = client.post(
             '/api/auth/signup',
-            json={'email': other_email, 'password': 'testpassword123'},
+            json={
+                'email': other_email,
+                'password': 'testpassword123',
+                'account_type': 'functional_consultant',
+            },
         )
         other_headers = {'Authorization': f"Bearer {r.json()['access_token']}"}
 
@@ -513,4 +532,8 @@ class TestAttachmentHeadersUnit:
     def test_none_filename_falls_back_to_default(self):
         from src.orchestrator_api import _attachment_headers
         headers = _attachment_headers(None)
-        assert "filename=" in headers["Content-Disposition"]
+        disposition = headers["Content-Disposition"]
+        # The helper substitutes 'document' when the name is empty so
+        # the header remains well-formed.
+        assert "filename=" in disposition
+        assert 'filename=""' not in disposition

@@ -38,6 +38,11 @@ Implementation note on DB seeding:
   care about), the row is inserted directly with a helper that owns
   its session lifecycle. Direct insertion is deliberately scoped to a
   small helper so the session leak risk is contained.
+
+Signup note:
+  Every signup uses account_type='functional_consultant'. That role
+  holds CONSISTENCY_RUN, ISSUES_READ, and PROJECT_CREATE, which are
+  required by the routes and fixtures in this file.
 """
 from __future__ import annotations
 
@@ -72,7 +77,11 @@ def auth_headers(client):
     email = f"test-{uuid.uuid4().hex[:12]}@example.com"
     r = client.post(
         '/api/auth/signup',
-        json={'email': email, 'password': 'testpassword123'},
+        json={
+            'email': email,
+            'password': 'testpassword123',
+            'account_type': 'functional_consultant',
+        },
     )
     assert r.status_code == 200, r.text
     token = r.json()['access_token']
@@ -154,7 +163,11 @@ class TestConsistencyCheckAuthorization:
         other_email = f"test-{uuid.uuid4().hex[:12]}@example.com"
         r = client.post(
             '/api/auth/signup',
-            json={'email': other_email, 'password': 'testpassword123'},
+            json={
+                'email': other_email,
+                'password': 'testpassword123',
+                'account_type': 'functional_consultant',
+            },
         )
         other_headers = {'Authorization': f"Bearer {r.json()['access_token']}"}
 
