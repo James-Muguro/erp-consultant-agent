@@ -9,9 +9,27 @@ schema redesign. A full relational schema (normalized conversation turns,
 phase outputs, etc.) is worth doing once the UI/API need to query into
 those pieces directly - not needed yet.
 
-User is a stub for Stage 2 (authentication/multi-tenancy). It is not
-referenced by any code path yet - it exists so Stage 2 can add a foreign
-key from sessions to users without an awkward later migration.
+Identity, roles, and multi-tenancy:
+
+  * User is the application identity.
+  * UserRoleRecord grants application roles (erp_user,
+    functional_consultant, developer, marketer). Users may hold multiple
+    roles simultaneously; effective permissions are the union of the
+    permission sets of every role held. There is no combined-role
+    concept and no single 'role' column on users.
+  * Organization is a tenant context. It is NOT an application role.
+  * OrganizationMembership is a many-to-many join between users and
+    organizations, carrying the member's organization role
+    (owner/admin/member). Organization roles are a separate axis from
+    application roles and grant no feature permissions.
+  * SessionRecord.organization_id is NULL for personal projects and
+    non-NULL for organization-owned projects. Personal project access
+    still uses sessions.user_id == current_user.id; organization project
+    access requires an active OrganizationMembership for the owning
+    organization.
+  * Organization deletion is RESTRICTed while projects exist
+    (organization_id uses ON DELETE RESTRICT), so an ordinary
+    organization delete cannot silently destroy project history.
 
 Session ownership and deletion semantics: every table whose rows have no
 lifecycle independent of the owning session declares
@@ -69,6 +87,17 @@ class SessionRecord(Base):
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True, index=True,
     )
+    # NULL = personal project (owned by sessions.user_id under the
+    # existing personal-access rule). Non-NULL = organization-owned
+    # project, in which case access is determined by an active
+    # OrganizationMembership for this organization, not by sessions.user_id.
+    # RESTRICT on delete: an organization cannot be removed while it still
+    # owns projects, preventing silent data loss.
+    organization_id = Column(
+        String,
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        nullable=True, index=True,
+    )
     project_name = Column(String, index=True, nullable=False)
     module = Column(String, nullable=False)
     erp_system = Column(String, nullable=False)
@@ -95,6 +124,114 @@ class User(Base):
     profile_picture_url = Column(Text, nullable=True)
     hashed_password = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
+
+# ============================================================================
+# Organizations and RBAC
+# ============================================================================
+class Organization(Base):
+    """Tenant context. Created by an 'organization' signup, at which point
+    the creating user becomes an OrganizationMembership with role='owner'.
+
+    Deliberately minimal at this stage: id, name, creator attribution,
+    timestamp. Fields for capabilities that do not yet have a design
+    (billing, project-visibility policy, subscription state, firm
+    knowledge base) are NOT invented here - each will arrive via its own
+    migration when the capability is actually built.
+
+    created_by is nullable with SET NULL, matching the attribution pattern
+    on sessions.user_id and review_actions.user_id. If the creating user
+    is deleted, the organization itself is preserved; ownership of the
+    organization flows through OrganizationMembership, not through
+    created_by.
+    """
+    __tablename__ = "organizations"
+
+    id = Column(String, primary_key=True)
+    name = Column(String, nullable=False)
+    created_by = Column(
+        String,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
+
+class OrganizationMembership(Base):
+    """Many-to-many join between users and organizations, carrying the
+    member's organization role.
+
+    The role column here is an ORGANIZATION role (owner/admin/member),
+    not an application role. Application roles live on UserRoleRecord.
+    The two axes are independent: organization roles grant administrative
+    capability inside one organization and no feature permissions
+    anywhere; application roles grant feature permissions and no
+    organization administrative capability.
+
+    Uniqueness on (organization_id, user_id) prevents a user from holding
+    two membership rows in the same organization. A user can be a member
+    of many organizations simultaneously via many rows here.
+
+    v1 has no soft-delete / 'inactive' state. A membership exists or it
+    does not; leaving an organization deletes the row. If a pending or
+    suspended state is introduced later, it becomes a column here and a
+    filter in the RBAC lookup.
+    """
+    __tablename__ = "organization_memberships"
+
+    id = Column(String, primary_key=True)
+    organization_id = Column(
+        String,
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    user_id = Column(
+        String,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    role = Column(String, nullable=False)  # 'owner' | 'admin' | 'member'
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id", "user_id",
+            name="uq_organization_membership_org_user",
+        ),
+    )
+
+
+class UserRoleRecord(Base):
+    """Application role grant. One row per (user, role) pair.
+
+    Multiple rows per user are the norm: a user may hold Functional
+    Consultant and Developer simultaneously, in which case their
+    effective permissions are the union of the two role permission sets.
+    There is no combined-role concept (no 'functional_developer') and no
+    single 'role' column on users.
+
+    Named UserRoleRecord (not UserRole) to avoid a collision with the
+    UserRole application-role enum in src/auth/permissions.py, matching
+    the existing convention (TestCaseRecord, TrainingStepRecord, ...).
+
+    Unique on (user_id, role) prevents duplicate grants of the same role
+    to the same user. CASCADE on user_id: deleting a user removes their
+    role grants, which is the intended lifecycle.
+    """
+    __tablename__ = "user_roles"
+
+    id = Column(String, primary_key=True)
+    user_id = Column(
+        String,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    role = Column(String, nullable=False)  # 'erp_user' | 'functional_consultant' | 'developer' | 'marketer'
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "role", name="uq_user_role_user_role"),
+    )
 
 
 class Feedback(Base):
