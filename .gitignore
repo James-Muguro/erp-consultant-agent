@@ -72,3 +72,6 @@ temp/
 *.bak
 *sample_test.py
 *nohup.out
+*project_structure.txt
+*batch.txt
+*dump_files.sh
