@@ -16,8 +16,7 @@ function formatSize(bytes: number): string {
  *
  *  - 503 from POST /uploads means object storage isn't configured on
  *    this server. Detected once, then surfaced as a persistent banner
- *    with a retry that clears the flag - better than letting the user
- *    pick a file only to be told it can't work after the wait.
+ *    with a retry that clears the flag.
  *  - 502 from GET /uploads/:id/download means storage is configured but
  *    the read failed (bucket gone, credentials rotated). Surfaced per
  *    download.
@@ -32,34 +31,39 @@ export function UploadsPanel({ sessionId }: { sessionId: string }) {
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [rowError, setRowError] = useState<string | null>(null);
+  const [reloadToken, setReloadToken] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const generationRef = useRef(0);
-
-  const refresh = useCallback(async () => {
-    const generation = ++generationRef.current;
-    setLoading(true);
-    setLoadError(null);
-    try {
-      const { documents } = await api.listUploads(sessionId);
-      if (generation !== generationRef.current) return;
-      setDocuments(documents);
-    } catch (err) {
-      if (generation !== generationRef.current) return;
-      setDocuments([]);
-      setLoadError(
-        err instanceof Error ? err.message : "Could not load uploaded documents.",
-      );
-    } finally {
-      if (generation === generationRef.current) setLoading(false);
-    }
-  }, [sessionId]);
 
   useEffect(() => {
-    void refresh();
+    let cancelled = false;
+    (async () => {
+      try {
+        const { documents: items } = await api.listUploads(sessionId);
+        if (cancelled) return;
+        setDocuments(items);
+        setLoadError(null);
+      } catch (err) {
+        if (cancelled) return;
+        setDocuments([]);
+        setLoadError(
+          err instanceof Error
+            ? err.message
+            : "Could not load uploaded documents.",
+        );
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
     return () => {
-      generationRef.current++;
+      cancelled = true;
     };
-  }, [refresh]);
+  }, [sessionId, reloadToken]);
+
+  const handleRetry = useCallback(() => {
+    setLoading(true);
+    setLoadError(null);
+    setReloadToken((n) => n + 1);
+  }, []);
 
   async function handleFileChosen(file: File | undefined) {
     if (!file) return;
@@ -67,12 +71,12 @@ export function UploadsPanel({ sessionId }: { sessionId: string }) {
     setUploading(true);
     try {
       await api.uploadDocument(sessionId, file);
-      await refresh();
+      setReloadToken((n) => n + 1);
     } catch (err) {
       // 503 is the backend's explicit "object storage isn't configured"
       // signal. Detect it once and switch the panel into a state where
       // the upload button is disabled and a persistent explanation is
-      // shown, rather than letting the user retry and hit the same 503.
+      // shown.
       if (err instanceof ApiError && err.status === 503) {
         setUploadsUnavailable(true);
       }
@@ -111,7 +115,7 @@ export function UploadsPanel({ sessionId }: { sessionId: string }) {
     setDeletingId(doc.id);
     try {
       await api.deleteUpload(sessionId, doc.id);
-      await refresh();
+      setReloadToken((n) => n + 1);
     } catch (err) {
       setRowError(
         err instanceof Error ? err.message : "Could not delete the document.",
@@ -190,7 +194,7 @@ export function UploadsPanel({ sessionId }: { sessionId: string }) {
       {loading ? (
         <LoadingRow label="Loading documents…" />
       ) : loadError ? (
-        <ErrorRow message={loadError} onRetry={refresh} />
+        <ErrorRow message={loadError} onRetry={handleRetry} />
       ) : documents.length === 0 ? (
         <EmptyRow label="No documents uploaded yet." />
       ) : (

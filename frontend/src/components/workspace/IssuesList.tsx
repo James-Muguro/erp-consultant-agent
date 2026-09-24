@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api/client";
 import type { ProjectIssue } from "../../types";
 import { EmptyRow, ErrorRow, LoadingRow, SeverityBadge } from "./shared";
@@ -9,43 +9,42 @@ import { EmptyRow, ErrorRow, LoadingRow, SeverityBadge } from "./shared";
  * There is intentionally no "show all" toggle. The backend endpoint
  * (`GET /api/projects/{id}/issues`) applies a default status of "open"
  * when the query parameter is omitted, and does not currently support
- * fetching across all statuses. The previous toggle sent two requests
- * that were identical in effect (null produced no query param, which the
- * backend treated as "open"). It has been removed until the backend
- * gains an explicit "all" mode - offering a control that does nothing
- * is worse than not offering it.
+ * fetching across all statuses.
  */
 export function IssuesList({ sessionId }: { sessionId: string }) {
   const [issues, setIssues] = useState<ProjectIssue[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const generationRef = useRef(0);
-
-  const refresh = useCallback(async () => {
-    const generation = ++generationRef.current;
-    setLoading(true);
-    setLoadError(null);
-    try {
-      const { issues } = await api.getIssues(sessionId, "open");
-      if (generation !== generationRef.current) return;
-      setIssues(issues);
-    } catch (err) {
-      if (generation !== generationRef.current) return;
-      setIssues([]);
-      setLoadError(
-        err instanceof Error ? err.message : "Could not load issues.",
-      );
-    } finally {
-      if (generation === generationRef.current) setLoading(false);
-    }
-  }, [sessionId]);
+  const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
-    void refresh();
+    let cancelled = false;
+    (async () => {
+      try {
+        const { issues: items } = await api.getIssues(sessionId, "open");
+        if (cancelled) return;
+        setIssues(items);
+        setLoadError(null);
+      } catch (err) {
+        if (cancelled) return;
+        setIssues([]);
+        setLoadError(
+          err instanceof Error ? err.message : "Could not load issues.",
+        );
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
     return () => {
-      generationRef.current++;
+      cancelled = true;
     };
-  }, [refresh]);
+  }, [sessionId, reloadToken]);
+
+  const handleRetry = useCallback(() => {
+    setLoading(true);
+    setLoadError(null);
+    setReloadToken((n) => n + 1);
+  }, []);
 
   return (
     <div>
@@ -56,7 +55,7 @@ export function IssuesList({ sessionId }: { sessionId: string }) {
       {loading ? (
         <LoadingRow label="Loading issues…" />
       ) : loadError ? (
-        <ErrorRow message={loadError} onRetry={refresh} />
+        <ErrorRow message={loadError} onRetry={handleRetry} />
       ) : issues.length === 0 ? (
         <EmptyRow label="No issues found. Run a consistency check from the Overview tab to look for contradictions." />
       ) : (

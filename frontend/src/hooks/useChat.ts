@@ -74,9 +74,15 @@ export function useChat(
   const abortRef = useRef<AbortController | null>(null);
   // Latest values read inside stable callbacks without adding deps.
   const sessionIdRef = useRef(sessionId);
-  sessionIdRef.current = sessionId;
   const messagesRef = useRef(messages);
-  messagesRef.current = messages;
+
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   // Abort any in-flight stream when the hook unmounts. In the routed app
   // this fires when the user navigates away from a chat mid-turn (the

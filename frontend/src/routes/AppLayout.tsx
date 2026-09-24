@@ -1,14 +1,50 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Menu } from "lucide-react";
-import { Outlet, useNavigate, useParams } from "react-router-dom";
+import { Outlet, useLocation, useNavigate, useParams } from "react-router-dom";
 import { Sidebar } from "../components/Sidebar";
 import { NewProjectModal } from "../components/NewProjectModal";
-import { useConfirm } from "../context/ConfirmContext";
+import { useConfirm } from "../context/useConfirm";
 import { api } from "../api/client";
+import { ErrorBoundary } from "./ErrorBoundary";
 import type { ProjectSummary } from "../types";
+
+function RouteContentError({
+  error,
+  onRetry,
+}: {
+  error: Error;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="flex flex-1 items-center justify-center px-6 py-12">
+      <div className="w-full max-w-md rounded-md border border-border bg-surface p-6 text-center">
+        <h2 className="font-display text-lg text-ink">
+          Something went wrong in this view
+        </h2>
+        <p className="mt-2 text-sm text-ink-muted">
+          This section couldn't be displayed. Your work is saved on the
+          server.
+        </p>
+        {error.message && (
+          <p className="mt-3 break-words rounded-md bg-danger-soft px-3 py-2 text-xs text-danger">
+            {error.message}
+          </p>
+        )}
+        <button
+          type="button"
+          onClick={onRetry}
+          className="mt-4 rounded-md bg-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-strong"
+        >
+          Try again
+        </button>
+      </div>
+    </div>
+  );
+}
 
 export function AppLayout() {
   const navigate = useNavigate();
+  const location = useLocation();
   const confirm = useConfirm();
   const { sessionId } = useParams<{ sessionId?: string }>();
 
@@ -19,11 +55,14 @@ export function AppLayout() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showNewProject, setShowNewProject] = useState(false);
 
+  // Load (or reload) the project list. State updates happen only after
+  // the awaited call, so this can be invoked from the mount effect
+  // without triggering react/set-state-in-effect.
   const refreshProjects = useCallback(async () => {
-    setProjectsError(null);
     try {
       const res = await api.listProjects(showArchived);
       setProjects(res.projects);
+      setProjectsError(null);
     } catch (err) {
       setProjectsError(
         err instanceof Error ? err.message : "Could not load projects.",
@@ -33,13 +72,36 @@ export function AppLayout() {
 
   useEffect(() => {
     let cancelled = false;
-    setLoadingProjects(true);
-    refreshProjects().finally(() => {
-      if (!cancelled) setLoadingProjects(false);
-    });
+    void (async () => {
+      try {
+        const res = await api.listProjects(showArchived);
+        if (cancelled) return;
+        setProjects(res.projects);
+        setProjectsError(null);
+      } catch (err) {
+        if (cancelled) return;
+        setProjectsError(
+          err instanceof Error ? err.message : "Could not load projects.",
+        );
+      } finally {
+        if (!cancelled) setLoadingProjects(false);
+      }
+    })();
     return () => {
       cancelled = true;
     };
+  }, [showArchived]);
+
+  const handleToggleArchived = useCallback(() => {
+    setLoadingProjects(true);
+    setShowArchived((v) => !v);
+  }, []);
+
+  const handleRetryProjects = useCallback(() => {
+    setLoadingProjects(true);
+    void refreshProjects().finally(() => {
+      setLoadingProjects(false);
+    });
   }, [refreshProjects]);
 
   const activeProject = useMemo(
@@ -139,10 +201,6 @@ export function AppLayout() {
   );
 
   return (
-    // `app-viewport` uses 100dvh (with 100vh fallback). The document is
-    // locked to the visible viewport via overflow:hidden on html/body/
-    // #root, so the whole interface can never scroll as a unit. All
-    // scrolling happens inside explicit overflow-y-auto regions.
     <div className="app-viewport flex bg-paper">
       <Sidebar
         projects={projects}
@@ -155,7 +213,7 @@ export function AppLayout() {
         onDelete={handleDeleteProject}
         onOpenSettings={handleOpenSettings}
         showArchived={showArchived}
-        onToggleArchived={() => setShowArchived((v) => !v)}
+        onToggleArchived={handleToggleArchived}
         isOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
       />
@@ -181,7 +239,7 @@ export function AppLayout() {
           <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
             <p className="text-sm text-danger">{projectsError}</p>
             <button
-              onClick={() => refreshProjects()}
+              onClick={handleRetryProjects}
               className="rounded-md border border-border-strong px-3 py-1.5 text-xs text-ink-muted hover:border-accent hover:text-accent"
             >
               Retry
@@ -189,7 +247,14 @@ export function AppLayout() {
           </div>
         ) : (
           <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-            <Outlet />
+            <ErrorBoundary
+              key={location.pathname}
+              fallback={(error, reset) => (
+                <RouteContentError error={error} onRetry={reset} />
+              )}
+            >
+              <Outlet />
+            </ErrorBoundary>
           </main>
         )}
       </div>

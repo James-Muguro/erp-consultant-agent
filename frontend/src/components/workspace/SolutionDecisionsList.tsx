@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Check, X } from "lucide-react";
 import { api } from "../../api/client";
 import type { SolutionDecision } from "../../types";
@@ -16,35 +16,38 @@ export function SolutionDecisionsList({ sessionId }: { sessionId: string }) {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actingOn, setActingOn] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const generationRef = useRef(0);
-
-  const refresh = useCallback(async () => {
-    const generation = ++generationRef.current;
-    setLoading(true);
-    setLoadError(null);
-    try {
-      const { solution_decisions } = await api.getSolutionDecisions(sessionId);
-      if (generation !== generationRef.current) return;
-      setDecisions(solution_decisions);
-    } catch (err) {
-      if (generation !== generationRef.current) return;
-      setDecisions([]);
-      setLoadError(
-        err instanceof Error
-          ? err.message
-          : "Could not load solution decisions.",
-      );
-    } finally {
-      if (generation === generationRef.current) setLoading(false);
-    }
-  }, [sessionId]);
+  const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
-    void refresh();
+    let cancelled = false;
+    (async () => {
+      try {
+        const { solution_decisions } = await api.getSolutionDecisions(sessionId);
+        if (cancelled) return;
+        setDecisions(solution_decisions);
+        setLoadError(null);
+      } catch (err) {
+        if (cancelled) return;
+        setDecisions([]);
+        setLoadError(
+          err instanceof Error
+            ? err.message
+            : "Could not load solution decisions.",
+        );
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
     return () => {
-      generationRef.current++;
+      cancelled = true;
     };
-  }, [refresh]);
+  }, [sessionId, reloadToken]);
+
+  const handleRetry = useCallback(() => {
+    setLoading(true);
+    setLoadError(null);
+    setReloadToken((n) => n + 1);
+  }, []);
 
   async function act(
     decisionId: string,
@@ -59,7 +62,7 @@ export function SolutionDecisionsList({ sessionId }: { sessionId: string }) {
         decisionId,
         action,
       );
-      await refresh();
+      setReloadToken((n) => n + 1);
     } catch (err) {
       setActionError(
         err instanceof Error
@@ -72,7 +75,7 @@ export function SolutionDecisionsList({ sessionId }: { sessionId: string }) {
   }
 
   if (loading) return <LoadingRow label="Loading solution decisions…" />;
-  if (loadError) return <ErrorRow message={loadError} onRetry={refresh} />;
+  if (loadError) return <ErrorRow message={loadError} onRetry={handleRetry} />;
   if (decisions.length === 0) {
     return (
       <EmptyRow label="No solution decisions recorded yet - run the solution design phase to generate some." />

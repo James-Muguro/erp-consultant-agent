@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Check, X } from "lucide-react";
 import { api } from "../../api/client";
 import type { RequirementItem } from "../../types";
@@ -8,12 +8,10 @@ import { EmptyRow, ErrorRow, LoadingRow, StatusBadge } from "./shared";
  * Requirements tab. Loads requirements, groups them by category, and
  * offers approve/reject on drafts.
  *
- * Every failure path here is now honest: a failed load shows an error
- * with retry, not an empty list; a failed review action surfaces the
- * backend's message instead of silently reverting. The request-generation
- * counter invalidates in-flight responses when the session changes or a
- * manual refresh supersedes an earlier one, so a slow response for an
- * old request cannot overwrite current state.
+ * The fetch lives inside the effect so the setState calls are provably
+ * downstream of an await, not synchronous with the effect body. A
+ * reloadToken drives retry and post-action refetch; the per-run
+ * `cancelled` flag discards in-flight responses when the effect re-runs.
  */
 export function RequirementsList({ sessionId }: { sessionId: string }) {
   const [requirements, setRequirements] = useState<RequirementItem[]>([]);
@@ -21,39 +19,36 @@ export function RequirementsList({ sessionId }: { sessionId: string }) {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actingOn, setActingOn] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-
-  // Increments on every refresh (including the cleanup on unmount /
-  // session change). A response whose generation does not match the
-  // current counter is discarded.
-  const generationRef = useRef(0);
-
-  const refresh = useCallback(async () => {
-    const generation = ++generationRef.current;
-    setLoading(true);
-    setLoadError(null);
-    try {
-      const { requirements } = await api.getRequirements(sessionId);
-      if (generation !== generationRef.current) return;
-      setRequirements(requirements);
-    } catch (err) {
-      if (generation !== generationRef.current) return;
-      setRequirements([]);
-      setLoadError(
-        err instanceof Error ? err.message : "Could not load requirements.",
-      );
-    } finally {
-      if (generation === generationRef.current) setLoading(false);
-    }
-  }, [sessionId]);
+  const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
-    void refresh();
+    let cancelled = false;
+    (async () => {
+      try {
+        const { requirements: items } = await api.getRequirements(sessionId);
+        if (cancelled) return;
+        setRequirements(items);
+        setLoadError(null);
+      } catch (err) {
+        if (cancelled) return;
+        setRequirements([]);
+        setLoadError(
+          err instanceof Error ? err.message : "Could not load requirements.",
+        );
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
     return () => {
-      // Invalidate any in-flight response when sessionId changes or the
-      // component unmounts.
-      generationRef.current++;
+      cancelled = true;
     };
-  }, [refresh]);
+  }, [sessionId, reloadToken]);
+
+  const handleRetry = useCallback(() => {
+    setLoading(true);
+    setLoadError(null);
+    setReloadToken((n) => n + 1);
+  }, []);
 
   async function act(requirementId: string, action: "approved" | "rejected") {
     setActingOn(requirementId);
@@ -65,7 +60,7 @@ export function RequirementsList({ sessionId }: { sessionId: string }) {
         requirementId,
         action,
       );
-      await refresh();
+      setReloadToken((n) => n + 1);
     } catch (err) {
       setActionError(
         err instanceof Error ? err.message : "Could not save the review action.",
@@ -76,18 +71,13 @@ export function RequirementsList({ sessionId }: { sessionId: string }) {
   }
 
   if (loading) return <LoadingRow label="Loading requirements…" />;
-  if (loadError) return <ErrorRow message={loadError} onRetry={refresh} />;
+  if (loadError) return <ErrorRow message={loadError} onRetry={handleRetry} />;
   if (requirements.length === 0) {
     return (
       <EmptyRow label="No requirements captured yet - run the requirements phase to generate some." />
     );
   }
 
-  // Group by category. Insertion order of `byCategory` mirrors first
-  // appearance in the (backend-ordered) list. We sort the category names
-  // to keep the tab stable across refreshes - previously the order could
-  // reshuffle if the backend returned the same categories in a different
-  // first-seen order.
   const byCategory = requirements.reduce<Record<string, RequirementItem[]>>(
     (acc, r) => {
       (acc[r.category] ??= []).push(r);

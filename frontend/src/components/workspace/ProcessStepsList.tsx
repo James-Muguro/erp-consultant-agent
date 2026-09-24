@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api/client";
 import type { ProcessStep } from "../../types";
 import { EmptyRow, ErrorRow, LinkedRequirementBadge, LoadingRow } from "./shared";
@@ -7,36 +7,39 @@ export function ProcessStepsList({ sessionId }: { sessionId: string }) {
   const [steps, setSteps] = useState<ProcessStep[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const generationRef = useRef(0);
-
-  const refresh = useCallback(async () => {
-    const generation = ++generationRef.current;
-    setLoading(true);
-    setLoadError(null);
-    try {
-      const { process_steps } = await api.getProcessSteps(sessionId);
-      if (generation !== generationRef.current) return;
-      setSteps(process_steps);
-    } catch (err) {
-      if (generation !== generationRef.current) return;
-      setSteps([]);
-      setLoadError(
-        err instanceof Error ? err.message : "Could not load process steps.",
-      );
-    } finally {
-      if (generation === generationRef.current) setLoading(false);
-    }
-  }, [sessionId]);
+  const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
-    void refresh();
+    let cancelled = false;
+    (async () => {
+      try {
+        const { process_steps } = await api.getProcessSteps(sessionId);
+        if (cancelled) return;
+        setSteps(process_steps);
+        setLoadError(null);
+      } catch (err) {
+        if (cancelled) return;
+        setSteps([]);
+        setLoadError(
+          err instanceof Error ? err.message : "Could not load process steps.",
+        );
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
     return () => {
-      generationRef.current++;
+      cancelled = true;
     };
-  }, [refresh]);
+  }, [sessionId, reloadToken]);
+
+  const handleRetry = useCallback(() => {
+    setLoading(true);
+    setLoadError(null);
+    setReloadToken((n) => n + 1);
+  }, []);
 
   if (loading) return <LoadingRow label="Loading process steps…" />;
-  if (loadError) return <ErrorRow message={loadError} onRetry={refresh} />;
+  if (loadError) return <ErrorRow message={loadError} onRetry={handleRetry} />;
   if (steps.length === 0) {
     return (
       <EmptyRow label="No process steps captured yet - run the process mapping phase to generate some." />
@@ -52,8 +55,6 @@ export function ProcessStepsList({ sessionId }: { sessionId: string }) {
   return (
     <div className="space-y-6">
       {processNames.map((processName) => {
-        // Copy before sorting: mutating the reducer's array in place is
-        // safe today but would surprise any future consumer.
         const ordered = [...byProcess[processName]].sort(
           (a, b) => a.step_number - b.step_number,
         );

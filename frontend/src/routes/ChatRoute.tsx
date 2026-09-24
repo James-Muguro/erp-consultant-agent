@@ -27,7 +27,13 @@ function ChatRouteInner({
   const navigate = useNavigate();
   const location = useLocation();
   const [sessionId, setSessionId] = useState<string | null>(initialSessionId);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  // Load errors are stored alongside the session they belong to, so a
+  // stale error from a previous session is never surfaced for the
+  // current one. This is what allows us to avoid a synchronous
+  // setLoadError inside the effect.
+  const [errorState, setErrorState] = useState<
+    { forSession: string; message: string } | null
+  >(null);
 
   const navState = location.state as { nextAction?: NextAction | null } | null;
   const projectStartAction = mode === "project" ? navState?.nextAction ?? null : null;
@@ -43,14 +49,12 @@ function ChatRouteInner({
   );
 
   const chat = useChat(sessionId, handleSessionCreated);
-  const { reset, loadHistory } = chat;
+  const { loadHistory } = chat;
 
   useEffect(() => {
     if (!sessionId) {
-      reset();
       return;
     }
-    setLoadError(null);
     const controller = new AbortController();
     api
       .getMessages(sessionId, controller.signal)
@@ -62,9 +66,6 @@ function ChatRouteInner({
               role: m.role === "assistant" ? "assistant" : "user",
               text: m.content,
               createdAt: new Date(m.timestamp).getTime(),
-              // History is always complete; loadHistory would set this
-              // anyway, but being explicit here keeps the mapping
-              // self-describing.
               turnState:
                 m.role === "assistant" ? { status: "complete" } : undefined,
             }),
@@ -73,12 +74,19 @@ function ChatRouteInner({
       })
       .catch((err: unknown) => {
         if (err instanceof ApiError && err.kind === "aborted") return;
-        setLoadError(
-          err instanceof Error ? err.message : "Could not load messages.",
-        );
+        setErrorState({
+          forSession: sessionId,
+          message:
+            err instanceof Error ? err.message : "Could not load messages.",
+        });
       });
     return () => controller.abort();
-  }, [sessionId, reset, loadHistory]);
+  }, [sessionId, loadHistory]);
+
+  const loadError =
+    sessionId && errorState?.forSession === sessionId
+      ? errorState.message
+      : null;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">

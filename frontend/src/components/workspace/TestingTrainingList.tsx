@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api/client";
 import type { TestCase, TrainingStep } from "../../types";
 import { EmptyRow, ErrorRow, LoadingRow, WorkspaceCard } from "./shared";
@@ -15,52 +15,54 @@ export function TestingTrainingList({ sessionId }: { sessionId: string }) {
   const [loadingTraining, setLoadingTraining] = useState(true);
   const [testsError, setTestsError] = useState<string | null>(null);
   const [trainingError, setTrainingError] = useState<string | null>(null);
-  const generationRef = useRef(0);
+  const [reloadToken, setReloadToken] = useState(0);
 
-  const refresh = useCallback(async () => {
-    const generation = ++generationRef.current;
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const [testsResult, trainingResult] = await Promise.allSettled([
+        api.getTestCases(sessionId),
+        api.getTrainingSteps(sessionId),
+      ]);
+      if (cancelled) return;
+
+      if (testsResult.status === "fulfilled") {
+        setTestCases(testsResult.value.test_cases);
+        setTestsError(null);
+      } else {
+        setTestCases([]);
+        setTestsError(
+          testsResult.reason instanceof Error
+            ? testsResult.reason.message
+            : "Could not load test cases.",
+        );
+      }
+      if (trainingResult.status === "fulfilled") {
+        setTrainingSteps(trainingResult.value.training_steps);
+        setTrainingError(null);
+      } else {
+        setTrainingSteps([]);
+        setTrainingError(
+          trainingResult.reason instanceof Error
+            ? trainingResult.reason.message
+            : "Could not load training steps.",
+        );
+      }
+      setLoadingTests(false);
+      setLoadingTraining(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, reloadToken]);
+
+  const handleRetry = useCallback(() => {
     setLoadingTests(true);
     setLoadingTraining(true);
     setTestsError(null);
     setTrainingError(null);
-
-    const [testsResult, trainingResult] = await Promise.allSettled([
-      api.getTestCases(sessionId),
-      api.getTrainingSteps(sessionId),
-    ]);
-
-    if (generation !== generationRef.current) return;
-
-    if (testsResult.status === "fulfilled") {
-      setTestCases(testsResult.value.test_cases);
-    } else {
-      setTestCases([]);
-      setTestsError(
-        testsResult.reason instanceof Error
-          ? testsResult.reason.message
-          : "Could not load test cases.",
-      );
-    }
-    if (trainingResult.status === "fulfilled") {
-      setTrainingSteps(trainingResult.value.training_steps);
-    } else {
-      setTrainingSteps([]);
-      setTrainingError(
-        trainingResult.reason instanceof Error
-          ? trainingResult.reason.message
-          : "Could not load training steps.",
-      );
-    }
-    setLoadingTests(false);
-    setLoadingTraining(false);
-  }, [sessionId]);
-
-  useEffect(() => {
-    void refresh();
-    return () => {
-      generationRef.current++;
-    };
-  }, [refresh]);
+    setReloadToken((n) => n + 1);
+  }, []);
 
   const byType = testCases.reduce<Record<string, TestCase[]>>((acc, t) => {
     (acc[t.test_type] ??= []).push(t);
@@ -74,7 +76,7 @@ export function TestingTrainingList({ sessionId }: { sessionId: string }) {
         {loadingTests ? (
           <LoadingRow label="Loading test cases…" />
         ) : testsError ? (
-          <ErrorRow message={testsError} onRetry={refresh} />
+          <ErrorRow message={testsError} onRetry={handleRetry} />
         ) : testCases.length === 0 ? (
           <EmptyRow label="No test cases yet - run the QA or UAT testing phase to generate some." />
         ) : (
@@ -114,7 +116,7 @@ export function TestingTrainingList({ sessionId }: { sessionId: string }) {
         {loadingTraining ? (
           <LoadingRow label="Loading training steps…" />
         ) : trainingError ? (
-          <ErrorRow message={trainingError} onRetry={refresh} />
+          <ErrorRow message={trainingError} onRetry={handleRetry} />
         ) : trainingSteps.length === 0 ? (
           <EmptyRow label="No training steps yet - run the training phase to generate some." />
         ) : (

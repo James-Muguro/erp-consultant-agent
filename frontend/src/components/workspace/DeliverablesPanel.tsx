@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Download, FileText, Sparkles } from "lucide-react";
 import { api, ApiError } from "../../api/client";
 import type { DocumentRef } from "../../types";
@@ -12,40 +12,43 @@ export function DeliverablesPanel({ sessionId }: { sessionId: string }) {
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [downloadingFilename, setDownloadingFilename] = useState<string | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
-  const generationRef = useRef(0);
-
-  const refresh = useCallback(async () => {
-    const generation = ++generationRef.current;
-    setLoading(true);
-    setLoadError(null);
-    try {
-      const { documents } = await api.listDocuments(sessionId);
-      if (generation !== generationRef.current) return;
-      setDocuments(documents);
-    } catch (err) {
-      if (generation !== generationRef.current) return;
-      setDocuments([]);
-      setLoadError(
-        err instanceof Error ? err.message : "Could not load deliverables.",
-      );
-    } finally {
-      if (generation === generationRef.current) setLoading(false);
-    }
-  }, [sessionId]);
+  const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
-    void refresh();
+    let cancelled = false;
+    (async () => {
+      try {
+        const { documents: items } = await api.listDocuments(sessionId);
+        if (cancelled) return;
+        setDocuments(items);
+        setLoadError(null);
+      } catch (err) {
+        if (cancelled) return;
+        setDocuments([]);
+        setLoadError(
+          err instanceof Error ? err.message : "Could not load deliverables.",
+        );
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
     return () => {
-      generationRef.current++;
+      cancelled = true;
     };
-  }, [refresh]);
+  }, [sessionId, reloadToken]);
+
+  const handleRetry = useCallback(() => {
+    setLoading(true);
+    setLoadError(null);
+    setReloadToken((n) => n + 1);
+  }, []);
 
   async function handleGenerateReport() {
     setGenerateError(null);
     setGenerating(true);
     try {
       await api.generateProjectReport(sessionId);
-      await refresh();
+      setReloadToken((n) => n + 1);
     } catch (err) {
       // The endpoint is rate-limited at 10/min, so a 429 is plausible
       // and its message ("Rate limit exceeded: ...") is worth showing.
@@ -112,7 +115,7 @@ export function DeliverablesPanel({ sessionId }: { sessionId: string }) {
       {loading ? (
         <LoadingRow label="Loading deliverables…" />
       ) : loadError ? (
-        <ErrorRow message={loadError} onRetry={refresh} />
+        <ErrorRow message={loadError} onRetry={handleRetry} />
       ) : documents.length === 0 ? (
         <EmptyRow label="No documents generated yet - run a phase, or generate a project report above." />
       ) : (
