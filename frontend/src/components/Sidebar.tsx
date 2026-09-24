@@ -12,7 +12,7 @@ import {
   X,
 } from "lucide-react";
 import type { ProjectSummary } from "../types";
-import { useAuth } from "../context/AuthContext";
+import { useAuth } from "../context/useAuth";
 import { Avatar } from "./Avatar";
 
 export function Sidebar({

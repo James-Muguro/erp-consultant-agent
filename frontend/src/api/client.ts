@@ -15,6 +15,7 @@ import type {
   UploadedDocument,
   ReviewAction,
   User,
+  SignupPayload,
 } from "../types";
 import { parseSseChunk } from "./sse";
 
@@ -409,10 +410,10 @@ function triggerBlobDownload(blob: Blob, filename: string): void {
 // ---------------------------------------------------------------------------
 
 export const api = {
-  async signup(email: string, password: string): Promise<TokenResponse> {
+  async signup(payload: SignupPayload): Promise<TokenResponse> {
     return request<TokenResponse>("/api/auth/signup", {
       method: "POST",
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify(payload),
     });
   },
 

@@ -1,7 +1,5 @@
 import {
-  createContext,
   useCallback,
-  useContext,
   useEffect,
   useState,
   type ReactNode,
@@ -14,30 +12,18 @@ import {
   onAuthExpired,
   setToken,
 } from "../api/client";
-import type { User } from "../types";
-
-interface AuthContextValue {
-  user: User | null;
-  loading: boolean;
-  login: (email: string, password: string) => Promise<void>;
-  signup: (email: string, password: string) => Promise<void>;
-  updateAccountSettings: (name: string) => Promise<void>;
-  uploadProfilePicture: (file: File) => Promise<void>;
-  changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
-  deleteAccount: () => Promise<void>;
-  logout: () => void;
-}
-
-const AuthContext = createContext<AuthContextValue | null>(null);
+import { AuthContext } from "./auth-context";
+import type { SignupPayload, User } from "../types";
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
+  // Initial loading is derived from the presence of a token: no token
+  // means there is nothing to resolve, so the initial render is not a
+  // loading render. This avoids a synchronous setLoading in the
+  // bootstrap effect (flagged by react/set-state-in-effect).
+  const [loading, setLoading] = useState(() => getToken() !== null);
 
   // The API client fires this whenever a protected request returns 401.
-  // We transition to the logged-out state here, in exactly one place,
-  // instead of leaving a stale `user` object on screen while every
-  // subsequent request silently fails.
   useEffect(() => {
     return onAuthExpired(() => {
       setUser(null);
@@ -48,12 +34,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // cancellation flag protects against the StrictMode double-invoke in
   // development and against unmount-during-fetch.
   useEffect(() => {
-    let cancelled = false;
-
     if (!getToken()) {
-      setLoading(false);
       return;
     }
+    let cancelled = false;
 
     api
       .me()
@@ -62,9 +46,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       })
       .catch((err: unknown) => {
         // Only a genuine auth failure clears the token. A transient
-        // network error - hotel WiFi, proxy hiccup, backend restart -
-        // must NOT log the user out of a project they may have been
-        // working on for weeks. `ApiError.kind` is the discriminator.
+        // network error must NOT log the user out of a project they
+        // may have been working on for weeks. `ApiError.kind` is the
+        // discriminator.
         if (cancelled) return;
         if (err instanceof ApiError && err.kind === "auth") {
           clearToken();
@@ -86,17 +70,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const me = await api.me();
       setUser(me);
     } catch (err) {
-      // Never leave a valid token paired with a null user - that state
-      // renders the login page while a session actually exists, and
-      // produces a confusing "signed in but not signed in" state after
-      // a refresh.
       clearToken();
       throw err;
     }
   }, []);
 
-  const signup = useCallback(async (email: string, password: string) => {
-    const { access_token, expires_in_minutes } = await api.signup(email, password);
+  const signup = useCallback(async (payload: SignupPayload) => {
+    const { access_token, expires_in_minutes } = await api.signup(payload);
     setToken(access_token, expires_in_minutes);
     try {
       const me = await api.me();
@@ -150,10 +130,4 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       {children}
     </AuthContext.Provider>
   );
-}
-
-export function useAuth(): AuthContextValue {
-  const ctx = useContext(AuthContext);
-  if (!ctx) throw new Error("useAuth must be used within an AuthProvider");
-  return ctx;
 }

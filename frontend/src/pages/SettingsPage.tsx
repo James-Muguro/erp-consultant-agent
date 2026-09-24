@@ -1,7 +1,7 @@
 import { useRef, useState, type FormEvent } from "react";
 import { Star, Trash2, Upload } from "lucide-react";
-import { useAuth } from "../context/AuthContext";
-import { useConfirm } from "../context/ConfirmContext";
+import { useAuth } from "../context/useAuth";
+import { useConfirm } from "../context/useConfirm";
 import { ApiError, api } from "../api/client";
 import { Avatar } from "../components/Avatar";
 
@@ -228,7 +228,7 @@ function PasswordSection({
   const [saved, setSaved] = useState(false);
 
   const canSubmit =
-    current.length > 0 && next.length >= 8 && current !== next;
+    current.length > 0 && next.length >= 12 && current !== next;
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -255,7 +255,7 @@ function PasswordSection({
   return (
     <SettingsSection
       title="Password"
-      description="Use at least 8 characters."
+      description="Use at least 12 characters."
     >
       <form onSubmit={handleSubmit} className="space-y-4">
         <div>
@@ -288,7 +288,7 @@ function PasswordSection({
             id="settings-new-password"
             type="password"
             autoComplete="new-password"
-            minLength={8}
+            minLength={12}
             value={next}
             onChange={(e) => {
               setNext(e.target.value);

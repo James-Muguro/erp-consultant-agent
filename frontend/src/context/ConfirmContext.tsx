@@ -1,39 +1,12 @@
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useState,
-  type ReactNode,
-} from "react";
+import { useCallback, useState, type ReactNode } from "react";
 import { ConfirmDialog } from "../components/ConfirmDialog";
-
-export interface ConfirmOptions {
-  title: string;
-  description?: string;
-  confirmLabel?: string;
-  cancelLabel?: string;
-  variant?: "default" | "danger";
-  /**
-   * Runs when the user clicks the confirm button. The dialog stays open
-   * with a pending indicator until this returns (or resolves). If it
-   * rejects, the dialog stays open and shows the error message inline so
-   * the user can retry or cancel - the outer promise only resolves when
-   * the user has either completed the action or explicitly cancelled.
-   *
-   * Omit `onConfirm` for a pure yes/no prompt: the dialog closes on the
-   * confirm click and the promise resolves `true`.
-   */
-  onConfirm?: () => void | Promise<void>;
-}
-
-type ConfirmFn = (options: ConfirmOptions) => Promise<boolean>;
+import { ConfirmContext } from "./confirm-context";
+import type { ConfirmFn, ConfirmOptions } from "./confirm-context";
 
 interface PendingConfirm {
   options: ConfirmOptions;
   resolve: (confirmed: boolean) => void;
 }
-
-const ConfirmContext = createContext<ConfirmFn | null>(null);
 
 /**
  * Provides `useConfirm()` to the app. The dialog is rendered once, at
@@ -57,12 +30,6 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
   const popCurrent = useCallback((confirmed: boolean) => {
     setQueue((q) => {
       const [first, ...rest] = q;
-      // Resolve outside of the state updater would be safer under
-      // StrictMode; but the updater runs synchronously per React's
-      // contract for the batched setState here, and the resolver is
-      // idempotent, so this is safe. If we ever need to be stricter
-      // about side effects, move the resolve into a useEffect keyed on
-      // the queue.
       first?.resolve(confirmed);
       return rest;
     });
@@ -112,10 +79,4 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
       />
     </ConfirmContext.Provider>
   );
-}
-
-export function useConfirm(): ConfirmFn {
-  const ctx = useContext(ConfirmContext);
-  if (!ctx) throw new Error("useConfirm must be used within a ConfirmProvider");
-  return ctx;
 }

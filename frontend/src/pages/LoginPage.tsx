@@ -1,12 +1,49 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { useAuth } from "../context/AuthContext";
+import { useAuth } from "../context/useAuth";
 import { ApiError } from "../api/client";
+import type { AccountType } from "../types";
+
+/**
+ * Short user-facing description per account type, shown below the
+ * selector so a user can tell what each choice means before submitting.
+ * These are hints, not contracts; the backend role-capability model is
+ * the authority.
+ */
+const ACCOUNT_TYPE_OPTIONS: { value: AccountType; label: string; hint: string }[] = [
+  {
+    value: "erp_user",
+    label: "ERP User",
+    hint: "Use projects you're assigned to, with read access to relevant documents and training materials.",
+  },
+  {
+    value: "functional_consultant",
+    label: "Functional Consultant",
+    hint: "Full consulting scope: requirements, process mapping, solution design, testing, and training.",
+  },
+  {
+    value: "developer",
+    label: "Developer",
+    hint: "Solution design and implementation work, with read access to requirements.",
+  },
+  {
+    value: "marketer",
+    label: "Marketer",
+    hint: "Case-study view, document generation, and content workflows.",
+  },
+  {
+    value: "organization",
+    label: "Organization",
+    hint: "Create an organization workspace and become its owner.",
+  },
+];
 
 export function LoginPage() {
   const { login, signup } = useAuth();
   const [mode, setMode] = useState<"login" | "signup">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [accountType, setAccountType] = useState<AccountType>("functional_consultant");
+  const [organizationName, setOrganizationName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const emailRef = useRef<HTMLInputElement>(null);
@@ -14,6 +51,9 @@ export function LoginPage() {
   useEffect(() => {
     emailRef.current?.focus();
   }, []);
+
+  const selectedOption = ACCOUNT_TYPE_OPTIONS.find((o) => o.value === accountType)!;
+  const isOrgSignup = mode === "signup" && accountType === "organization";
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -23,16 +63,15 @@ export function LoginPage() {
       if (mode === "login") {
         await login(email, password);
       } else {
-        await signup(email, password);
+        await signup({
+          email,
+          password,
+          account_type: accountType,
+          organization_name: isOrgSignup ? organizationName.trim() : undefined,
+        });
       }
     } catch (err) {
       if (err instanceof ApiError) {
-        // ApiError.message is user-safe (Step 1 hardening). It carries the
-        // backend's own wording for credentials failures ("Incorrect email
-        // or password"), rate limits, and validation errors. `kind` and
-        // `retryAfterSeconds` are available if we later want a distinct
-        // presentation per failure category; for now the message is the
-        // right thing to show.
         setError(err.message);
       } else {
         setError("Something went wrong. Try again.");
@@ -77,6 +116,49 @@ export function LoginPage() {
           </div>
 
           <form onSubmit={handleSubmit} aria-busy={submitting} className="space-y-4">
+            {mode === "signup" && (
+              <div>
+                <label htmlFor="account_type" className="mb-1 block text-sm text-ink-muted">
+                  Account type
+                </label>
+                <select
+                  id="account_type"
+                  value={accountType}
+                  onChange={(e) => setAccountType(e.target.value as AccountType)}
+                  className="w-full rounded-md border border-border bg-surface px-3 py-2.5 text-base text-ink outline-none focus:border-accent sm:text-sm"
+                >
+                  {ACCOUNT_TYPE_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-xs text-ink-faint">
+                  {selectedOption.hint}
+                </p>
+              </div>
+            )}
+
+            {isOrgSignup && (
+              <div>
+                <label htmlFor="organization_name" className="mb-1 block text-sm text-ink-muted">
+                  Organization name
+                </label>
+                <input
+                  id="organization_name"
+                  required
+                  value={organizationName}
+                  onChange={(e) => setOrganizationName(e.target.value)}
+                  maxLength={200}
+                  className="w-full rounded-md border border-border bg-surface px-3 py-2.5 text-base text-ink outline-none focus:border-accent sm:text-sm"
+                  placeholder="Your firm or company"
+                />
+                <p className="mt-1 text-xs text-ink-faint">
+                  You will be the owner and can invite team members later.
+                </p>
+              </div>
+            )}
+
             <div>
               <label htmlFor="email" className="mb-1 block text-sm text-ink-muted">
                 Email
@@ -103,12 +185,12 @@ export function LoginPage() {
                 id="password"
                 type="password"
                 required
-                minLength={8}
+                minLength={12}
                 autoComplete={mode === "login" ? "current-password" : "new-password"}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="w-full rounded-md border border-border bg-surface px-3 py-2.5 text-base text-ink outline-none focus:border-accent sm:text-sm"
-                placeholder="At least 8 characters"
+                placeholder="At least 12 characters"
               />
             </div>
 

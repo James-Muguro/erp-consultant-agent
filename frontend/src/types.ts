@@ -1,9 +1,38 @@
+export type AccountType =
+  | "erp_user"
+  | "functional_consultant"
+  | "developer"
+  | "marketer"
+  | "organization";
+
+export interface SignupPayload {
+  email: string;
+  password: string;
+  account_type: AccountType;
+  /** Only sent when account_type === "organization". */
+  organization_name?: string;
+}
+
+export interface OrganizationSummary {
+  id: string;
+  name: string;
+  /** "owner" | "admin" | "member" — organization role, separate from
+   *  application roles. */
+  role: string;
+}
+
 export interface User {
   id: string;
   email: string;
   name: string | null;
   profile_picture_url: string | null;
   created_at: string;
+  /** Application roles. Populated from the /me response; empty when the
+   *  user holds no roles (should not happen for a signed-up user). */
+  roles: string[];
+  /** Organizations the user is a member of. Empty when the user has not
+   *  created or joined an organization. */
+  organizations: OrganizationSummary[];
 }
 
 export interface ProjectSummary {
@@ -12,7 +41,6 @@ export interface ProjectSummary {
   module: string;
   erp_system: string;
   is_casual: boolean;
-  /** True when the project is archived (SessionRecord.archived_at is set). */
   is_archived: boolean;
   current_phase: string;
   completed_phases: string[];
@@ -91,8 +119,6 @@ export interface ApiErrorBody {
   };
 }
 
-// --- Project intelligence types ---
-
 export type ReviewStatus = "draft" | "approved" | "rejected";
 
 export interface RequirementItem {
@@ -155,15 +181,11 @@ export interface ProjectIssue {
 export interface ProjectHealth {
   requirements_total: number;
   requirements_by_status: Record<string, number>;
-  /** Rounded to one decimal by the backend (e.g. 85.7). */
   requirements_coverage_pct: number;
   open_issues_total: number;
   open_issues_by_severity: Record<string, number>;
-  /** Always present in the current backend response. */
   uncovered_requirements_count: number;
-  /** Always present in the current backend response. */
   untested_requirements_count: number;
-  /** True when the project has an active solution baseline. */
   has_active_baseline: boolean;
 }
 
