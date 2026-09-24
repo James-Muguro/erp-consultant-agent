@@ -2,12 +2,26 @@
 Session management for maintaining state across agent interactions.
 
 Timestamp convention: every datetime stored on a session is timezone-aware
-and UTC. This was previously naive local time (datetime.now()), which is a
-correctness bug on any multi-worker or multi-region deployment — the naive
-values are interpreted as server-local time by Postgres when written to the
-timestamptz columns, producing inconsistent absolute times for the same
-wall-clock event. Sessions created before this change have naive ISO strings
+and UTC. Sessions created before this change have naive ISO strings
 on disk; SessionState.from_dict normalizes both vintages to UTC-aware.
+
+Tenancy: SessionState.organization_id is NULL for personal projects and
+non-NULL for organization-owned projects. Personal projects use the
+existing ownership rule (session.user_id == current_user.id).
+Organization-owned projects use an active OrganizationMembership for
+the owning organization (enforced at the API layer, not here).
+
+Listing semantics (Round 3a correction):
+  * list_project_summaries_for_user returns BOTH the user's personal
+    projects AND every project belonging to an organization the user
+    is an active member of. This is the discoverability half of the
+    tenant boundary: without it, an org member could only reach org
+    projects by already knowing their session_id.
+  * list_sessions_for_user returns ONLY personal projects. It is the
+    deletion path used by account deletion, which must not destroy
+    org-owned project data when the creator deletes their personal
+    account. Org-owned sessions survive via the FK's ON DELETE SET NULL
+    on sessions.user_id; only the attribution is removed.
 """
 from __future__ import annotations
 
@@ -27,9 +41,6 @@ from src.utils.logger import AgentLogger
 # ---------------------------------------------------------------------------
 # Phase definitions - single source of truth
 # ---------------------------------------------------------------------------
-# Previously duplicated between this module and src/memory/__init__.py's
-# AgentMemory. AgentMemory should import these rather than re-declare them;
-# see the note at the end of this module.
 PHASES: tuple = (
     'requirements_gathering',
     'process_mapping',
@@ -48,8 +59,6 @@ PHASE_FIELD_MAP: Dict[str, str] = {
     'training': 'training_materials',
 }
 
-# Import-time consistency check: if PHASES and PHASE_FIELD_MAP ever drift
-# (a phase added to one but not the other), fail loudly at startup.
 if set(PHASES) != set(PHASE_FIELD_MAP.keys()):
     raise RuntimeError(
         "PHASES and PHASE_FIELD_MAP are out of sync. "
@@ -61,37 +70,21 @@ if set(PHASES) != set(PHASE_FIELD_MAP.keys()):
 # Time helpers
 # ---------------------------------------------------------------------------
 def _utcnow() -> datetime:
-    """Timezone-aware current time. Everything in this module writes and
-    stores datetimes through this helper, so the DB's timestamptz columns
-    receive consistent absolute times regardless of which worker wrote
-    them."""
     return datetime.now(timezone.utc)
 
 
 def _parse_datetime(value: Any) -> datetime:
-    """Parse a stored datetime value to timezone-aware UTC.
-
-    Handles three input shapes:
-      * timezone-aware datetime (modern sessions)
-      * naive datetime (older sessions, assumed UTC — matches the new write
-        convention, so both vintages end up comparable)
-      * ISO string, either with or without an offset (both vintages on disk)
-    """
     if isinstance(value, datetime):
         dt = value
     elif isinstance(value, str):
         try:
             dt = datetime.fromisoformat(value)
         except (TypeError, ValueError):
-            # Corrupt or unexpected value — fall back to "now" rather than
-            # crashing the load. The load path already logs failures.
             return _utcnow()
     else:
         return _utcnow()
 
     if dt.tzinfo is None:
-        # Naive: assume UTC. This is the convention used by pre-fix sessions
-        # and the only choice that keeps them comparable to post-fix ones.
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
 
@@ -102,29 +95,22 @@ class SessionState:
 
     The object is shared and mutable: get_session() returns the cached
     instance, not a copy. Callers may mutate it directly and then call
-    update_session() (or _save_session) to persist. See the docstring on
-    InMemorySessionService.get_session for the implications.
+    update_session() (or _save_session) to persist.
     """
     session_id: str
     project_name: str
     module: str
     erp_system: str
-    # Owning user's id. Optional for backward compatibility with sessions
-    # created before per-user auth existed (Stage 2) - every session created
-    # from that point on always sets this.
     user_id: Optional[str] = None
-    # True for sessions auto-created from a plain question rather than an
-    # explicit "start a project" action - see src/db/models.py for why.
+    organization_id: Optional[str] = None
     is_casual: bool = False
     created_at: datetime = field(default_factory=_utcnow)
     updated_at: datetime = field(default_factory=_utcnow)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
-    # Workflow state
     current_phase: str = "requirements_gathering"
     completed_phases: List[str] = field(default_factory=list)
 
-    # Agent outputs
     requirements_document: Optional[str] = None
     process_maps: Optional[Dict[str, Any]] = None
     solution_design: Optional[str] = None
@@ -132,18 +118,17 @@ class SessionState:
     uat_test_cases: Optional[List[Dict]] = None
     training_materials: Optional[Dict[str, Any]] = None
 
-    # Context and history
     conversation_history: List[Dict[str, Any]] = field(default_factory=list)
     decisions_log: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert session state to dictionary."""
         return {
             'session_id': self.session_id,
             'project_name': self.project_name,
             'module': self.module,
             'erp_system': self.erp_system,
             'user_id': self.user_id,
+            'organization_id': self.organization_id,
             'is_casual': self.is_casual,
             'created_at': self.created_at.isoformat(),
             'updated_at': self.updated_at.isoformat(),
@@ -164,17 +149,14 @@ class SessionState:
     def from_dict(cls, data: Dict[str, Any]) -> 'SessionState':
         """Create session state from dictionary.
 
-        Fixes two previous issues:
-          * The input dict is copied before modification rather than
-            mutated in place.
-          * Unknown keys are filtered rather than raising TypeError. This
-            makes forward compatibility work: a field added on the dataclass
-            or removed from it doesn't break loading older/newer records.
-        """
+        Unknown keys are filtered rather than raising TypeError, so a
+        field added on the dataclass or removed from it doesn't break
+        loading older/newer records. Pre-Round-3a blobs have no
+        'organization_id' key and load with the dataclass default None."""
         if not isinstance(data, dict):
             raise TypeError(f"from_dict expected dict, got {type(data).__name__}")
 
-        safe = dict(data)  # never mutate the caller's dict
+        safe = dict(data)
         safe['created_at'] = _parse_datetime(safe.get('created_at'))
         safe['updated_at'] = _parse_datetime(safe.get('updated_at'))
 
@@ -187,10 +169,7 @@ class InMemorySessionService:
     """In-memory session management service (file-backed).
 
     Kept for reference and as a fallback; production uses DbSessionService
-    at the bottom of this module. The two share almost all their logic —
-    only the storage primitives (_save_session, _load_session, and the
-    enumeration/deletion methods) differ.
-    """
+    at the bottom of this module."""
 
     def __init__(self):
         self.sessions: Dict[str, SessionState] = {}
@@ -199,9 +178,6 @@ class InMemorySessionService:
         self.persistence_dir.mkdir(parents=True, exist_ok=True)
         self._save_lock = threading.Lock()
 
-    # ------------------------------------------------------------------ #
-    # Lifecycle
-    # ------------------------------------------------------------------ #
     def create_session(
         self,
         session_id: str,
@@ -210,13 +186,9 @@ class InMemorySessionService:
         erp_system: str = "SAP S/4HANA",
         metadata: Optional[Dict[str, Any]] = None,
         user_id: Optional[str] = None,
+        organization_id: Optional[str] = None,
         is_casual: bool = False,
     ) -> SessionState:
-        """Create a new session, or return the existing one if the id is
-        already in use. The previous version logged a warning and returned
-        the existing session — preserved, since callers rely on the
-        idempotent behavior when create_project is retried after a
-        transient failure."""
         if session_id in self.sessions:
             self.logger.warning(f"Session {session_id} already exists")
             return self.sessions[session_id]
@@ -227,6 +199,7 @@ class InMemorySessionService:
             module=module,
             erp_system=erp_system,
             user_id=user_id,
+            organization_id=organization_id,
             is_casual=is_casual,
             metadata=metadata or {},
         )
@@ -243,16 +216,6 @@ class InMemorySessionService:
         return session
 
     def get_session(self, session_id: str) -> Optional[SessionState]:
-        """Get session by ID.
-
-        IMPORTANT — shared-object semantics: the returned object is the
-        same instance cached in self.sessions (or, on a cache miss, the
-        instance created by _load_session and then cached). Callers may
-        mutate it directly and then persist via update_session() or
-        _save_session(), but changes made without one of those calls will
-        not reach storage. Prefer update_session() for any persistent
-        change; mutate-in-place is safe only for transient reads.
-        """
         if session_id in self.sessions:
             return self.sessions[session_id]
         return self._load_session(session_id)
@@ -262,14 +225,6 @@ class InMemorySessionService:
         session_id: str,
         updates: Dict[str, Any],
     ) -> Optional[SessionState]:
-        """Update session state, merging the supplied fields.
-
-        Unknown field names are now logged as warnings rather than silently
-        ignored — a typo in a caller-supplied key (e.g. {'pm_processes':
-        ...} instead of {'process_maps': ...}) previously dropped the
-        update with no signal, and the calling agent's success:True made it
-        look saved.
-        """
         session = self.get_session(session_id)
         if not session:
             self.logger.error(f"Session {session_id} not found")
@@ -299,9 +254,6 @@ class InMemorySessionService:
         self._save_session(session)
         return session
 
-    # ------------------------------------------------------------------ #
-    # History
-    # ------------------------------------------------------------------ #
     def add_to_conversation(
         self,
         session_id: str,
@@ -309,8 +261,6 @@ class InMemorySessionService:
         content: str,
         agent_name: Optional[str] = None,
     ) -> None:
-        """Add message to conversation history, trimmed to the configured
-        maximum."""
         session = self.get_session(session_id)
         if not session:
             self.logger.warning(
@@ -339,13 +289,6 @@ class InMemorySessionService:
         rationale: str,
         agent_name: str,
     ) -> None:
-        """Log an important decision.
-
-        Now bumps session.updated_at — a logged decision is a substantive
-        change to the session and should move it in 'most recently updated'
-        orderings. Previously only add_to_conversation bumped updated_at,
-        so decisions were invisible to any UI that sorted by that field.
-        """
         session = self.get_session(session_id)
         if not session:
             self.logger.warning(
@@ -369,28 +312,7 @@ class InMemorySessionService:
 
         self._save_session(session)
 
-    # ------------------------------------------------------------------ #
-    # Phase transitions
-    # ------------------------------------------------------------------ #
     def advance_phase(self, session_id: str, new_phase: str) -> None:
-        """Move session to the next phase.
-
-        Fixes two issues in the previous implementation:
-
-          * The old_phase value logged was read after the assignment, so
-            the log line always showed old_phase == new_phase. It is now
-            captured before the reassignment.
-          * Calling advance_phase() with the current phase (an idempotent
-            re-announcement) used to append the current phase to
-            completed_phases. That marked a phase completed purely because
-            someone restated it. The check now requires that the phase
-            actually change before recording the previous one as complete.
-
-        Phase-name validation and backwards-move refusal remain the
-        responsibility of AgentMemory.advance_phase, which wraps this
-        method. Calls made directly through session_service bypass those
-        checks — prefer the AgentMemory wrapper unless you have a reason.
-        """
         session = self.get_session(session_id)
         if not session:
             self.logger.warning(
@@ -416,9 +338,6 @@ class InMemorySessionService:
         self._save_session(session)
 
     def get_phase_output(self, session_id: str, phase: str) -> Optional[Any]:
-        """Get output from a specific phase. Uses the shared
-        PHASE_FIELD_MAP constant — previously this had its own copy of the
-        same six mappings, which is exactly the pattern that drifts."""
         session = self.get_session(session_id)
         if not session:
             return None
@@ -435,15 +354,10 @@ class InMemorySessionService:
         )
         return None
 
-    # ------------------------------------------------------------------ #
-    # Enumeration and lifecycle
-    # ------------------------------------------------------------------ #
     def list_sessions(self) -> List[str]:
-        """List all active session IDs."""
         return list(self.sessions.keys())
 
     def delete_session(self, session_id: str) -> bool:
-        """Delete a session and its on-disk file."""
         if session_id in self.sessions:
             del self.sessions[session_id]
 
@@ -456,15 +370,7 @@ class InMemorySessionService:
 
         return False
 
-    # ------------------------------------------------------------------ #
-    # Storage primitives (overridden by DbSessionService)
-    # ------------------------------------------------------------------ #
     def _save_session(self, session: SessionState) -> None:
-        """Save session to disk atomically. Writes to a temp file first,
-        then does an atomic rename — a concurrent reader or a crash
-        mid-write can never see a partially-written file. The lock
-        prevents two threads' writes from interleaving in the temp file
-        itself."""
         session_file = self.persistence_dir / f"{session.session_id}.json"
         tmp_file = self.persistence_dir / f"{session.session_id}.json.tmp"
         with self._save_lock:
@@ -473,7 +379,6 @@ class InMemorySessionService:
             os.replace(tmp_file, session_file)
 
     def _load_session(self, session_id: str) -> Optional[SessionState]:
-        """Load session from disk."""
         session_file = self.persistence_dir / f"{session_id}.json"
 
         if not session_file.exists():
@@ -491,7 +396,6 @@ class InMemorySessionService:
             return None
 
     def get_session_summary(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Get summary of session state."""
         session = self.get_session(session_id)
         if not session:
             return None
@@ -515,45 +419,16 @@ class InMemorySessionService:
 class DbSessionService(InMemorySessionService):
     """Session service backed by a real database instead of per-file JSON.
 
-    Reuses every method from InMemorySessionService unchanged (create/update/
-    add_to_conversation/log_decision/advance_phase/get_phase_output all just
-    mutate a SessionState object then call self._save_session) — only the
-    storage primitives are overridden. Each session is still stored as the
-    same to_dict()/from_dict() JSON shape as before; it just lives in a
-    database row. This also fixes two pre-existing limitations of the
-    file-based service: list_sessions() and delete_session() only ever
-    worked for sessions already loaded into this process's memory — here
-    both go straight to the database.
-
-    Deletion and referential integrity: delete_session() explicitly removes
-    rows from every session-referencing table whose FK relationship this
-    module can see (project_documents, project_memories, feedback) in the
-    correct child-before-parent order, then deletes the sessions row and
-    relies on the schema's ON DELETE CASCADE for the project_intelligence
-    tables. The earlier version assumed CASCADE covered ProjectMemory and
-    was wrong — production PostgreSQL raised ForeignKeyViolation on the
-    session delete because the child row still existed. That class of bug
-    is why the current version deletes each known child explicitly rather
-    than trusting the schema's cascade rules. If additional session-
-    referencing tables exist whose FK is not ON DELETE CASCADE, the fix
-    belongs in the schema (src/db/models.py / migration), not here; the
-    remaining alternative would be duplicated cleanup that silently
-    diverges from the schema.
-    """
+    Reuses every method from InMemorySessionService unchanged - only the
+    storage primitives are overridden."""
 
     def __init__(self):
-        # Skip InMemorySessionService.__init__'s file-directory setup — we
-        # don't need a sessions/ directory — but keep the same cache dict,
-        # logger, and lock, since inherited methods rely on them.
         self.sessions: Dict[str, SessionState] = {}
         self.logger = AgentLogger("SessionManager")
         self._save_lock = threading.Lock()
 
         from src.db.base import init_db, SessionLocal, engine
         if engine.dialect.name == "sqlite":
-            # SQLite (the zero-setup dev/test default) auto-creates tables
-            # on first use for convenience. Postgres deployments run
-            # `alembic upgrade head` explicitly.
             init_db()
         self._db_session_factory = SessionLocal
 
@@ -572,11 +447,9 @@ class DbSessionService(InMemorySessionService):
                 record.module = session.module
                 record.erp_system = session.erp_system
                 record.user_id = session.user_id
+                record.organization_id = session.organization_id
                 record.is_casual = session.is_casual
                 record.current_phase = session.current_phase
-                # Both of these are timezone-aware UTC after the SessionState
-                # fix. Assigning them here supersedes the ORM's onupdate;
-                # both paths now write the same UTC convention.
                 record.created_at = session.created_at
                 record.updated_at = session.updated_at
                 record.data = data
@@ -603,8 +476,6 @@ class DbSessionService(InMemorySessionService):
             db.close()
 
     def list_sessions(self) -> List[str]:
-        """List all session IDs known to the database (not just the ones
-        cached in this process's memory)."""
         from src.db.models import SessionRecord
         from sqlalchemy import select
 
@@ -618,16 +489,29 @@ class DbSessionService(InMemorySessionService):
     def list_sessions_for_user(
         self, user_id: str, include_archived: bool = False,
     ) -> List[str]:
-        """List session IDs owned by a specific user, most recently
-        updated first. Used by the API's conversation-list endpoint —
-        list_sessions() above stays unscoped for CLI/admin use."""
+        """List PERSONAL project session IDs owned by a specific user.
+
+        Round 3a correction: this method is the deletion path used by
+        account deletion, and it deliberately excludes organization-
+        owned sessions. Deleting a personal account must not destroy an
+        organization's projects; org-owned sessions keep their
+        organization_id and lose only their user_id attribution
+        (ON DELETE SET NULL on sessions.user_id). The alternative -
+        deleting everything a user created - would silently destroy
+        project history that other organization members still need.
+
+        For discoverability (what the user can see), use
+        list_project_summaries_for_user instead; it also returns org
+        projects the user has access to via membership.
+        """
         from src.db.models import SessionRecord
         from sqlalchemy import select
 
         db = self._db_session_factory()
         try:
             query = select(SessionRecord.session_id).where(
-                SessionRecord.user_id == user_id
+                SessionRecord.user_id == user_id,
+                SessionRecord.organization_id.is_(None),
             )
             if not include_archived:
                 query = query.where(SessionRecord.archived_at.is_(None))
@@ -641,34 +525,62 @@ class DbSessionService(InMemorySessionService):
     def list_project_summaries_for_user(
         self, user_id: str, include_archived: bool = False,
     ) -> List[Dict[str, Any]]:
-        """Return per-project summary dicts for one user's sessions, in a
-        single query.
+        """Return per-project summary dicts for every project the user
+        can access, in a single query.
 
-        Replaces the two-step list_sessions_for_user() + per-session
-        get_session_summary() pattern that the projects-list route used to
-        use. That pattern was already an N+1: one SELECT for the session
-        IDs, then one SELECT per session (on cache miss) to load the JSON
-        the summary is built from. Adding is_archived via a per-session
-        lookup would have doubled the per-project cost. Both the summary
-        content (from SessionRecord.data) and the archived flag (from
-        SessionRecord.archived_at) come from the same row, so no second
-        round trip is needed.
+        Discoverability half of the tenant boundary. The user can see:
 
-        Records whose stored JSON cannot be deserialized are skipped with
-        a logged error, matching the previous route behavior, which
-        filtered falsy summaries out of the response rather than failing
-        the whole listing.
+          * their personal projects (organization_id IS NULL AND
+            user_id == user_id)
+          * every project belonging to an organization where they hold
+            an active membership (organization_id IN (their org ids))
+
+        This matches the agreed architecture: organization-owned
+        projects are accessible to active organization members, and
+        access does not depend on already knowing the session_id.
+        Before this correction, an org member who did not personally
+        create a project could only reach it if someone handed them the
+        session_id - which is not a discoverable UX.
+
+        Records whose stored JSON cannot be deserialized are skipped
+        with a logged error, matching the previous behavior which
+        filtered falsy summaries out rather than failing the listing.
+
+        A single SQL query is used (with a correlated subquery for the
+        user's org ids) so the operation stays O(1) round trips. No
+        per-project or per-org query is issued.
         """
-        from src.db.models import SessionRecord
-        from sqlalchemy import select
+        from src.db.models import SessionRecord, OrganizationMembership
+        from sqlalchemy import select, or_, and_
 
         db = self._db_session_factory()
         try:
+            # Subquery: every organization the user currently belongs to.
+            # Correlated execution is fine here - the planner will treat
+            # it as a semi-join against the unique index on
+            # (organization_id, user_id).
+            user_org_ids_subq = (
+                select(OrganizationMembership.organization_id)
+                .where(OrganizationMembership.user_id == user_id)
+                .scalar_subquery()
+            )
+
             query = select(SessionRecord).where(
-                SessionRecord.user_id == user_id
+                or_(
+                    # Personal projects: owned by the user, no org context.
+                    and_(
+                        SessionRecord.organization_id.is_(None),
+                        SessionRecord.user_id == user_id,
+                    ),
+                    # Organization-owned projects: any org the user
+                    # belongs to. session.user_id is deliberately NOT
+                    # consulted - the org owns the project.
+                    SessionRecord.organization_id.in_(user_org_ids_subq),
+                )
             )
             if not include_archived:
                 query = query.where(SessionRecord.archived_at.is_(None))
+
             records = db.execute(
                 query.order_by(SessionRecord.updated_at.desc())
             ).scalars().all()
@@ -704,9 +616,6 @@ class DbSessionService(InMemorySessionService):
     def rename_session(
         self, session_id: str, new_project_name: str,
     ) -> Optional[SessionState]:
-        """Rename a session's project_name, in both the indexed column and
-        the JSON blob. Goes through the normal get → mutate → save path so
-        both stay consistent."""
         session = self.get_session(session_id)
         if not session:
             return None
@@ -716,8 +625,6 @@ class DbSessionService(InMemorySessionService):
         return session
 
     def archive_session(self, session_id: str) -> bool:
-        """Soft-delete: hide from listings without destroying data. Returns
-        False if the session doesn't exist or is already archived."""
         from src.db.models import SessionRecord
 
         db = self._db_session_factory()
@@ -727,22 +634,11 @@ class DbSessionService(InMemorySessionService):
                 return False
             record.archived_at = _utcnow()
             db.commit()
-            # Keep the in-memory cache in sync with the archived state; the
-            # next _load_session will pick up the new archived_at from the
-            # DB, but the currently-cached object should not appear "live"
-            # if the caller immediately queries is_archived via the session.
-            cached = self.sessions.get(session_id)
-            if cached is not None:
-                # No archived_at field on SessionState — the session's
-                # archived state is authoritative in the DB column. Nothing
-                # to update on the cached object itself.
-                pass
             return True
         finally:
             db.close()
 
     def is_archived(self, session_id: str) -> Optional[bool]:
-        """Returns None if the session doesn't exist at all."""
         from src.db.models import SessionRecord
 
         db = self._db_session_factory()
@@ -756,40 +652,15 @@ class DbSessionService(InMemorySessionService):
 
     def delete_session(self, session_id: str) -> bool:
         """Hard-delete a session and every persisted artifact that
-        references it.
-
-        Deletion order (child before parent) matters: any session-
-        referencing table whose FK is not ON DELETE CASCADE will make the
-        parent delete fail with a ForeignKeyViolation if a child row still
-        exists. The earlier version of this method assumed CASCADE covered
-        ProjectMemory and hit exactly that failure in production. This
-        version explicitly deletes every child row this module can see —
-        project_documents, project_memories, feedback — before deleting
-        the sessions row, and relies on the schema's cascade only for the
-        project_intelligence tables that are not imported here.
-
-        External storage is best-effort and intentionally outside the DB
-        transaction. Storage cleanup failures are logged and counted, and
-        the final log line reports any residual objects so an operator can
-        identify and retry them; the DB deletion still proceeds because
-        leaving orphaned storage is preferable to leaving a half-deleted
-        session. The objects that were successfully deleted are not
-        recoverable, but object-storage delete is idempotent, so a retry
-        via a fresh call to delete_session (if the DB still holds the
-        session) will harmlessly re-issue the deletes for any remaining
-        keys.
-
-        Idempotency: a second call after a successful first call returns
-        False because the session row is gone. Nothing about the second
-        call can affect another session — all queries are scoped by the
-        exact session_id, and there is no fallback path that could match
-        a different session.
-        """
+        references it. Child-before-parent ordering; object-storage
+        cleanup outside the DB transaction. No behavior changes in the
+        Round 3a correction - organization-owned sessions are deleted
+        through this same path when the caller explicitly asks for it."""
         from src.db.models import SessionRecord, ProjectMemory, Feedback, ProjectDocument
 
         try:
             from src.storage import object_storage
-        except Exception:  # noqa: BLE001 - storage is optional in some envs
+        except Exception:  # noqa: BLE001
             object_storage = None
 
         db = self._db_session_factory()
@@ -798,11 +669,6 @@ class DbSessionService(InMemorySessionService):
             if record is None:
                 return False
 
-            # 1. Best-effort object-storage cleanup, before the DB
-            #    transaction. We need the storage keys from ProjectDocument
-            #    rows while they still exist, so this step must run before
-            #    the DB delete. Failures are collected so the outcome of
-            #    the deletion can be reported accurately at the end.
             storage_failures: List[str] = []
             if object_storage is not None:
                 storage_keys = [
@@ -814,12 +680,8 @@ class DbSessionService(InMemorySessionService):
                 for storage_key in storage_keys:
                     try:
                         object_storage.delete_object(storage_key)
-                    except Exception as e:  # noqa: BLE001 - external call
+                    except Exception as e:  # noqa: BLE001
                         storage_failures.append(storage_key)
-                        # The lower layer (object_storage.delete_object)
-                        # already logged the underlying provider error with
-                        # its own traceback. A duplicate traceback here
-                        # would just add noise; record the outcome instead.
                         self.logger.warning(
                             "Failed to delete project document from object storage",
                             session_id=session_id,
@@ -827,12 +689,6 @@ class DbSessionService(InMemorySessionService):
                             error=str(e),
                         )
 
-            # 2. Explicit child-row cleanup, in child-before-parent order.
-            #    Relying on CASCADE for these tables is the pattern that
-            #    produced the earlier production ForeignKeyViolation, so
-            #    each known session-referencing table is deleted explicitly
-            #    here. If a schema-level CASCADE also fires when the parent
-            #    is deleted, it will simply affect zero additional rows.
             db.query(ProjectDocument).filter(
                 ProjectDocument.session_id == session_id
             ).delete(synchronize_session=False)
@@ -843,16 +699,9 @@ class DbSessionService(InMemorySessionService):
                 Feedback.session_id == session_id
             ).delete(synchronize_session=False)
 
-            # 3. Delete the parent session row. Any ON DELETE CASCADE
-            #    relationships declared in the schema (project_intelligence
-            #    tables not imported by this module) fire within the same
-            #    transaction, so commit lands all-or-nothing.
             db.delete(record)
             db.commit()
 
-            # 4. Cache invalidation after the DB transaction has durably
-            #    committed. If anything above raised, the cache is left
-            #    intact so the caller sees a consistent view.
             self.sessions.pop(session_id, None)
 
             if storage_failures:
@@ -865,19 +714,13 @@ class DbSessionService(InMemorySessionService):
                 self.logger.info("Session deleted", session_id=session_id)
             return True
         except Exception:
-            # Roll back the transaction explicitly so the connection is
-            # not returned to the pool mid-transaction. Object-storage
-            # deletions already performed are outside this boundary and
-            # are not rolled back — S3 delete is idempotent, so a retry of
-            # delete_session is safe.
             try:
                 db.rollback()
-            except Exception:  # noqa: BLE001 - rollback must not mask the original error
+            except Exception:  # noqa: BLE001
                 pass
             raise
         finally:
             db.close()
 
 
-# Global session service instance — database-backed.
 session_service = DbSessionService()

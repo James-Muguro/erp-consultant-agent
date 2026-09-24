@@ -2,6 +2,21 @@
 FastAPI wrapper for ERP Orchestrator with hybrid LLM support
 (Gemini + Groq + GPT-4 + Claude fallback).
 
+Round 3b: every project-scoped route is guarded by an explicit
+require_permission(Permission.X) dependency in addition to the tenant
+boundary enforced by _get_owned_session. Both layers must pass.
+
+Signup round: /api/auth/signup accepts the five account choices.
+Individual choices grant the matching application role. Organization
+signup creates the tenant and Owner membership in the same transaction.
+/api/auth/me returns application roles and organization memberships so
+the frontend can render the correct experience; the frontend's view is
+never the source of authorization.
+
+Account/profile mutation endpoints (PATCH /api/auth/settings,
+POST /api/auth/profile-picture) intentionally remain on
+Depends(get_current_user). PROFILE_EDIT enforcement belongs to the
+account/profile round.
 """
 from __future__ import annotations
 
@@ -18,7 +33,7 @@ from urllib.parse import quote
 
 # ---------------------------------------------------------------------------
 # Frontend bundle location, anchored to the repository root
-# ---------------------------------------------------------------------------.
+# ---------------------------------------------------------------------------
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _FRONTEND_DIST = _REPO_ROOT / "frontend" / "dist"
 _FRONTEND_INDEX = _FRONTEND_DIST / "index.html"
@@ -66,9 +81,16 @@ from src.utils.logger import (
 from src.utils.prompts import get_synthesis_prompt
 from src.models.chat_intent_schema import ChatIntent, ChatIntentDecision
 from src.auth.dependencies import get_current_user, get_db
+from src.auth.guards import require_permission
+from src.auth.permissions import Permission
+from src.auth.rbac import (
+    get_membership,
+    get_user_roles,
+    list_organizations_for_user,
+)
 from src.auth.schemas import (
     SignupRequest, LoginRequest, TokenResponse, UserOut,
-    ProfileUpdateRequest, PasswordChangeRequest,
+    OrganizationSummary, ProfileUpdateRequest, PasswordChangeRequest,
 )
 from src.auth.security import create_access_token
 from src.auth import service as auth_service
@@ -90,17 +112,6 @@ from src.storage.object_storage import ObjectStorageNotConfigured, ObjectStorage
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup and shutdown hooks.
-
-    Startup: create directories and emit a single structured log line
-    summarizing effective LLM routing, sanitizer availability, and the
-    environment. Without this, the first evidence that a provider tier
-    is misconfigured comes from production traffic.
-
-    Shutdown: release the shared thread pool used by run_with_timeout so
-    a graceful redeploy doesn't hang on in-flight calls longer than
-    necessary. Calls that are still running are not forcibly killed
-    (Python can't), but the process stops accepting new work cleanly."""
     settings.init_directories()
 
     startup_logger = get_logger(__name__)
@@ -112,16 +123,12 @@ async def lifespan(app: FastAPI):
         log_format=settings.log_format,
     )
 
-    # LLM routing summary - which providers are configured and which
-    # models each tier will use.
     try:
         summary = settings.describe_llm_configuration()
         startup_logger.info("LLM routing configured", **summary)
     except Exception as e:  # noqa: BLE001
         startup_logger.warning("Could not summarize LLM configuration", error=str(e))
 
-    # Sanitizer availability - a missing ftfy silently disables mojibake
-    # repair; make that visible at boot.
     try:
         from src.utils.text_sanitize import is_ftfy_available
         if not is_ftfy_available():
@@ -129,10 +136,9 @@ async def lifespan(app: FastAPI):
                 "ftfy is not installed; Unicode mojibake repair is disabled. "
                 "Install ftfy to enable."
             )
-    except Exception:  # noqa: BLE001 - sanitizer module missing entirely
+    except Exception:  # noqa: BLE001
         startup_logger.warning("text_sanitize module unavailable")
 
-    # Object storage configuration status - uploads return 503 if unset.
     try:
         if not getattr(settings, "object_storage_configured", False):
             startup_logger.warning(
@@ -143,7 +149,6 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown
     try:
         from src.utils.resilience import shutdown_executor
         shutdown_executor(wait=False)
@@ -161,10 +166,6 @@ _TESTING = "pytest" in sys.modules
 # ---------------------------------------------------------------------------
 # Rate limits
 # ---------------------------------------------------------------------------
-# Auth endpoints are tight everywhere (brute force surface). Chat and
-# phase execution are moderately tight per authenticated user because
-# each call costs real LLM spend. Everything else gets a generous default
-# suitable for SPA page loads (a single page can hit a dozen endpoints).
 AUTH_RATE_LIMIT = "10000/minute" if _TESTING else "5/minute"
 DEFAULT_RATE_LIMIT = "100000/minute" if _TESTING else "120/minute"
 CHAT_RATE_LIMIT = "100000/minute" if _TESTING else "30/minute"
@@ -174,19 +175,6 @@ REPORT_RATE_LIMIT = "100000/minute" if _TESTING else "10/minute"
 
 
 def _client_ip_for_rate_limit(request: Request) -> str:
-    """Rate-limit key function.
-
-    `get_remote_address` returns `request.client.host`, which behind a
-    load balancer is the LB's address - every user ends up sharing one
-    bucket. When `settings.trusted_proxy_hops` is greater than zero, we
-    trust the X-Forwarded-For chain from the right, taking the
-    Nth-from-last entry (N = trusted_proxy_hops), which is the client
-    address as seen by the outermost trusted proxy.
-
-    Set trusted_proxy_hops to the number of proxies you control in front
-    of the app (typically 1 for a single LB, 2 for CDN + LB). Do NOT set
-    it higher than the number of trusted proxies, or a client can spoof
-    its own IP via a forged X-Forwarded-For header."""
     hops = int(getattr(settings, "trusted_proxy_hops", 0) or 0)
     if hops > 0:
         xff = request.headers.get("x-forwarded-for")
@@ -195,8 +183,6 @@ def _client_ip_for_rate_limit(request: Request) -> str:
             if parts:
                 idx = max(0, len(parts) - hops)
                 return f"ip:{parts[idx]}"
-    # Fallback to the direct peer. Prefix by category so a client IP and
-    # a session id can never collide in the limiter's key space.
     return f"ip:{get_remote_address(request)}"
 
 
@@ -219,20 +205,8 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 # Middleware
 # ---------------------------------------------------------------------------
-# Ordering (outermost first):
-#   request_id -> body_size -> security_headers -> CORS -> SlowAPI -> app
-# Request id outermost so every response - including early 413s and
-# CORS preflight - carries it. Body size before security headers so an
-# oversized request fails fast without going through the rest of the
-# stack. Security headers outside CORS so the response gains them
-# regardless of how CORS short-circuits.
-
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
-    """Bind a request_id for log correlation. Uses the log_context
-    context manager (bind + unbind of exactly the keys we add) instead
-    of clear_contextvars(), which would wipe any outer context bound by
-    the ASGI layer or a future tenant middleware."""
     request_id = request.headers.get("X-Request-ID", str(uuid_lib.uuid4()))
     request.state.request_id = request_id
 
@@ -253,11 +227,6 @@ async def request_id_middleware(request: Request, call_next):
 
 @app.middleware("http")
 async def body_size_limit_middleware(request: Request, call_next):
-    """Reject oversized request bodies before they are read.
-
-    Bounds the declared Content-Length. Chunked-encoded requests without
-    a Content-Length header bypass this check; the upload endpoints have
-    their own per-upload cap that reads in bounded chunks regardless."""
     content_length = request.headers.get("content-length")
     if content_length:
         try:
@@ -283,11 +252,6 @@ async def security_headers_middleware(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
-    # HSTS is meaningful only when the response is actually served over
-    # HTTPS - setting it on plain-HTTP responses is ignored by browsers
-    # and mildly misleading in logs. Set it only when the request came in
-    # via HTTPS (either directly or via a trusted proxy forwarding the
-    # original scheme).
     forwarded_proto = request.headers.get("x-forwarded-proto", "").lower()
     is_https = request.url.scheme == "https" or forwarded_proto == "https"
     if is_https:
@@ -340,7 +304,7 @@ if (_FRONTEND_DIST / "assets").is_dir():
 # ---------------------------------------------------------------------------
 # Request schemas
 # ---------------------------------------------------------------------------
-_MAX_MESSAGE_CHARS = 50_000      # enough for a pasted questionnaire
+_MAX_MESSAGE_CHARS = 50_000
 _MAX_NAME_CHARS = 200
 _MAX_COMMENT_CHARS = 5_000
 _MAX_SESSION_ID_CHARS = 128
@@ -353,6 +317,7 @@ class ProjectStart(BaseModel):
     module: str = Field(..., min_length=1, max_length=32)
     erp_system: Optional[str] = Field("SAP S/4HANA", max_length=64)
     initial_input: Optional[str] = Field(None, max_length=_MAX_MESSAGE_CHARS)
+    organization_id: Optional[str] = Field(None, max_length=_MAX_SESSION_ID_CHARS)
 
 
 class ProjectRename(BaseModel):
@@ -411,9 +376,6 @@ class BaselineCreateRequest(BaseModel):
 
 
 class PhaseExecuteRequest(BaseModel):
-    """Phase-specific parameters. Not all fields apply to every phase;
-    unused fields are ignored. The endpoint validates that the required
-    fields for the requested phase are present."""
     stakeholder_input: Optional[str] = Field(None, max_length=_MAX_MESSAGE_CHARS)
     process_name: Optional[str] = Field(None, max_length=_MAX_NAME_CHARS)
     current_state: Optional[str] = Field(None, max_length=_MAX_MESSAGE_CHARS)
@@ -439,48 +401,40 @@ def extract_text(response: Any) -> str:
     return str(response)
 
 
-# User-facing header used when we surface retrieved reference material
-# directly because LLM synthesis failed. Deliberately does NOT say "I
-# wasn't able to synthesize..." or "I had trouble summarizing..." - the
-# point of the fallback is to preserve the useful reference content, not
-# to apologize for a synthesis step the caller never sees. It also does
-# not imply the text below came from an LLM.
+def _build_user_out(db: Session, user: User) -> UserOut:
+    """Assemble the extended /me payload from the user row plus the
+    separate roles and organization_memberships tables.
+
+    Roles are sorted for stable output. Organizations are ordered by
+    name (that ordering is established in list_organizations_for_user).
+    """
+    roles = sorted(r.value for r in get_user_roles(db, user.id))
+    org_pairs = list_organizations_for_user(db, user.id)
+    organizations = [
+        OrganizationSummary(id=org.id, name=org.name, role=membership.role)
+        for org, membership in org_pairs
+    ]
+    return UserOut(
+        id=user.id,
+        email=user.email,
+        name=user.name,
+        profile_picture_url=user.profile_picture_url,
+        created_at=user.created_at,
+        roles=roles,
+        organizations=organizations,
+    )
+
+
 _REFERENCE_FALLBACK_HEADER = (
     "Here is the reference material retrieved for your question:"
 )
 
-# User-facing message used only when LLM synthesis failed AND there is no
-# usable reference material to fall back to. Honest, does not claim to
-# have found anything, does not reference any internal diagnostics.
 _NO_REFERENCE_FAILURE_MESSAGE = (
     "I wasn't able to generate a response right now. Please try again shortly."
 )
 
 
 def _reference_data_fallback(data: Optional[Dict[str, Any]]) -> Optional[str]:
-    """Compose a fallback answer from already-retrieved reference data.
-
-    Used when every LLM provider has failed: rather than discarding the
-    knowledge-base/web results that info_retriever already returned (and
-    returning a generic "trouble summarizing" message), we surface the
-    retrieved reference material directly.
-
-    Constraints honored:
-      * Does NOT call any LLM.
-      * Does NOT fabricate facts - only reuses what retrieval produced.
-      * Preserves source attribution when the retrieval response carries
-        a `sources` field, and when individual entries carry title/source/
-        url either at the top level or nested inside a `metadata` dict
-        (langchain-style Document shape).
-      * Returns None when there is no usable reference content, so the
-        caller can fall through to an explicit failure message.
-      * Never implies the text was LLM-generated - the header states
-        explicitly that this is reference material.
-
-    The shape of `data` matches what src.tools.info_retriever.info_retriever
-    returns: a dict that may carry `kb_results`, `web_results`, and
-    `sources`. This helper is intentionally defensive about the concrete
-    shape of individual entries (str vs. dict vs. other)."""
     if not isinstance(data, dict):
         return None
 
@@ -491,10 +445,6 @@ def _reference_data_fallback(data: Optional[Dict[str, Any]]) -> Optional[str]:
             stripped = item.strip()
             return stripped or None
         if isinstance(item, dict):
-            # Content keys, in preference order. `page_content` is the
-            # langchain/LlamaIndex Document field; without it a
-            # retrieval layer that emits Documents would be treated as
-            # carrying no usable text and the fallback would be lost.
             for key in (
                 "content", "text", "snippet", "answer", "summary",
                 "body", "page_content",
@@ -561,9 +511,6 @@ def _reference_data_fallback(data: Optional[Dict[str, Any]]) -> Optional[str]:
 
 
 def _fallback_kind(data: Optional[Dict[str, Any]]) -> str:
-    """Classify the fallback source for structured logging: 'knowledge_base'
-    when retrieved KB rows were used, otherwise 'reference_material' (web
-    results and/or sources only)."""
     if isinstance(data, dict) and data.get("kb_results"):
         return "knowledge_base"
     return "reference_material"
@@ -572,20 +519,6 @@ def _fallback_kind(data: Optional[Dict[str, Any]]) -> str:
 def _fallback_reason_for(
     data: Optional[Dict[str, Any]], retrieval_failed: bool,
 ) -> str:
-    """Name the failure state for structured logs so the four distinct
-    states required by the resilience contract are observable:
-
-      1. LLM unavailable, retrieval succeeded with usable content:
-         handled upstream - we log `fallback_reason="llm_unavailable"`
-         on the success branch instead of calling this helper.
-      2. LLM unavailable, retrieval returned nothing usable:
-         `"llm_unavailable_no_reference_material"`.
-      3. Retrieval itself failed (info_retriever raised):
-         `"retrieval_failed"`.
-      4. Both: same as (3) plus the LLM error already logged upstream.
-
-    This is a log-only distinction; the user-facing message is unchanged
-    so the API contract is preserved."""
     if retrieval_failed:
         return "retrieval_failed"
     return "llm_unavailable_no_reference_material"
@@ -602,13 +535,7 @@ def _derive_chat_title(message: str) -> str:
 
 
 def _attachment_headers(filename: str) -> Dict[str, str]:
-    """Build a Content-Disposition header that is safe for both ASCII and
-    non-ASCII filenames. Includes an RFC 5987 `filename*` form for
-    non-ASCII and a sanitized ASCII fallback for legacy clients.
-    Previously a filename containing `"` would break the header, and
-    non-ASCII names were passed through unencoded."""
     raw = filename or "document"
-    # ASCII fallback: strip quotes, replace non-ASCII with '_'.
     ascii_name = "".join(c if 32 <= ord(c) < 127 and c != '"' else "_" for c in raw)
     if not ascii_name:
         ascii_name = "document"
@@ -621,10 +548,6 @@ def _attachment_headers(filename: str) -> Dict[str, str]:
 
 
 async def _read_upload_bounded(file: UploadFile, max_bytes: int) -> bytes:
-    """Read an upload in bounded chunks, rejecting as soon as the running
-    total exceeds max_bytes. Previously the entire body was read into
-    memory before the size check ran, so a 200MB upload was fully
-    received before being rejected."""
     chunks: List[bytes] = []
     total = 0
     while True:
@@ -656,8 +579,6 @@ PHASE_LABELS = {
     'training': 'Create training material',
 }
 
-# Single source of truth for phase -> orchestrator method. Referenced by
-# both the REST endpoint and the chat dispatch, so they can't drift.
 _PHASE_EXECUTORS: Dict[str, Callable[..., Dict[str, Any]]] = {
     'requirements': orchestrator.execute_requirements_phase,
     'process_mapping': orchestrator.execute_process_mapping_phase,
@@ -667,20 +588,12 @@ _PHASE_EXECUTORS: Dict[str, Callable[..., Dict[str, Any]]] = {
     'training': orchestrator.execute_training_phase,
 }
 
-# Which phases require which parameters - checked before dispatch so a
-# missing input returns a specific 422 rather than a generic failure.
 _PHASE_REQUIRED_PARAMS: Dict[str, List[str]] = {
     'requirements': ['stakeholder_input'],
 }
 
 
 def _map_phase_error_to_status(error_text: str) -> int:
-    """Map an orchestrator failure to an HTTP status.
-
-    Uses string matching on the orchestrator's error messages as a
-    stopgap; a follow-up pass should have the orchestrator return a
-    structured `error_code` on failure. Until then, this at least
-    distinguishes "you called this wrong" from "the system is broken." """
     lower = (error_text or "").lower()
     if "took longer than expected" in lower or "timed out" in lower:
         return 504
@@ -866,12 +779,46 @@ def _run_intake_step(session_id: str, user_input: Optional[str], resume: bool) -
 
 
 def _get_owned_session(session_id: str, current_user: User):
-    """Return the session if it exists and belongs to current_user.
-    Binds session_id and user_id onto the log context for the rest of
-    the request - every subsequent log line is greppable by either."""
+    """Return the session if the current user is authorized to access it,
+    or raise 404 otherwise.
+
+    Authorization rule (two cases):
+
+      * Personal project (organization_id IS NULL): existing rule
+        preserved byte-for-byte - the session belongs to current_user
+        if session.user_id == current_user.id.
+
+      * Organization-owned project (organization_id IS NOT NULL): the
+        current user must have an active OrganizationMembership for the
+        owning organization. session.user_id is NOT consulted for the
+        access decision.
+
+    Failure returns 404 in both cases, preserving the property that an
+    unauthorized caller cannot distinguish 'session does not exist' from
+    'session exists but you do not have access'.
+
+    This function is the tenant boundary. Every project-scoped route in
+    this module calls it; feature-level authorization is enforced
+    separately via require_permission guards on the route signatures.
+    """
     session = agent_memory.session_service.get_session(session_id)
-    if not session or session.user_id != current_user.id:
+    if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    organization_id = getattr(session, "organization_id", None)
+
+    if organization_id is None:
+        if session.user_id != current_user.id:
+            raise HTTPException(status_code=404, detail="Session not found")
+    else:
+        db = SessionLocal()
+        try:
+            membership = get_membership(db, current_user.id, organization_id)
+        finally:
+            db.close()
+        if membership is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+
     bind_log_context(session_id=session_id, user_id=current_user.id)
     return session
 
@@ -882,10 +829,29 @@ def _get_owned_session(session_id: str, current_user: User):
 @app.post("/api/auth/signup", response_model=TokenResponse)
 @limiter.limit(AUTH_RATE_LIMIT)
 def signup(request: Request, req: SignupRequest, db: Session = Depends(get_db)):
+    """Create an account for one of the five account types.
+
+    Individual account types grant the matching application role.
+    AccountType.ORGANIZATION creates a tenant with the new user as
+    Owner, in the same transaction. Either the whole signup commits or
+    nothing does; a partially created account (user without role, or
+    organization without owner) is not possible.
+    """
     try:
-        user = auth_service.create_user(db, req.email, req.password)
+        user = auth_service.create_user(
+            db,
+            req.email,
+            req.password,
+            account_type=req.account_type,
+            organization_name=req.organization_name,
+        )
     except auth_service.EmailAlreadyRegistered:
         raise HTTPException(status_code=409, detail="Email already registered")
+    except ValueError as e:
+        # Defensive: the schema validator should have caught a missing
+        # organization_name. If a direct caller bypassed it, fail as a
+        # client error rather than a 500.
+        raise HTTPException(status_code=422, detail=str(e))
 
     token = create_access_token(user.id)
     return TokenResponse(
@@ -909,13 +875,23 @@ def login(request: Request, req: LoginRequest, db: Session = Depends(get_db)):
 
 
 @app.get("/api/auth/me", response_model=UserOut)
-def me(current_user: User = Depends(get_current_user)):
-    return current_user
+def me(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return the authenticated user's context: identity, application
+    roles, and organization memberships. The frontend uses this to
+    render the correct experience; the backend remains the authority for
+    authorization."""
+    return _build_user_out(db, current_user)
 
 
 @app.get("/api/auth/settings", response_model=UserOut)
-def account_settings(current_user: User = Depends(get_current_user)):
-    return current_user
+def account_settings(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return _build_user_out(db, current_user)
 
 
 @app.patch("/api/auth/settings", response_model=UserOut)
@@ -924,9 +900,11 @@ def update_account_settings(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    return auth_service.update_profile(
+    updated = auth_service.update_profile(
         db, current_user, req.name, current_user.profile_picture_url,
     )
+    return _build_user_out(db, updated)
+
 
 # ---------------------------------------------------------------------------
 # Profile picture handling
@@ -946,14 +924,13 @@ _PROFILE_PICTURE_CONTENT_TYPE_BY_SUFFIX = {
     ".webp": "image/webp",
 }
 
+
 def _extract_profile_picture_filename(url: Optional[str]) -> Optional[str]:
-    """Return the filename portion of a stored profile_picture_url, or
-    None if the URL is empty/malformed. The stored URL shape is
-    ``/api/auth/profile-picture/<filename>``."""
     if not url:
         return None
     filename = url.rsplit("/", 1)[-1]
     return filename or None
+
 
 @app.post("/api/auth/profile-picture", response_model=UserOut)
 def upload_profile_picture(
@@ -961,21 +938,6 @@ def upload_profile_picture(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Upload or replace the current user's profile picture.
-
-    Storage is object storage, not the local filesystem. Previously the
-    file was written under settings.output_dir, which works in
-    development but is erased on every container redeploy - the DB then
-    points at a filename that no longer exists and the browser gets a
-    404. Object storage survives redeploys, same as project document
-    uploads already do.
-
-    Ordering: the object is written first, then the DB row is updated.
-    If the DB commit fails we delete the just-uploaded object so a
-    failed request doesn't leave an orphan. If we did it the other way
-    around, a failed upload would leave the DB pointing at an object
-    that never existed.
-    """
     if not settings.object_storage_configured:
         raise HTTPException(
             status_code=503,
@@ -1005,8 +967,6 @@ def upload_profile_picture(
             detail="Profile picture exceeds the 5MB limit",
         )
 
-    # Capture the previous filename before the DB update so the old
-    # object can be cleaned up after the new one is durably persisted.
     old_filename = _extract_profile_picture_filename(
         current_user.profile_picture_url
     )
@@ -1035,9 +995,6 @@ def upload_profile_picture(
             f"/api/auth/profile-picture/{filename}",
         )
     except Exception:
-        # The DB write failed after the object was written. Delete the
-        # just-uploaded object so we don't leave an orphan, then let the
-        # original exception propagate so the client sees the real error.
         try:
             object_storage.delete_object(storage_key)
         except Exception:  # noqa: BLE001
@@ -1047,10 +1004,6 @@ def upload_profile_picture(
             )
         raise
 
-    # Best-effort cleanup of the previous picture. Failures here are
-    # logged but not raised: the new picture is already saved, and the
-    # user's success is independent of whether we cleaned up the old
-    # file. The orphaned object is harmless and can be swept later.
     if old_filename:
         try:
             object_storage.delete_object(
@@ -1063,25 +1016,11 @@ def upload_profile_picture(
                 error=str(e),
             )
 
-    return user
+    return _build_user_out(db, user)
 
 
 @app.get("/api/auth/profile-picture/{filename}")
 def get_profile_picture(filename: str):
-    """Stream a profile picture from object storage.
-
-    The URL shape is unchanged from the previous local-disk version, so
-    the frontend needs no change. The bytes are fetched from S3 and
-    returned inline; for 5MB-capped images this is fine, and it keeps
-    the bucket private (no signed-URL expiry to manage, no public-read
-    bucket ACLs).
-    """
-    # Reject anything with a path separator. The S3 key is built from a
-    # single segment by make_profile_picture_key; a value containing "/"
-    # or "\" would either be silently neutralized by the sanitizer (which
-    # would resolve to a different key than the caller expects) or look
-    # like a traversal attempt. Rejecting explicitly keeps the endpoint's
-    # contract simple and matches the pre-migration check.
     if (
         not filename
         or Path(filename).name != filename
@@ -1090,11 +1029,6 @@ def get_profile_picture(filename: str):
     ):
         raise HTTPException(status_code=404, detail="Profile picture not found")
 
-    # A URL pointing at object storage could only have been issued when
-    # storage was configured. If it isn't configured now, the object is
-    # unreachable. Return 404 rather than 503 so the frontend's <img>
-    # falls back to initials - visually identical to "picture missing",
-    # which is the correct user-facing behavior either way.
     if not settings.object_storage_configured:
         raise HTTPException(status_code=404, detail="Profile picture not found")
 
@@ -1103,8 +1037,6 @@ def get_profile_picture(filename: str):
             object_storage.make_profile_picture_key(filename)
         )
     except ObjectStorageError:
-        # Includes the "object does not exist" case, which is what we
-        # return for a stale URL left over from a pre-migration upload.
         raise HTTPException(status_code=404, detail="Profile picture not found")
 
     suffix = Path(filename).suffix.lower()
@@ -1112,9 +1044,6 @@ def get_profile_picture(filename: str):
         suffix, "application/octet-stream"
     )
 
-    # Profile picture filenames are fresh UUIDs on every upload, so the
-    # URL identifies immutable content. A long max-age is safe and
-    # avoids re-fetching the image on every page navigation.
     return Response(
         content=content,
         media_type=media_type,
@@ -1140,30 +1069,18 @@ def delete_account(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Delete the account and everything it owns.
-
-    Sessions are removed via session_service.delete_session so the full
-    cascade runs: object-storage cleanup for uploaded documents,
-    ProjectMemory removal, and in-memory cache invalidation. Previously
-    this bulk-deleted SessionRecord rows, which bypassed storage cleanup
-    and left orphaned files behind. Profile pictures are removed
-    explicitly - they are not referenced by any DB row."""
     owned_session_ids = agent_memory.session_service.list_sessions_for_user(
         current_user.id, include_archived=True,
     )
     for session_id in owned_session_ids:
         try:
             agent_memory.session_service.delete_session(session_id)
-        except Exception as e:  # noqa: BLE001 - continue cleaning up the rest
+        except Exception as e:  # noqa: BLE001
             logger.warning(
                 "Failed to fully clean up session during account deletion",
                 session_id=session_id, error=str(e),
             )
 
-    # Profile picture lives in object storage, not the local disk. The
-    # URL is what we have; the filename is the last path segment. Delete
-    # is best-effort: an orphaned object is harmless and should not fail
-    # the account deletion.
     pic_filename = _extract_profile_picture_filename(
         current_user.profile_picture_url
     )
@@ -1179,8 +1096,6 @@ def delete_account(
                 error=str(e),
             )
 
-    # Any Feedback rows still present (the cascade may already have taken
-    # care of them) plus the user row itself.
     db.query(Feedback).filter(Feedback.user_id == current_user.id).delete(
         synchronize_session=False,
     )
@@ -1191,14 +1106,10 @@ def delete_account(
 
 
 # ---------------------------------------------------------------------------
-# Health & readiness
+# Health & readiness (not project-scoped)
 # ---------------------------------------------------------------------------
 @app.get("/health")
 async def health():
-    """Liveness probe. Deliberately lightweight - does not touch the DB
-    or the LLM wrapper's initialization path. Reports the configured
-    provider tiers so an operator can see at a glance which fallbacks
-    are active."""
     serpapi_installed = True
     try:
         import serpapi  # type: ignore
@@ -1216,7 +1127,7 @@ async def health():
             providers.append("openai")
         if getattr(llm_instance, "anthropic_client", None):
             providers.append("anthropic")
-    except Exception as e:  # noqa: BLE001 - health must not fail
+    except Exception as e:  # noqa: BLE001
         logger.warning("Could not inspect LLM providers in /health", error=str(e))
 
     return {
@@ -1231,8 +1142,6 @@ async def health():
 
 @app.get("/ready")
 def ready():
-    """Readiness probe. Verifies DB reachability; returns 503 if the DB
-    is unreachable so a load balancer removes the instance from rotation."""
     try:
         with db_engine.connect() as conn:
             conn.execute(text("SELECT 1"))
@@ -1244,10 +1153,6 @@ def ready():
 
 @app.get("/metrics")
 def metrics(current_user: User = Depends(get_current_user)):
-    """Process-wide metrics summary - cumulative counters and per-agent
-    breakdown. Authenticated because the per-agent breakdown reveals
-    operational scale. Intended for the SPA's admin view or for grepping
-    by an on-call engineer; a real Prometheus exporter is a follow-up."""
     return metrics_collector.get_summary()
 
 
@@ -1257,15 +1162,8 @@ def metrics(current_user: User = Depends(get_current_user)):
 @app.get("/api/projects")
 def list_projects(
     include_archived: bool = False,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.PROJECT_READ)),
 ):
-    """List the authenticated user's projects.
-
-    One query for the whole listing, including each project's archived
-    state. Previously this did a SELECT for session IDs, then a
-    per-session summary lookup - an N+1 that would have gotten worse if
-    is_archived had been added as another per-session call.
-    """
     summaries = agent_memory.session_service.list_project_summaries_for_user(
         current_user.id, include_archived=include_archived,
     )
@@ -1275,14 +1173,20 @@ def list_projects(
 @app.post("/api/projects/start")
 def start_project(
     req: ProjectStart,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.PROJECT_CREATE)),
+    db: Session = Depends(get_db),
 ):
+    if req.organization_id is not None:
+        if get_membership(db, current_user.id, req.organization_id) is None:
+            raise HTTPException(status_code=404, detail="Organization not found")
+
     result = orchestrator.start_project(
         project_name=req.project_name,
         module=req.module,
         erp_system=req.erp_system,
         initial_input=req.initial_input,
         user_id=current_user.id,
+        organization_id=req.organization_id,
     )
     if not result.get('success'):
         raise HTTPException(
@@ -1297,7 +1201,7 @@ def start_project(
 def rename_project(
     session_id: str,
     req: ProjectRename,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.PROJECT_EDIT)),
 ):
     _get_owned_session(session_id, current_user)
     session = agent_memory.session_service.rename_session(session_id, req.project_name)
@@ -1307,7 +1211,7 @@ def rename_project(
 @app.delete("/api/projects/{session_id}")
 def archive_project(
     session_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.PROJECT_EDIT)),
 ):
     _get_owned_session(session_id, current_user)
     archived = agent_memory.session_service.archive_session(session_id)
@@ -1319,7 +1223,7 @@ def archive_project(
 @app.delete("/api/projects/{session_id}/permanent")
 def delete_project_permanently(
     session_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.PROJECT_DELETE)),
 ):
     _get_owned_session(session_id, current_user)
     deleted = agent_memory.session_service.delete_session(session_id)
@@ -1339,7 +1243,7 @@ from src.services import consistency_checker
 def list_requirements(
     session_id: str,
     include_history: bool = False,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.REQUIREMENTS_READ)),
 ):
     _get_owned_session(session_id, current_user)
     return {
@@ -1354,7 +1258,7 @@ def list_requirements(
 def submit_review_action(
     session_id: str,
     req: ReviewActionRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.REVIEWS_SUBMIT)),
 ):
     _get_owned_session(session_id, current_user)
     action_id = project_intelligence.record_review_action(
@@ -1368,7 +1272,7 @@ def submit_review_action(
 def list_issues(
     session_id: str,
     status: Optional[str] = "open",
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.ISSUES_READ)),
 ):
     _get_owned_session(session_id, current_user)
     return {
@@ -1380,7 +1284,7 @@ def list_issues(
 @app.get("/api/projects/{session_id}/health")
 def project_health(
     session_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.HEALTH_READ)),
 ):
     _get_owned_session(session_id, current_user)
     return project_intelligence.get_project_health(session_id)
@@ -1389,7 +1293,7 @@ def project_health(
 @app.post("/api/projects/{session_id}/consistency-check")
 def run_consistency_check(
     session_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.CONSISTENCY_RUN)),
 ):
     _get_owned_session(session_id, current_user)
     findings = consistency_checker.run_consistency_checks(session_id)
@@ -1403,7 +1307,7 @@ def run_consistency_check(
 @app.post("/api/feedback")
 def submit_feedback(
     req: FeedbackRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.FEEDBACK_SUBMIT)),
     db: Session = Depends(get_db),
 ):
     if req.session_id:
@@ -1431,18 +1335,8 @@ def execute_phase(
     session_id: str,
     phase_name: str,
     body: Optional[PhaseExecuteRequest] = None,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.PHASE_EXECUTE)),
 ):
-    """Execute a named phase on the session.
-
-    Accepts phase parameters in the body. Previously the endpoint had no
-    body, so the requirements phase (which needs stakeholder_input)
-    could not be run through it. Phase-specific required parameters are
-    validated up front and return a specific 422 if missing.
-
-    Failures map to HTTP statuses based on the orchestrator's error
-    category: 504 for timeouts, 409 for missing prerequisites, 400 for
-    unknown phases, 500 for anything else."""
     _get_owned_session(session_id, current_user)
 
     if phase_name not in _PHASE_EXECUTORS:
@@ -1486,7 +1380,7 @@ def execute_phase(
 @app.get("/api/projects/{session_id}/status")
 def project_status(
     session_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.PROJECT_READ)),
 ):
     _get_owned_session(session_id, current_user)
     return orchestrator.get_project_status(session_id)
@@ -1515,7 +1409,7 @@ def _collect_session_documents(session_id: str) -> List[Dict[str, str]]:
 @app.get("/api/projects/{session_id}/documents")
 def list_documents(
     session_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.DOCUMENTS_READ)),
 ):
     _get_owned_session(session_id, current_user)
     docs = _collect_session_documents(session_id)
@@ -1537,7 +1431,7 @@ def list_documents(
 def generate_project_report(
     request: Request,
     session_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.DOCUMENTS_GENERATE)),
 ):
     _get_owned_session(session_id, current_user)
     try:
@@ -1550,7 +1444,7 @@ def generate_project_report(
 @app.get("/api/projects/{session_id}/messages")
 def get_messages(
     session_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.PROJECT_READ)),
 ):
     session = _get_owned_session(session_id, current_user)
     return {"session_id": session_id, "messages": session.conversation_history}
@@ -1560,21 +1454,8 @@ def get_messages(
 def download_document(
     session_id: str,
     filename: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.DOCUMENTS_READ)),
 ):
-    """Download a generated document.
-
-    The URL path identifies the artifact by `filename`, but the filename
-    is NOT part of the GeneratedDocument logical identity - the writer
-    mints a fresh filename on every regeneration (see sub-stage 1 of the
-    document-integrity hardening). The requested filename is therefore
-    used only as a *pointer*: it resolves to the row it names, that row's
-    (phase, label) establishes the logical identity, and the CURRENT
-    (is_current=True) artifact for that identity is what gets returned.
-
-    This guarantees the endpoint never serves a superseded (stale)
-    artifact when a newer current artifact exists for the same logical
-    document, without changing the endpoint's public signature."""
     _get_owned_session(session_id, current_user)
 
     db = SessionLocal()
@@ -1595,11 +1476,6 @@ def download_document(
                 detail="Document not found for this session",
             )
 
-        # The row we found may be the current row or a historical one;
-        # either way, its (phase, label) is the logical identity. Now
-        # fetch the current artifact for that exact identity. Filtering
-        # on session_id, phase, label, and is_current together is what
-        # makes the selection deterministic and session-isolated.
         requested_phase = requested.phase
         requested_label = requested.label
 
@@ -1618,10 +1494,6 @@ def download_document(
         db.close()
 
     if not current_rows:
-        # Stale-only state: the requested filename exists, but no row for
-        # its logical identity is current. Do not fall back to the stale
-        # row - that would recreate the exact defect this endpoint is
-        # hardened against. Use the endpoint's existing 404 behavior.
         logger.warning(
             "Generated document requested but no current artifact exists",
             session_id=session_id,
@@ -1635,12 +1507,6 @@ def download_document(
         )
 
     if len(current_rows) > 1:
-        # Database-integrity violation: two rows claim to be current for
-        # the same logical identity. Selecting one arbitrarily would hide
-        # the violation and could serve the wrong artifact. Fail
-        # explicitly so the state can be repaired. The GeneratedDocument
-        # model does not currently enforce "one current row per identity"
-        # at the DB level; this is the read-side guard until it does.
         logger.error(
             "Multiple current artifacts for the same logical document identity",
             session_id=session_id,
@@ -1686,7 +1552,7 @@ async def upload_project_document(
     request: Request,
     session_id: str,
     file: UploadFile = File(...),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.UPLOADS_WRITE)),
 ):
     _get_owned_session(session_id, current_user)
 
@@ -1700,9 +1566,6 @@ async def upload_project_document(
         )
 
     max_bytes = settings.max_upload_size_mb * 1024 * 1024
-    # Bounded read: the previous version read the entire body into memory
-    # before checking size, so a 200MB upload was fully received before
-    # being rejected.
     content = await _read_upload_bounded(file, max_bytes)
 
     try:
@@ -1720,8 +1583,6 @@ async def upload_project_document(
     except ObjectStorageError as e:
         raise HTTPException(status_code=502, detail=f"Upload to storage failed: {e}")
 
-    # Persist metadata. If this fails we best-effort delete the storage
-    # object so we don't leave orphans behind.
     db = SessionLocal()
     try:
         record = ProjectDocument(
@@ -1769,7 +1630,7 @@ async def upload_project_document(
 @app.get("/api/projects/{session_id}/uploads")
 def list_project_documents(
     session_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.UPLOADS_READ)),
 ):
     _get_owned_session(session_id, current_user)
 
@@ -1803,7 +1664,7 @@ def list_project_documents(
 def download_project_document(
     session_id: str,
     document_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.UPLOADS_READ)),
 ):
     _get_owned_session(session_id, current_user)
 
@@ -1839,7 +1700,7 @@ def download_project_document(
 def delete_project_document(
     session_id: str,
     document_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.UPLOADS_WRITE)),
 ):
     _get_owned_session(session_id, current_user)
 
@@ -1889,7 +1750,7 @@ def list_process_steps(
     session_id: str,
     process_name: Optional[str] = None,
     include_history: bool = False,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.PROCESS_STEPS_READ)),
 ):
     _get_owned_session(session_id, current_user)
     return {
@@ -1906,7 +1767,7 @@ def list_solution_decisions(
     decision_type: Optional[str] = None,
     stage: Optional[str] = None,
     include_history: bool = False,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.SOLUTION_READ)),
 ):
     _get_owned_session(session_id, current_user)
     return {
@@ -1923,7 +1784,7 @@ def list_test_cases(
     test_type: Optional[str] = None,
     include_history: bool = False,
     needs_retest: Optional[bool] = None,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.TESTING_READ)),
 ):
     _get_owned_session(session_id, current_user)
     return {
@@ -1938,7 +1799,7 @@ def list_test_cases(
 def mark_test_case_retested(
     session_id: str,
     test_case_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.TESTING_WRITE)),
 ):
     _get_owned_session(session_id, current_user)
     ok = project_intelligence.mark_test_case_retested(session_id, test_case_id)
@@ -1950,7 +1811,7 @@ def mark_test_case_retested(
 @app.get("/api/projects/{session_id}/training-steps")
 def list_training_steps(
     session_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.TRAINING_READ)),
 ):
     _get_owned_session(session_id, current_user)
     return {
@@ -1962,7 +1823,7 @@ def list_training_steps(
 @app.get("/api/projects/{session_id}/coverage-gaps")
 def coverage_gaps(
     session_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.HEALTH_READ)),
 ):
     _get_owned_session(session_id, current_user)
     return {
@@ -1979,7 +1840,7 @@ def revise_requirement(
     session_id: str,
     requirement_id: str,
     req: RequirementReviseRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.REQUIREMENTS_REVISE)),
 ):
     _get_owned_session(session_id, current_user)
     try:
@@ -1995,7 +1856,7 @@ def revise_requirement(
 def requirement_history(
     session_id: str,
     lineage_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.REQUIREMENTS_READ)),
 ):
     _get_owned_session(session_id, current_user)
     return {"history": project_intelligence.get_requirement_history(session_id, lineage_id)}
@@ -2006,7 +1867,7 @@ def record_actual_solution(
     session_id: str,
     decision_id: str,
     req: SolutionActualRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.SOLUTION_RECORD_ACTUAL)),
 ):
     _get_owned_session(session_id, current_user)
     try:
@@ -2022,7 +1883,7 @@ def record_actual_solution(
 def solution_decision_history(
     session_id: str,
     lineage_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.SOLUTION_READ)),
 ):
     _get_owned_session(session_id, current_user)
     return {"history": project_intelligence.get_solution_decision_history(session_id, lineage_id)}
@@ -2033,7 +1894,7 @@ def revise_process_step(
     session_id: str,
     step_id: str,
     req: ProcessStepReviseRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.PROCESS_STEPS_REVISE)),
 ):
     _get_owned_session(session_id, current_user)
     try:
@@ -2049,7 +1910,7 @@ def revise_process_step(
 def process_step_history(
     session_id: str,
     lineage_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.PROCESS_STEPS_READ)),
 ):
     _get_owned_session(session_id, current_user)
     return {"history": project_intelligence.get_process_step_history(session_id, lineage_id)}
@@ -2060,7 +1921,7 @@ def report_test_failure(
     session_id: str,
     test_case_id: str,
     req: TestFailureRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.TESTING_WRITE)),
 ):
     _get_owned_session(session_id, current_user)
     issue_id = project_intelligence.record_test_failure(
@@ -2073,7 +1934,7 @@ def report_test_failure(
 def list_test_failures(
     session_id: str,
     classification: Optional[str] = None,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.TESTING_READ)),
 ):
     _get_owned_session(session_id, current_user)
     return {"test_failures": project_intelligence.get_test_failures(session_id, classification)}
@@ -2083,7 +1944,7 @@ def list_test_failures(
 def create_baseline(
     session_id: str,
     req: BaselineCreateRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.BASELINES_CREATE)),
 ):
     _get_owned_session(session_id, current_user)
     baseline_id = project_intelligence.create_baseline(
@@ -2095,7 +1956,7 @@ def create_baseline(
 @app.get("/api/projects/{session_id}/baselines")
 def list_baselines(
     session_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.PROJECT_READ)),
 ):
     _get_owned_session(session_id, current_user)
     return {"baselines": project_intelligence.get_baselines(session_id)}
@@ -2104,7 +1965,7 @@ def list_baselines(
 @app.get("/api/projects/{session_id}/baselines/active")
 def active_baseline(
     session_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.PROJECT_READ)),
 ):
     _get_owned_session(session_id, current_user)
     baseline = project_intelligence.get_active_baseline(session_id)
@@ -2130,8 +1991,6 @@ def _chat_response(
     }
 
 
-# Obvious greetings and acknowledgments - skip the intent-classification
-# LLM call for these. Saves latency and cost on casual chatter.
 _GREETING_PATTERN = re.compile(
     r"^(?:hi|hello|hey|good (?:morning|afternoon|evening)|"
     r"thanks|thank you|thx|ok|okay|sure|got it|cool|nice)[.!?]?$",
@@ -2180,9 +2039,6 @@ Default to ask_question whenever the message is ambiguous, conversational, or in
 def _handle_intake_if_pending(
     req: ChatRequest, llm_mode: str,
 ) -> Optional[Dict[str, Any]]:
-    """Returns a chat response dict if the session is mid-intake and the
-    message was consumed by intake; returns None if intake is not pending
-    or the message should be handled by the usual flow."""
     if not req.session_id or not _intake_is_pending(req.session_id):
         return None
 
@@ -2205,9 +2061,6 @@ def _handle_intake_if_pending(
 def _handle_agent_hint(
     req: ChatRequest, llm_mode: str,
 ) -> Optional[Dict[str, Any]]:
-    """Handle messages that carry an explicit agent_hint. Returns a chat
-    response dict, or None if the hint isn't recognized (the caller then
-    falls through to intent classification)."""
     if not req.agent_hint or not req.session_id:
         return None
 
@@ -2266,7 +2119,6 @@ def _handle_agent_hint(
             llm_mode=llm_mode, success=False, session_id=req.session_id,
         )
 
-    # Unrecognized hint - caller falls through to intent classification.
     return None
 
 
@@ -2275,11 +2127,8 @@ def _handle_agent_hint(
 def chat(
     request: Request,
     req: ChatRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.CHAT_SUBMIT)),
 ):
-    # NOTE: user message content is deliberately not logged - see module
-    # docstring. If a support case requires the content, it's available
-    # in the session's conversation_history, access-controlled per user.
     logger.info(
         "Chat request received",
         session_id=req.session_id,
@@ -2295,7 +2144,6 @@ def chat(
     llm_instance = llm_mod.get_llm()
     llm_mode = "gemini" if getattr(llm_instance, "use_gemini", True) else "gpt-4"
 
-    # Intake takes precedence over any other routing.
     intake_response = _handle_intake_if_pending(req, llm_mode)
     if intake_response is not None:
         return intake_response
@@ -2389,12 +2237,6 @@ def chat(
             user_id=current_user.id, is_casual=True,
         )
 
-    # Retrieval. This pipeline includes an LLM-dependent reasoning step
-    # (source assessment). If that step fails - for example because every
-    # provider is unavailable - we must not lose the reference material
-    # the pipeline already had, nor fail the whole request. Continue with
-    # `data = None`; the synthesis call below will still be attempted, and
-    # the reference-material fallback remains available if it exists.
     retrieval_failed = False
     try:
         data = info_retriever(
@@ -2428,11 +2270,6 @@ def chat(
         response = llm_instance.generate_content(prompt, generation_config=generation_config)
         final_answer = extract_text(response)
     except Exception as e:  # noqa: BLE001
-        # Every LLM provider failed. The LLM layer raised honestly (see
-        # src/utils/llm.py); this layer's job is to preserve the reference
-        # material that info_retriever already returned, rather than
-        # discard it for a generic apology. No second LLM call, no
-        # fabrication, no imitation of an LLM-generated answer.
         logger.error("Error during final answer synthesis", error=str(e))
 
         fallback_answer = _reference_data_fallback(data)
@@ -2446,12 +2283,6 @@ def chat(
                 session_id=session_id,
             )
         else:
-            # States 2/3/4: LLM failed and there is no usable reference
-            # material. Preserve honest failure behavior - do not claim
-            # to have found anything. The reason distinguishes retrieval
-            # failure (state 3) from an empty retrieval result (state 2)
-            # so operators can tell the two apart in logs, without
-            # changing the user-facing message.
             reason = _fallback_reason_for(data, retrieval_failed)
             final_answer = _NO_REFERENCE_FAILURE_MESSAGE
             logger.warning(
@@ -2481,25 +2312,10 @@ def _sse(event: str, data: dict) -> str:
 
 
 def _sse_comment(text: str) -> str:
-    """SSE comment line - ignored by clients but keeps intermediaries
-    (load balancers, some proxies) from timing out an idle stream.
-    Emitted before each potentially long operation."""
     return f": {text}\n\n"
 
 
 def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Optional[str]):
-    """Server-Sent Events generator for the chat endpoint.
-
-    LIMITATION: this is a sync generator iterated in a worker thread. It
-    cannot emit keepalives during a blocking LLM call - only between
-    operations. The events emitted before each long step (`agent_started`,
-    `tool_started`) serve as progress signals and, in practice, produce
-    enough traffic that typical 60s LB idle timeouts are not triggered
-    (individual LLM calls are bounded by the LLM wrapper). A full async
-    rewrite with a producer/consumer queue would be required to keep the
-    connection alive during a genuinely slow phase; that's flagged as an
-    architectural follow-up, not done here.
-    """
     def ev(event_type: str, **data: Any) -> str:
         if request_id:
             data['request_id'] = request_id
@@ -2511,7 +2327,6 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
         llm_instance = llm_mod.get_llm()
         llm_mode = "gemini" if getattr(llm_instance, "use_gemini", True) else "gpt-4"
 
-        # Intake pending takes precedence.
         if req.session_id and _intake_is_pending(req.session_id):
             yield _sse_comment("keepalive")
             yield ev('agent_started', agent='intake', message='Gathering project context')
@@ -2542,7 +2357,6 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
             )
             return
 
-        # Agent hint.
         if req.agent_hint and req.session_id:
             session = agent_memory.session_service.get_session(req.session_id)
             if not session:
@@ -2620,7 +2434,6 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
                 )
                 return
 
-        # Intent classification.
         yield _sse_comment("keepalive")
         yield ev('agent_started', agent='router', message='Understanding your request')
         decision = classify_intent(
@@ -2758,7 +2571,6 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
                 yield ev('error', message='Failed to generate training materials.')
             return
 
-        # Fallback: retrieve information and synthesize an answer.
         session_id = req.session_id
         if session_id is None:
             title = _derive_chat_title(req.message)
@@ -2769,12 +2581,6 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
 
         yield _sse_comment("keepalive")
         yield ev('tool_started', tool='info_retriever', message='Searching knowledge base and web')
-        # Retrieval includes an LLM-dependent reasoning step. If it fails
-        # (for example because every provider is unavailable), keep the
-        # request alive: emit tool_completed for protocol consistency and
-        # continue with `data = None`. The streamed synthesis step below
-        # is still attempted, and the reference-material fallback remains
-        # available if `data` had produced content.
         retrieval_failed = False
         try:
             data = info_retriever(
@@ -2825,14 +2631,6 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
                 full_answer_parts.append(text)
                 yield ev('text_delta', text=text)
         except Exception as e:  # noqa: BLE001
-            # Every LLM provider failed before yielding anything. Rather
-            # than discard the reference data retrieved above, surface it
-            # through the same text_delta/event stream. Guarded by
-            # `not full_answer_parts` so we never duplicate or contradict
-            # partial output that already reached the client - mid-stream
-            # failure semantics are preserved untouched (no fallback splice
-            # into a partially emitted answer). No second LLM request is
-            # made and no facts are invented.
             logger.error("Error during streamed answer synthesis", error=str(e))
             if not full_answer_parts:
                 fallback = _reference_data_fallback(data)
@@ -2847,10 +2645,6 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
                         session_id=session_id,
                     )
                 else:
-                    # States 2/3/4: LLM failed and no reference material
-                    # exists. Preserve honest failure behavior - do not
-                    # claim to have found anything. Reason distinguishes
-                    # retrieval failure from an empty retrieval result.
                     reason = _fallback_reason_for(data, retrieval_failed)
                     full_answer_parts.append(_NO_REFERENCE_FAILURE_MESSAGE)
                     yield ev('text_delta', text=_NO_REFERENCE_FAILURE_MESSAGE)
@@ -2891,7 +2685,7 @@ def _stream_chat_events(req: ChatRequest, current_user: User, request_id: Option
 def chat_stream(
     request: Request,
     req: ChatRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.CHAT_SUBMIT)),
 ):
     if req.session_id:
         _get_owned_session(req.session_id, current_user)
@@ -2911,7 +2705,6 @@ def chat_stream(
 # ---------------------------------------------------------------------------
 # UI root
 # ---------------------------------------------------------------------------
-
 _SPA_EXCLUDED_PREFIXES = ("api/", "assets/")
 _SPA_EXCLUDED_EXACT = frozenset({
     "health", "ready", "metrics",
@@ -2921,11 +2714,6 @@ _SPA_EXCLUDED_EXACT = frozenset({
 
 @app.get("/{full_path:path}", include_in_schema=False)
 def serve_spa(full_path: str) -> Response:
-    """Serve the SPA's index.html for any client-side route.
-
-    See the module-level note above for the full rationale. The guards
-    below ensure genuine backend 404s keep returning JSON.
-    """
     if full_path.startswith(_SPA_EXCLUDED_PREFIXES):
         raise HTTPException(status_code=404, detail="Not Found")
     if full_path in _SPA_EXCLUDED_EXACT:

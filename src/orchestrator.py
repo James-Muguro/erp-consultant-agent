@@ -5,6 +5,11 @@ This is the pipeline driver: it sequences the six phases, threads state
 between them, applies the phase-level timeout, and assembles the final
 project state.
 
+Round 3a: start_project accepts organization_id and forwards it to
+agent_memory.create_project so that org-owned sessions are created with
+the correct tenant context. The authorization decision (may this user
+create a project in this organization?) is made at the API layer, not
+here; this function only carries the value through.
 """
 from __future__ import annotations
 
@@ -30,8 +35,6 @@ from src.agents import (
 
 
 class ProjectPhase(Enum):
-    """ERP project phases. COMPLETED is a terminal state, not part of the
-    six-phase work sequence - see PHASES in src/memory/session_manager.py."""
     REQUIREMENTS_GATHERING = "requirements_gathering"
     PROCESS_MAPPING = "process_mapping"
     SOLUTION_DESIGN = "solution_design"
@@ -41,19 +44,11 @@ class ProjectPhase(Enum):
     COMPLETED = "completed"
 
 
-# Phases whose failure means the pipeline cannot meaningfully continue.
-# Requirements is the ground truth for everything downstream; solution
-# design is the ground truth for QA, UAT, and training. Failing on
-# either one and continuing would produce a chain of downstream phases
-# running on empty inputs.
 _CRITICAL_PHASES = frozenset({
     ProjectPhase.REQUIREMENTS_GATHERING.value,
     ProjectPhase.SOLUTION_DESIGN.value,
 })
 
-# Which earlier phases each phase consumes. Single source of truth for
-# both _select_phase_context's inputs and the pipeline's precondition
-# checks. Kept as a module constant so the two consumers can't drift.
 _PHASE_PREREQUISITES: Dict[str, List[str]] = {
     ProjectPhase.REQUIREMENTS_GATHERING.value: [],
     ProjectPhase.PROCESS_MAPPING.value: [ProjectPhase.REQUIREMENTS_GATHERING.value],
@@ -75,12 +70,6 @@ def _select_phase_context(
     current_state: Optional[str] = None,
     user_roles: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """Select the minimum session context required by one workflow phase.
-
-    The set of required upstream phases is read from _PHASE_PREREQUISITES
-    (single source of truth) rather than a locally-redeclared dict, so a
-    change to the dependency graph can't leave one consumer out of date.
-    """
     context: Dict[str, Any] = {
         'project': {
             'project_name': session.project_name,
@@ -121,9 +110,6 @@ class ERPOrchestratorAgent:
     def __init__(self):
         self.logger = AgentLogger("OrchestratorAgent")
 
-        # Singleton model instance (unused directly by the orchestrator,
-        # but retained because CLI/API code inspects it for provider
-        # configuration).
         self.model = get_llm()
 
         self.phase_workflow = {
@@ -167,29 +153,8 @@ class ERPOrchestratorAgent:
 
         self.logger.info("Orchestrator Agent initialized")
 
-    # ------------------------------------------------------------------ #
-    # Internal helpers
-    # ------------------------------------------------------------------ #
     def _advance_to_phase(self, session_id: str, phase: str) -> bool:
-        """Advance the session's current_phase to `phase`.
-
-        Handles the terminal 'completed' state, which is not part of the
-        six-entry PHASES sequence and would be rejected by
-        AgentMemory.advance_phase. For 'completed', goes through the
-        session service directly (which records the previous phase in
-        completed_phases and sets current_phase to the terminal value).
-
-        Returns True if the transition succeeded, False otherwise.
-        """
         if phase == ProjectPhase.COMPLETED.value:
-            # Verify the session exists before attempting the terminal
-            # transition. session_service.advance_phase silently no-ops
-            # on a missing session (it logs a warning internally but
-            # does not raise), so without this check the try block below
-            # would report success for a transition that never happened.
-            # This mirrors the existence check AgentMemory.advance_phase
-            # already performs for non-terminal phases, where a missing
-            # session correctly yields False.
             session = agent_memory.session_service.get_session(session_id)
             if not session:
                 self.logger.warning(
@@ -210,12 +175,6 @@ class ERPOrchestratorAgent:
         return bool(agent_memory.advance_phase(session_id, phase))
 
     def _check_prerequisites(self, session_id: str, phase: str) -> Optional[str]:
-        """Return an error string if the required upstream phase outputs
-        for `phase` are missing, or None if the phase is ready to run.
-
-        This is a fast-fail guard so a phase that would run against empty
-        inputs returns a clear error instead of an agent-specific
-        "requirements not found" message."""
         for upstream in _PHASE_PREREQUISITES.get(phase, []):
             if not agent_memory.get_phase_output(session_id, upstream):
                 return (
@@ -227,10 +186,6 @@ class ERPOrchestratorAgent:
     def _collect_phase_diagnostics(
         self, phase_name: str, result: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Extract the enriched keys every agent now returns so the
-        workflow summary can aggregate them. Preserves the shape of the
-        underlying result via the individual fields (not the whole dict)
-        - the raw result is still available to callers via workflow_results."""
         validation = result.get('validation')
         return {
             'phase': phase_name,
@@ -250,20 +205,6 @@ class ERPOrchestratorAgent:
         }
 
     def _call_agent_safely(self, phase_name: str, agent_fn: Callable[..., Any], **kwargs) -> Dict[str, Any]:
-        """Runs one agent's phase method with a hard time ceiling and turns
-        any exception into a structured failure result instead of letting
-        it propagate. Also records execution metadata for every phase.
-
-        The timeout bounds the *whole* phase call (tool use plus however
-        many LLM calls the agent makes). Several LLM calls with retries
-        and provider fallback can happen inside one phase; all must fit
-        inside this outer ceiling. See src/utils/resilience.py for the
-        timeout semantics.
-
-        Non-dict results from agents are normalized into a structured
-        failure - previously they would crash the caller when it did
-        result['success']. This is defensive against a future agent that
-        forgets to return a dict, or a mocked agent in a test."""
         start_time = time.time()
         result: Any = None
         try:
@@ -286,7 +227,7 @@ class ERPOrchestratorAgent:
                 'warnings': [],
                 'duration': duration,
             }
-        except Exception as e:  # noqa: BLE001 - boundary; orchestration must not crash
+        except Exception as e:  # noqa: BLE001
             duration = time.time() - start_time
             self.logger.log_agent_error(phase_name, e)
             metrics_collector.record_task(phase_name, False, duration)
@@ -303,9 +244,6 @@ class ERPOrchestratorAgent:
         duration = time.time() - start_time
 
         if not isinstance(result, dict):
-            # An agent returned None or a non-dict. Normalize rather than
-            # crash. This is the same failure class as an agent that
-            # raises - the pipeline should see a structured failure.
             self.logger.error(
                 f"{phase_name} returned non-dict result of type "
                 f"{type(result).__name__}; normalizing to a failure result."
@@ -328,9 +266,6 @@ class ERPOrchestratorAgent:
         )
         return result
 
-    # ------------------------------------------------------------------ #
-    # Project lifecycle
-    # ------------------------------------------------------------------ #
     def start_project(
         self,
         project_name: str,
@@ -338,14 +273,19 @@ class ERPOrchestratorAgent:
         erp_system: str = "SAP S/4HANA",
         initial_input: Optional[str] = None,
         user_id: Optional[str] = None,
+        organization_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Start a new ERP consulting project.
 
+        organization_id selects the tenant context: None for a personal
+        project, an Organization id for an org-owned one. The API layer
+        (POST /api/projects/start) verifies membership before calling
+        this method; this function only carries the value through to
+        agent_memory.create_project.
+
         The returned `current_phase` reflects the session's actual phase
-        after any auto-run requirements work, not a hardcoded
-        'requirements_gathering' - previously the value was wrong
-        whenever initial_input was supplied and requirements succeeded.
+        after any auto-run requirements work, not a hardcoded value.
         """
         start_time = time.time()
 
@@ -355,6 +295,7 @@ class ERPOrchestratorAgent:
                 'project': project_name,
                 'module': module,
                 'erp_system': erp_system,
+                'organization_id': organization_id,
             },
         )
 
@@ -364,12 +305,14 @@ class ERPOrchestratorAgent:
                 module=module,
                 erp_system=erp_system,
                 user_id=user_id,
+                organization_id=organization_id,
             )
 
             self.logger.info(
                 "Project created",
                 session_id=session_id,
                 project=project_name,
+                organization_id=organization_id,
             )
 
             result_extra: Dict[str, Any] = {}
@@ -381,8 +324,6 @@ class ERPOrchestratorAgent:
                     )
                 result_extra['requirements_result'] = req_result
 
-            # Read the actual current phase from the session (which will
-            # have been advanced by the requirements run if it succeeded).
             session = agent_memory.session_service.get_session(session_id)
             current_phase = (
                 getattr(session, 'current_phase', None)
@@ -412,13 +353,9 @@ class ERPOrchestratorAgent:
                 'duration': duration,
             }
 
-    # ------------------------------------------------------------------ #
-    # Phases
-    # ------------------------------------------------------------------ #
     def execute_requirements_phase(
         self, session_id: str, stakeholder_input: str,
     ) -> Dict[str, Any]:
-        """Execute the requirements gathering phase."""
         self.logger.info("Executing requirements phase", session_id=session_id)
 
         session = agent_memory.session_service.get_session(session_id)
@@ -443,8 +380,6 @@ class ERPOrchestratorAgent:
             )
 
         if result.get('success'):
-            # Ensure phase output is available even if the agent wrote it
-            # through a path the orchestrator can't see (e.g. in tests).
             phase_output = agent_memory.get_phase_output(session_id, 'requirements_gathering')
             if not phase_output:
                 structured = (
@@ -476,7 +411,6 @@ class ERPOrchestratorAgent:
         process_name: Optional[str] = None,
         current_state: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Execute the process mapping phase."""
         self.logger.info("Executing process mapping phase", session_id=session_id)
 
         session = agent_memory.session_service.get_session(session_id)
@@ -525,7 +459,6 @@ class ERPOrchestratorAgent:
         return result
 
     def execute_solution_design_phase(self, session_id: str) -> Dict[str, Any]:
-        """Execute the solution design phase."""
         self.logger.info("Executing solution design phase", session_id=session_id)
 
         session = agent_memory.session_service.get_session(session_id)
@@ -542,16 +475,11 @@ class ERPOrchestratorAgent:
         project = context['project']
         requirements_output = context['phase_outputs']['requirements_gathering']
 
-        # Copy the structured requirements so adding the module hint doesn't
-        # mutate the persisted phase output. Previously this modified the
-        # stored dict in place.
         requirements = dict(
             (requirements_output or {}).get('structured_requirements', {}) or {}
         )
         requirements['module'] = session.module
 
-        # Process mapping output is {process_name: {...}} - pass it through
-        # as-is; the design agent handles both shapes.
         process_maps = context['phase_outputs'].get('process_mapping') or {}
 
         with self.logger.bound(session_id=session_id, phase="solution_design"):
@@ -573,7 +501,6 @@ class ERPOrchestratorAgent:
     def execute_qa_testing_phase(
         self, session_id: str, scope: str = "comprehensive",
     ) -> Dict[str, Any]:
-        """Execute the QA testing phase."""
         self.logger.info("Executing QA testing phase", session_id=session_id)
 
         session = agent_memory.session_service.get_session(session_id)
@@ -610,7 +537,6 @@ class ERPOrchestratorAgent:
     def execute_uat_testing_phase(
         self, session_id: str, user_roles: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """Execute the UAT testing phase."""
         self.logger.info("Executing UAT testing phase", session_id=session_id)
 
         session = agent_memory.session_service.get_session(session_id)
@@ -654,7 +580,6 @@ class ERPOrchestratorAgent:
         process_name: Optional[str] = None,
         user_roles: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """Execute the training and documentation phase."""
         self.logger.info("Executing training phase", session_id=session_id)
 
         session = agent_memory.session_service.get_session(session_id)
@@ -698,8 +623,6 @@ class ERPOrchestratorAgent:
             )
 
         if result.get('success'):
-            # Terminal transition - handled by _advance_to_phase because
-            # 'completed' is outside the PHASES sequence.
             self._advance_to_phase(session_id, ProjectPhase.COMPLETED.value)
             self.logger.info(
                 "Training phase completed - Project finished!", session_id=session_id,
@@ -708,9 +631,6 @@ class ERPOrchestratorAgent:
 
         return result
 
-    # ------------------------------------------------------------------ #
-    # Full workflow
-    # ------------------------------------------------------------------ #
     def execute_full_workflow(
         self,
         project_name: str,
@@ -723,11 +643,10 @@ class ERPOrchestratorAgent:
         """
         Execute the complete ERP consulting workflow from start to finish.
 
-        Phase failures on critical phases (requirements_gathering,
-        solution_design) stop the pipeline with a clear error rather than
-        continuing into a cascade of downstream "not found" errors.
-        Non-critical phase failures are recorded and the pipeline
-        continues where the remaining phases can still produce output.
+        Round 3a: does not accept organization_id. This entry point is
+        invoked from tests and from the CLI (src/main.py), neither of
+        which has an authenticated tenant context. Any project created
+        through this path is a personal project.
         """
         start_time = time.time()
 
@@ -745,7 +664,6 @@ class ERPOrchestratorAgent:
         diagnostics: List[Dict[str, Any]] = []
 
         try:
-            # 1. Start project (without auto-running requirements here).
             self.logger.info("Phase 1/6: Requirements Gathering")
             project_result = self.start_project(
                 project_name=project_name,
@@ -766,7 +684,6 @@ class ERPOrchestratorAgent:
             session_id = project_result['session_id']
             workflow_results['session_id'] = session_id
 
-            # 1a. Requirements gathering.
             req_result = self.execute_requirements_phase(
                 session_id=session_id,
                 stakeholder_input=stakeholder_input,
@@ -775,7 +692,6 @@ class ERPOrchestratorAgent:
             diagnostics.append(self._collect_phase_diagnostics('requirements_gathering', req_result))
 
             if not req_result.get('success'):
-                # Critical: everything downstream reads requirements.
                 return {
                     'success': False,
                     'session_id': session_id,
@@ -790,7 +706,6 @@ class ERPOrchestratorAgent:
                     'total_duration': time.time() - start_time,
                 }
 
-            # 2. Process mapping (non-critical - design can run without it).
             self.logger.info("Phase 2/6: Process Mapping")
             process_result = self.execute_process_mapping_phase(
                 session_id=session_id,
@@ -805,7 +720,6 @@ class ERPOrchestratorAgent:
                     "with reduced process context"
                 )
 
-            # 3. Solution design (critical).
             self.logger.info("Phase 3/6: Solution Design")
             design_result = self.execute_solution_design_phase(session_id=session_id)
             workflow_results['phases']['solution_design'] = design_result
@@ -827,13 +741,11 @@ class ERPOrchestratorAgent:
                     'total_duration': time.time() - start_time,
                 }
 
-            # 4. QA testing (non-critical for later phases).
             self.logger.info("Phase 4/6: QA Testing")
             qa_result = self.execute_qa_testing_phase(session_id=session_id)
             workflow_results['phases']['qa_testing'] = qa_result
             diagnostics.append(self._collect_phase_diagnostics('qa_testing', qa_result))
 
-            # 5. UAT testing (non-critical for later phases).
             self.logger.info("Phase 5/6: UAT Testing")
             uat_result = self.execute_uat_testing_phase(
                 session_id=session_id,
@@ -842,7 +754,6 @@ class ERPOrchestratorAgent:
             workflow_results['phases']['uat_testing'] = uat_result
             diagnostics.append(self._collect_phase_diagnostics('uat_testing', uat_result))
 
-            # 6. Training (non-critical - project can still finish without it).
             self.logger.info("Phase 6/6: Training & Documentation")
             training_result = self.execute_training_phase(
                 session_id=session_id,
@@ -854,7 +765,6 @@ class ERPOrchestratorAgent:
 
             duration = time.time() - start_time
 
-            # Aggregate diagnostics across every phase.
             aggregated = self._aggregate_diagnostics(diagnostics)
             workflow_results['diagnostics'] = diagnostics
             workflow_results['aggregated'] = aggregated
@@ -869,11 +779,6 @@ class ERPOrchestratorAgent:
                 total_open_questions=aggregated['open_questions_count'],
             )
 
-            # Success means the pipeline reached completion without a
-            # critical failure - individual non-critical phase failures
-            # are surfaced in `aggregated` and in `workflow_results` but
-            # do not make the overall call fail. Callers that need strict
-            # behavior should inspect `aggregated['failed_phases']`.
             return {
                 'success': True,
                 'session_id': session_id,
@@ -885,7 +790,7 @@ class ERPOrchestratorAgent:
                 'metrics': metrics_collector.get_summary(),
             }
 
-        except Exception as e:  # noqa: BLE001 - top-level boundary
+        except Exception as e:  # noqa: BLE001
             duration = time.time() - start_time
             self.logger.log_agent_error("execute_full_workflow", e)
             return {
@@ -896,15 +801,8 @@ class ERPOrchestratorAgent:
                 'duration': duration,
             }
 
-    # ------------------------------------------------------------------ #
-    # Summaries
-    # ------------------------------------------------------------------ #
     @staticmethod
     def _aggregate_diagnostics(diagnostics: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Aggregate per-phase diagnostic records into a single summary.
-        The `open_questions` and `warnings` lists are the caller-facing
-        outputs of the epistemic discipline the agents enforce; this is
-        where they finally surface above the phase level."""
         failed = [d['phase'] for d in diagnostics if not d['success']]
         degraded = [d['phase'] for d in diagnostics if d.get('degraded')]
         repaired = [d['phase'] for d in diagnostics if d.get('repaired')]
@@ -936,7 +834,6 @@ class ERPOrchestratorAgent:
         }
 
     def generate_project_summary(self, session_id: str) -> Dict[str, Any]:
-        """Generate comprehensive project summary."""
         session = agent_memory.session_service.get_session(session_id)
         if not session:
             return {}
@@ -958,10 +855,6 @@ class ERPOrchestratorAgent:
             phase_output = agent_memory.get_phase_output(session_id, phase)
             if not phase_output:
                 continue
-            # Phase outputs have varied shapes across phases - tolerate
-            # both the dict-with-document_path shape (requirements,
-            # solution design, training) and the process-maps shape
-            # (mapping, where each process entry carries its own path).
             if isinstance(phase_output, dict):
                 doc_path = phase_output.get('document_path')
                 if doc_path:
@@ -977,7 +870,6 @@ class ERPOrchestratorAgent:
         return summary
 
     def get_project_status(self, session_id: str) -> Dict[str, Any]:
-        """Get current project status."""
         session = agent_memory.session_service.get_session(session_id)
         if not session:
             return {'error': 'Session not found'}
@@ -998,12 +890,10 @@ class ERPOrchestratorAgent:
         }
 
     def _get_next_phase(self, current_phase: str) -> str:
-        """Get next phase in workflow."""
         try:
             phase_enum = ProjectPhase(current_phase)
         except ValueError:
             return "unknown"
-        # Terminal state has no next phase.
         if phase_enum == ProjectPhase.COMPLETED:
             return ProjectPhase.COMPLETED.value
         workflow_info = self.phase_workflow.get(phase_enum)
@@ -1012,5 +902,4 @@ class ERPOrchestratorAgent:
         return "unknown"
 
 
-# Global orchestrator instance
 orchestrator = ERPOrchestratorAgent()
