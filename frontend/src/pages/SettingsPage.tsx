@@ -34,6 +34,7 @@ export function SettingsPage() {
             onUploadPicture={uploadProfilePicture}
           />
           <PasswordSection onChangePassword={changePassword} />
+          <SessionsSection />
           <FeedbackSection />
           <DangerZoneSection onDeleteAccount={deleteAccount} />
         </div>
@@ -325,6 +326,40 @@ function PasswordSection({
           </button>
         </div>
       </form>
+    </SettingsSection>
+  );
+}
+
+function SessionsSection() {
+  const { logoutAll } = useAuth();
+  const confirm = useConfirm();
+
+  async function handleLogoutAll() {
+    const confirmed = await confirm({
+      title: "Sign out of all devices?",
+      description:
+        "Every active session for your account will be revoked. You will need to sign in again on each device.",
+      confirmLabel: "Sign out everywhere",
+      variant: "danger",
+      onConfirm: async () => {
+        await logoutAll();
+      },
+    });
+    void confirmed;
+  }
+
+  return (
+    <SettingsSection
+      title="Sessions"
+      description="Manage where you're currently signed in."
+    >
+      <button
+        type="button"
+        onClick={handleLogoutAll}
+        className="inline-flex items-center gap-2 rounded-md border border-border-strong px-4 py-2 text-sm font-medium text-ink-muted transition-colors hover:border-danger hover:text-danger"
+      >
+        Sign out of all devices
+      </button>
     </SettingsSection>
   );
 }
