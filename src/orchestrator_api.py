@@ -1,22 +1,6 @@
 """
 FastAPI wrapper for ERP Orchestrator with hybrid LLM support
-(Gemini + Groq + GPT-4 + Claude fallback).
 
-Round 3b: every project-scoped route is guarded by an explicit
-require_permission(Permission.X) dependency in addition to the tenant
-boundary enforced by _get_owned_session. Both layers must pass.
-
-Signup round: /api/auth/signup accepts the five account choices.
-Individual choices grant the matching application role. Organization
-signup creates the tenant and Owner membership in the same transaction.
-/api/auth/me returns application roles and organization memberships so
-the frontend can render the correct experience; the frontend's view is
-never the source of authorization.
-
-Account/profile mutation endpoints (PATCH /api/auth/settings,
-POST /api/auth/profile-picture) intentionally remain on
-Depends(get_current_user). PROFILE_EDIT enforcement belongs to the
-account/profile round.
 """
 from __future__ import annotations
 
@@ -58,10 +42,9 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
-from slowapi.util import get_remote_address
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -80,7 +63,13 @@ from src.utils.logger import (
 )
 from src.utils.prompts import get_synthesis_prompt
 from src.models.chat_intent_schema import ChatIntent, ChatIntentDecision
-from src.auth.dependencies import get_current_user, get_db
+from src.auth import flows
+from src.auth.dependencies import (
+    generate_csrf_token,
+    get_current_user,
+    get_db,
+    verify_csrf,
+)
 from src.auth.guards import require_permission
 from src.auth.permissions import Permission
 from src.auth.rbac import (
@@ -89,10 +78,13 @@ from src.auth.rbac import (
     list_organizations_for_user,
 )
 from src.auth.schemas import (
-    SignupRequest, LoginRequest, TokenResponse, UserOut,
-    OrganizationSummary, ProfileUpdateRequest, PasswordChangeRequest,
+    LoginRequest, LoginResponse, MessageResponse,
+    OrganizationSummary, PasswordChangeRequest,
+    PasswordResetCompleteSchema, PasswordResetRequestSchema,
+    ProfileUpdateRequest, ResendOtpRequest, ResendVerificationRequest,
+    SignupRequest, TokenResponse, UserOut,
+    VerifyEmailRequest, VerifyOtpRequest,
 )
-from src.auth.security import create_access_token
 from src.auth import service as auth_service
 from src.db.base import engine as db_engine, SessionLocal
 from src.db.models import User, Feedback, SessionRecord, ProjectDocument
@@ -166,7 +158,52 @@ _TESTING = "pytest" in sys.modules
 # ---------------------------------------------------------------------------
 # Rate limits
 # ---------------------------------------------------------------------------
-AUTH_RATE_LIMIT = "10000/minute" if _TESTING else "5/minute"
+# Auth endpoints get one limit per abuse profile rather than a single
+# shared value. Categories, and the limit chosen for each:
+#
+#   signup                5/min   Account-farming bound. Shared with
+#                                 AUTH_RATE_LIMIT to preserve the
+#                                 existing convention.
+#   password auth        20/min   Bounds credential stuffing from a single
+#                                 source. The account-level progressive
+#                                 lockout in flows.py is the primary
+#                                 brute-force control; this is secondary.
+#   OTP verification     20/min   Bounds OTP guessing. The per-OTP attempt
+#                                 counter and the one-active-OTP-per-user
+#                                 invariant are the primary controls.
+#   OTP email send        3/min   Outbound-email abuse bound. The per-user
+#                                 resend interval in flows.py also
+#                                 applies; this limit bounds sends to
+#                                 different targets from one source.
+#   verification email    3/min   Outbound-email abuse bound, same
+#                                 reasoning as OTP email.
+#   reset email           3/min   Outbound-email abuse bound, same
+#                                 reasoning.
+#   token refresh        30/min   Legitimate clients refresh roughly once
+#                                 per access-token lifetime (15 min); this
+#                                 is a generous ceiling that still bounds
+#                                 rotation spam.
+#   token redemption     20/min   Verification/reset token redemptions.
+#                                 Tokens are 256-bit CSPRNG values, so
+#                                 guessing is infeasible; this bounds
+#                                 request volume.
+#
+# Key strategy: per-client-IP only. Email and pending-auth reference are
+# never used as keys because both are attacker-controlled on the
+# endpoints where the limit matters — an attacker can rotate emails to
+# exhaust a per-email bucket and can generate many pending-auth
+# references by repeatedly calling /login. Per-IP is the outer bound;
+# the flow layer provides the per-target inner bound.
+AUTH_RATE_LIMIT = "10000/minute" if _TESTING else "5/minute"          # signup
+LOGIN_RATE_LIMIT = "10000/minute" if _TESTING else "20/minute"
+VERIFY_EMAIL_RATE_LIMIT = "10000/minute" if _TESTING else "20/minute"
+RESEND_VERIFICATION_RATE_LIMIT = "10000/minute" if _TESTING else "3/minute"
+VERIFY_OTP_RATE_LIMIT = "10000/minute" if _TESTING else "20/minute"
+RESEND_OTP_RATE_LIMIT = "10000/minute" if _TESTING else "3/minute"
+REFRESH_RATE_LIMIT = "10000/minute" if _TESTING else "30/minute"
+PASSWORD_RESET_REQUEST_RATE_LIMIT = "10000/minute" if _TESTING else "3/minute"
+PASSWORD_RESET_COMPLETE_RATE_LIMIT = "10000/minute" if _TESTING else "20/minute"
+
 DEFAULT_RATE_LIMIT = "100000/minute" if _TESTING else "120/minute"
 CHAT_RATE_LIMIT = "100000/minute" if _TESTING else "30/minute"
 PHASE_RATE_LIMIT = "100000/minute" if _TESTING else "10/minute"
@@ -174,7 +211,26 @@ UPLOAD_RATE_LIMIT = "100000/minute" if _TESTING else "15/minute"
 REPORT_RATE_LIMIT = "100000/minute" if _TESTING else "10/minute"
 
 
-def _client_ip_for_rate_limit(request: Request) -> str:
+def _client_ip(request: Request) -> Optional[str]:
+    """Resolve the client's IP address.
+
+    Trust model: the application sits behind `settings.trusted_proxy_hops`
+    trusted reverse proxies. Each trusted proxy appends the address it
+    observed to the right side of the X-Forwarded-For header, so the
+    rightmost N entries are the addresses appended by our N trusted
+    proxies. We take the Nth-from-the-right entry — the address the
+    outermost trusted proxy observed. Values a client supplies on the
+    left of that chain are discarded because the hop count ignores them.
+
+    When `trusted_proxy_hops == 0` (the default), X-Forwarded-For is
+    ignored entirely and the direct peer is used. This is the safe
+    default: it never accepts a spoofed header from an untrusted client.
+    Deployments behind a load balancer must set `trusted_proxy_hops` to
+    the number of proxies they control (typically 1 for a single LB).
+
+    This function backs both the rate-limit key and the audit-log client
+    IP so the two cannot drift.
+    """
     hops = int(getattr(settings, "trusted_proxy_hops", 0) or 0)
     if hops > 0:
         xff = request.headers.get("x-forwarded-for")
@@ -182,8 +238,16 @@ def _client_ip_for_rate_limit(request: Request) -> str:
             parts = [p.strip() for p in xff.split(",") if p.strip()]
             if parts:
                 idx = max(0, len(parts) - hops)
-                return f"ip:{parts[idx]}"
-    return f"ip:{get_remote_address(request)}"
+                return parts[idx]
+    if request.client is not None:
+        return request.client.host
+    return None
+
+
+def _client_ip_for_rate_limit(request: Request) -> str:
+    """Rate-limit key. Prefixed so the key cannot collide with any future
+    key source that uses a different value (e.g. a per-user key)."""
+    return f"ip:{_client_ip(request) or 'unknown'}"
 
 
 limiter = Limiter(
@@ -191,14 +255,73 @@ limiter = Limiter(
     default_limits=[DEFAULT_RATE_LIMIT],
 )
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
+    """Return 429 in the application's standard error envelope.
+
+    The default slowapi handler returns
+    {"error": "Rate limit exceeded: 5 per 1 minute"}, which (a) does not
+    match the application envelope every other error uses, and (b) echoes
+    the internal limit string. This handler emits the same shape as every
+    other error and never includes the limit value, the rate-limit key,
+    or any account-identifying field.
+
+    `Retry-After: 60` is a conservative fixed bound rather than a
+    computed reset, because the exact reset window is not exposed on the
+    exception. Clients honoring Retry-After will back off for at most 60
+    seconds; the true reset is usually shorter.
+    """
+    response = JSONResponse(
+        status_code=429,
+        content=_error_envelope(
+            request, 429, "Too many requests. Please try again later."
+        ),
+    )
+    response.headers["Retry-After"] = "60"
+    return response
+
+
 app.add_middleware(SlowAPIMiddleware)
 
+# ---------------------------------------------------------------------------
+# CORS
+# ---------------------------------------------------------------------------
+# The refresh cookie is delivered cross-origin to the SPA, so the CORS
+# layer must explicitly allow credentials. Without
+# `allow_credentials=True`, browsers silently discard Set-Cookie headers
+# on cross-origin responses and refuse to send the cookie on subsequent
+# requests to /api/auth/refresh — the cookie flow breaks even though the
+# server sets the header.
+#
+# `allow_origins` is the configured list from settings. Starlette raises
+# at startup if `allow_origins=["*"]` is combined with
+# `allow_credentials=True`, so the locked "no wildcard CORS with
+# credentials" rule is enforced structurally.
+#
+# `allow_headers` is an explicit list rather than `*` because:
+#   * `Authorization` is not covered by `*` in some browsers.
+#   * `X-CSRF-Token` is the double-submit cookie header required by the
+#     refresh and logout endpoints (Step 6).
+#   * An explicit list is auditable; `*` is a blind allow.
+#
+# `expose_headers=["X-Request-ID"]` lets the SPA read the correlation ID
+# off responses (for support tickets). That header is not in the CORS
+# safelist, so it must be exposed explicitly.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins_list,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-CSRF-Token",
+        "X-Request-ID",
+    ],
+    expose_headers=["X-Request-ID"],
+    max_age=600,
 )
 
 
@@ -245,6 +368,54 @@ async def body_size_limit_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+# Content-Security-Policy for HTML responses.
+#
+# Applied only to text/html responses. JSON API responses ignore CSP;
+# adding it universally would be pure header overhead on every API call.
+#
+# Directive rationale:
+#   default-src 'self'      deny-by-default.
+#   script-src 'self'       Vite emits a single hashed module script
+#                           under /assets/; no inline scripts exist.
+#   style-src 'self' 'unsafe-inline' https://fonts.googleapis.com
+#                           'unsafe-inline' is required because React
+#                           components use inline style attributes
+#                           (style={{}}); removing it needs a nonce
+#                           pipeline through every component. The Google
+#                           Fonts origin is where the stylesheet <link>
+#                           in index.html is fetched from.
+#   img-src 'self' data: blob:
+#                           profile pictures are same-origin
+#                           (/api/auth/profile-picture/*); data: and
+#                           blob: cover icon and image-preview paths.
+#   font-src 'self' https://fonts.gstatic.com data:
+#                           Google Fonts serves the actual font files
+#                           from gstatic.com.
+#   connect-src 'self'      no XHR/fetch to a third-party origin.
+#   frame-ancestors 'none'  modern replacement for X-Frame-Options.
+#   base-uri 'self'         prevent <base href> injection.
+#   form-action 'self'      prevent form submission to a third party.
+#   object-src 'none'       no plugin content.
+_CSP_POLICY = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+    "img-src 'self' data: blob:; "
+    "font-src 'self' https://fonts.gstatic.com data:; "
+    "connect-src 'self'; "
+    "frame-ancestors 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'; "
+    "object-src 'none'"
+)
+
+# Paths that render HTML but should NOT receive the SPA CSP. Swagger UI
+# and ReDoc load inline scripts and third-party assets that a strict
+# policy would break, and they are developer tools rather than
+# user-facing surfaces.
+_CSP_EXEMPT_PATHS = frozenset({"/docs", "/redoc", "/openapi.json"})
+
+
 @app.middleware("http")
 async def security_headers_middleware(request: Request, call_next):
     response = await call_next(request)
@@ -252,6 +423,44 @@ async def security_headers_middleware(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+
+    # CSP applies to HTML documents only. Conditional on the response
+    # content type so JSON API responses carry no dead header, and
+    # exempting the auto-generated docs routes so their UIs keep working.
+    content_type = response.headers.get("content-type", "")
+    if (
+        "text/html" in content_type
+        and request.url.path not in _CSP_EXEMPT_PATHS
+    ):
+        response.headers["Content-Security-Policy"] = _CSP_POLICY
+
+    # Auth responses carry access tokens in the body, refresh Set-Cookie
+    # headers, and other session state. Nothing on the request path
+    # should be cached — not by the browser's bfcache, not by an
+    # intermediate proxy, not by a corporate TLS-inspecting gateway.
+    #
+    # One path under /api/auth/ is deliberately excluded: the GET on a
+    # profile picture. That endpoint mints a fresh UUID filename on
+    # every upload, so the URL is content-addressed and immutable; it
+    # sets its own long-lived Cache-Control header intentionally. The
+    # blanket no-store would overwrite that header (middleware runs
+    # after the route), defeating caching for the exact asset that most
+    # benefits from it. The matching POST on the same prefix is not
+    # affected by this exclusion — the exclusion only matches paths with
+    # a filename segment after the trailing slash.
+    _profile_picture_get_prefix = "/api/auth/profile-picture/"
+    is_profile_picture_get = (
+        request.method == "GET"
+        and request.url.path.startswith(_profile_picture_get_prefix)
+        and len(request.url.path) > len(_profile_picture_get_prefix)
+    )
+    if (
+        request.url.path.startswith("/api/auth/")
+        and not is_profile_picture_get
+    ):
+        response.headers["Cache-Control"] = "no-store"
+
     forwarded_proto = request.headers.get("x-forwarded-proto", "").lower()
     is_https = request.url.scheme == "https" or forwarded_proto == "https"
     if is_https:
@@ -826,63 +1035,460 @@ def _get_owned_session(session_id: str, current_user: User):
 # ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
-@app.post("/api/auth/signup", response_model=TokenResponse)
+_GENERIC_LOGIN_FAILURE = "Invalid email or password."
+_GENERIC_OTP_FAILURE = "Invalid or expired code."
+_GENERIC_SESSION_FAILURE = "Session expired. Please sign in again."
+_GENERIC_TOKEN_FAILURE = "This link is invalid or has expired."
+_GENERIC_SIGNUP_MESSAGE = (
+    "If this email address can be registered, a verification email has "
+    "been sent. Please check your inbox to continue."
+)
+_GENERIC_RESEND_VERIFICATION_MESSAGE = (
+    "If an account with that email address exists and requires "
+    "verification, a verification email has been sent."
+)
+_GENERIC_RESET_REQUEST_MESSAGE = (
+    "If an account with that email address exists, a password reset "
+    "email has been sent."
+)
+_GENERIC_RESET_COMPLETE_MESSAGE = (
+    "Password updated. Please sign in with your new password."
+)
+_GENERIC_VERIFY_EMAIL_MESSAGE = "Email verified."
+_GENERIC_OTP_RESEND_MESSAGE = (
+    "If this sign-in is still pending, a new code has been sent."
+)
+_GENERIC_LOGOUT_MESSAGE = "Signed out."
+_GENERIC_LOGOUT_ALL_MESSAGE = "Signed out of all devices."
+
+
+
+def _user_agent(request: Request) -> Optional[str]:
+    return request.headers.get("user-agent")
+
+
+# ---------------------------------------------------------------------------
+# Session cookie management
+# ---------------------------------------------------------------------------
+# Two cookies are issued together by every flow that grants or rotates a
+# session:
+#
+#   * the refresh cookie — HttpOnly, holds the raw refresh token. Not
+#     readable by JavaScript.
+#   * the CSRF cookie    — NOT HttpOnly, holds a random double-submit
+#     value the SPA reads and echoes in a header.
+#
+# Both share the refresh-token lifetime so they expire together.
+# HttpOnly is hardcoded True for the refresh cookie and False for the
+# CSRF cookie — neither is a setting, because a mistake in either
+# direction is a security defect, not a deployment choice.
+#
+# The access token is NEVER placed in a cookie. It is returned in the
+# JSON response body only.
+
+def _refresh_cookie_max_age() -> int:
+    return int(settings.refresh_token_expire_days) * 24 * 3600
+
+
+def _set_refresh_cookie(response: Response, raw_token: str) -> None:
+    response.set_cookie(
+        key=settings.auth_refresh_cookie_name,
+        value=raw_token,
+        max_age=_refresh_cookie_max_age(),
+        httponly=True,
+        secure=bool(settings.auth_cookie_secure),
+        samesite=settings.auth_cookie_samesite,
+        domain=settings.auth_cookie_domain,
+        path=settings.auth_cookie_path or "/",
+    )
+
+
+def _clear_refresh_cookie(response: Response) -> None:
+    response.delete_cookie(
+        key=settings.auth_refresh_cookie_name,
+        domain=settings.auth_cookie_domain,
+        path=settings.auth_cookie_path or "/",
+    )
+
+
+def _set_csrf_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=settings.auth_csrf_cookie_name,
+        value=token,
+        max_age=_refresh_cookie_max_age(),
+        httponly=False,  # the SPA reads this from document.cookie
+        secure=bool(settings.auth_cookie_secure),
+        samesite=settings.auth_cookie_samesite,
+        domain=settings.auth_cookie_domain,
+        path=settings.auth_cookie_path or "/",
+    )
+
+
+def _clear_csrf_cookie(response: Response) -> None:
+    response.delete_cookie(
+        key=settings.auth_csrf_cookie_name,
+        domain=settings.auth_cookie_domain,
+        path=settings.auth_cookie_path or "/",
+    )
+
+
+def _issue_session_cookies(response: Response, tokens: "flows.IssuedTokens") -> None:
+    """Set both the refresh cookie and a fresh CSRF cookie. Called by
+    every flow that grants or rotates a session."""
+    _set_refresh_cookie(response, tokens.refresh_token)
+    _set_csrf_cookie(response, generate_csrf_token())
+
+
+def _clear_session_cookies(response: Response) -> None:
+    """Clear both cookies. Called by logout, logout-all, and every
+    refresh failure path."""
+    _clear_refresh_cookie(response)
+    _clear_csrf_cookie(response)
+
+def _session_failure_response(request: Request) -> Response:
+    """Build a 401 response for the refresh endpoint with the session
+    cookies cleared.
+
+    Returned directly instead of raising HTTPException. When a route
+    raises, FastAPI's exception handler constructs its own response and
+    discards headers set on the FastAPI-injected `Response`, so a
+    cookie-deletion applied to that injected object would never reach
+    the client. Building the JSONResponse here is the only way the
+    Set-Cookie headers survive onto the failure response.
+
+    The error envelope matches every other endpoint's shape.
+    """
+    resp = JSONResponse(
+        status_code=401,
+        content=_error_envelope(request, 401, _GENERIC_SESSION_FAILURE),
+    )
+    _clear_session_cookies(resp)
+    return resp
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+@app.post("/api/auth/signup", response_model=MessageResponse)
 @limiter.limit(AUTH_RATE_LIMIT)
 def signup(request: Request, req: SignupRequest, db: Session = Depends(get_db)):
-    """Create an account for one of the five account types.
+    """Create an account.
 
-    Individual account types grant the matching application role.
-    AccountType.ORGANIZATION creates a tenant with the new user as
-    Owner, in the same transaction. Either the whole signup commits or
-    nothing does; a partially created account (user without role, or
-    organization without owner) is not possible.
+    The response is identical whether the email was newly registered or
+    already existed (enumeration resistance). A verification email is
+    sent only for genuinely new accounts; the response never reveals
+    which case occurred.
+
+    No access or refresh token is issued here. The user must sign in
+    via the password + OTP flow.
+    """
+    flows.signup(
+        db,
+        email=str(req.email),
+        password=req.password,
+        account_type=req.account_type,
+        organization_name=req.organization_name,
+        ip_address=_client_ip(request),
+        user_agent=_user_agent(request),
+    )
+    return MessageResponse(message=_GENERIC_SIGNUP_MESSAGE)
+
+
+@app.post("/api/auth/verify-email", response_model=MessageResponse)
+@limiter.limit(AUTH_RATE_LIMIT)
+def verify_email(
+    request: Request,
+    req: VerifyEmailRequest,
+    db: Session = Depends(get_db),
+):
+    """Consume an email-verification token.
+
+    The token is presented by the user (from the emailed link). A
+    specific "invalid or expired" error does not reveal account
+    existence — the token itself is a random credential, not an email
+    address.
     """
     try:
-        user = auth_service.create_user(
+        flows.verify_email(
             db,
-            req.email,
-            req.password,
-            account_type=req.account_type,
-            organization_name=req.organization_name,
+            raw_token=req.token,
+            ip_address=_client_ip(request),
+            user_agent=_user_agent(request),
         )
-    except auth_service.EmailAlreadyRegistered:
-        raise HTTPException(status_code=409, detail="Email already registered")
-    except ValueError as e:
-        # Defensive: the schema validator should have caught a missing
-        # organization_name. If a direct caller bypassed it, fail as a
-        # client error rather than a 500.
-        raise HTTPException(status_code=422, detail=str(e))
-
-    token = create_access_token(user.id)
-    return TokenResponse(
-        access_token=token,
-        expires_in_minutes=settings.access_token_expire_minutes,
-    )
+    except flows.InvalidOrExpiredToken:
+        raise HTTPException(status_code=400, detail=_GENERIC_TOKEN_FAILURE)
+    return MessageResponse(message=_GENERIC_VERIFY_EMAIL_MESSAGE)
 
 
-@app.post("/api/auth/login", response_model=TokenResponse)
+@app.post("/api/auth/resend-verification", response_model=MessageResponse)
 @limiter.limit(AUTH_RATE_LIMIT)
-def login(request: Request, req: LoginRequest, db: Session = Depends(get_db)):
-    user = auth_service.authenticate_user(db, req.email, req.password)
-    if not user:
-        raise HTTPException(status_code=401, detail="Incorrect email or password")
+def resend_verification(
+    request: Request,
+    req: ResendVerificationRequest,
+    db: Session = Depends(get_db),
+):
+    """Request a new verification email.
 
-    token = create_access_token(user.id)
-    return TokenResponse(
-        access_token=token,
-        expires_in_minutes=settings.access_token_expire_minutes,
+    Enumeration-resistant: identical response whether the email is
+    unknown, already verified, or newly (re)sent. The flow layer
+    enforces the resend interval; a request inside the interval is a
+    no-op that returns the same message.
+    """
+    flows.resend_verification_email(
+        db,
+        email=str(req.email),
+        ip_address=_client_ip(request),
+        user_agent=_user_agent(request),
+    )
+    return MessageResponse(message=_GENERIC_RESEND_VERIFICATION_MESSAGE)
+
+
+@app.post("/api/auth/login", response_model=LoginResponse)
+@limiter.limit(AUTH_RATE_LIMIT)
+def login(
+    request: Request,
+    req: LoginRequest,
+    db: Session = Depends(get_db),
+):
+    """Stage 1 of login: verify email + password, issue an OTP.
+
+    No access or refresh token is issued here. The response contains an
+    opaque pending-auth reference that only /api/auth/login/verify-otp
+    accepts. All failure modes — unknown email, wrong password, locked
+    account — return the same generic 401.
+    """
+    try:
+        pending = flows.initiate_login(
+            db,
+            email=str(req.email),
+            password=req.password,
+            ip_address=_client_ip(request),
+            user_agent=_user_agent(request),
+        )
+    except flows.LoginFailed:
+        raise HTTPException(status_code=401, detail=_GENERIC_LOGIN_FAILURE)
+    return LoginResponse(
+        pending_auth_ref=pending.pending_auth_ref,
+        expires_in_minutes=pending.expires_in_minutes,
+        message="A sign-in code has been sent to your email address.",
     )
 
 
+@app.post("/api/auth/login/verify-otp", response_model=TokenResponse)
+@limiter.limit(AUTH_RATE_LIMIT)
+def verify_login_otp(
+    request: Request,
+    response: Response,
+    req: VerifyOtpRequest,
+    db: Session = Depends(get_db),
+):
+    """Stage 2 of login: verify the OTP and issue session credentials.
+
+    On success: the access token is returned in the response body and
+    the refresh token is set as an HttpOnly cookie (never in the body).
+    A CSRF cookie is issued alongside the refresh cookie.
+
+    All failure modes (unknown ref, wrong code, expired, attempts
+    exceeded) return the same generic 400. The pending_auth_ref is a
+    credential the client holds, so a specific error reveals nothing
+    about account existence.
+    """
+    try:
+        tokens = flows.verify_login_otp(
+            db,
+            pending_auth_ref=req.pending_auth_ref,
+            code=req.code,
+            ip_address=_client_ip(request),
+            user_agent=_user_agent(request),
+        )
+    except flows.OtpVerificationFailed:
+        raise HTTPException(status_code=400, detail=_GENERIC_OTP_FAILURE)
+
+    _issue_session_cookies(response, tokens)
+    return TokenResponse(
+        access_token=tokens.access_token,
+        token_type="bearer",
+        expires_in_minutes=tokens.access_expires_in_minutes,
+    )
+
+
+@app.post("/api/auth/login/resend-otp", response_model=LoginResponse)
+@limiter.limit(AUTH_RATE_LIMIT)
+def resend_login_otp(
+    request: Request,
+    req: ResendOtpRequest,
+    db: Session = Depends(get_db),
+):
+    """Re-issue the OTP for an existing pending-auth flow.
+
+    Enumeration-resistant at the flow layer: an unknown ref and a valid
+    ref produce the same response shape. Any new code is delivered by
+    email; the response only carries the same pending-ref the client
+    already has.
+    """
+    pending = flows.resend_login_otp(
+        db,
+        pending_auth_ref=req.pending_auth_ref,
+        ip_address=_client_ip(request),
+        user_agent=_user_agent(request),
+    )
+    return LoginResponse(
+        pending_auth_ref=pending.pending_auth_ref,
+        expires_in_minutes=pending.expires_in_minutes,
+        message=_GENERIC_OTP_RESEND_MESSAGE,
+    )
+
+
+@app.post("/api/auth/refresh", response_model=TokenResponse)
+@limiter.limit(REFRESH_RATE_LIMIT)
+def refresh(
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    """Rotate the refresh token and issue a new access token.
+
+    The refresh token is read exclusively from the HttpOnly cookie.
+    Failure paths return the JSONResponse built by
+    `_session_failure_response` so the session cookies are cleared in
+    the actual HTTP response (see the helper's docstring for why raising
+    HTTPException would lose those headers).
+    """
+    raw_refresh = request.cookies.get(settings.auth_refresh_cookie_name)
+    if not raw_refresh:
+        return _session_failure_response(request)
+
+    # CSRF runs only after a session is claimed, so an unauthenticated
+    # client gets 401 (no session) rather than 403.
+    verify_csrf(request)
+
+    try:
+        tokens = flows.refresh_tokens(
+            db,
+            raw_refresh_token=raw_refresh,
+            ip_address=_client_ip(request),
+            user_agent=_user_agent(request),
+        )
+    except flows.SessionExpired:
+        return _session_failure_response(request)
+
+    _issue_session_cookies(response, tokens)
+    return TokenResponse(
+        access_token=tokens.access_token,
+        token_type="bearer",
+        expires_in_minutes=tokens.access_expires_in_minutes,
+    )
+
+
+@app.post("/api/auth/logout", response_model=MessageResponse)
+def logout(
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    """Revoke the presented refresh token and clear the session cookies.
+
+    Idempotent from the client's perspective: whether or not a valid
+    refresh cookie was present, the response clears both cookies and
+    returns success. When a cookie IS present, the server-side row is
+    revoked before the response is built.
+
+    The CSRF check is enforced only when a session cookie is present —
+    a client with no session gets a clean success response rather than
+    a CSRF error.
+    """
+    raw_refresh = request.cookies.get(settings.auth_refresh_cookie_name)
+    if raw_refresh:
+        verify_csrf(request)
+        flows.logout(db, raw_refresh_token=raw_refresh)
+    _clear_session_cookies(response)
+    return MessageResponse(message=_GENERIC_LOGOUT_MESSAGE)
+
+
+@app.post("/api/auth/logout-all", response_model=MessageResponse)
+def logout_all(
+    response: Response,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Revoke every active refresh session for the authenticated user.
+
+    Requires a valid access token. Access tokens themselves remain
+    valid until expiry — the locked architecture is short-lived access
+    plus a server-side revocable refresh layer, not a global
+    access-token denylist. The current refresh cookie is cleared as
+    part of the response.
+    """
+    flows.logout_all_devices(db, user=current_user)
+    _clear_session_cookies(response)
+    return MessageResponse(message=_GENERIC_LOGOUT_ALL_MESSAGE)
+
+
+@app.post("/api/auth/password-reset/request", response_model=MessageResponse)
+@limiter.limit(AUTH_RATE_LIMIT)
+def password_reset_request(
+    request: Request,
+    req: PasswordResetRequestSchema,
+    db: Session = Depends(get_db),
+):
+    """Request a password-reset email.
+
+    Enumeration-resistant: identical response whether the email exists
+    or not. No email is sent for unknown addresses (handled inside the
+    flow layer). The reset token is never returned in the response.
+    """
+    flows.request_password_reset(
+        db,
+        email=str(req.email),
+        ip_address=_client_ip(request),
+        user_agent=_user_agent(request),
+    )
+    return MessageResponse(message=_GENERIC_RESET_REQUEST_MESSAGE)
+
+
+@app.post("/api/auth/password-reset/complete", response_model=MessageResponse)
+@limiter.limit(AUTH_RATE_LIMIT)
+def password_reset_complete(
+    request: Request,
+    req: PasswordResetCompleteSchema,
+    db: Session = Depends(get_db),
+):
+    """Complete a password reset with the token from the reset email.
+
+    On success: the password is updated via the existing bcrypt path,
+    every refresh session for the user is revoked, and the failed-login
+    / lockout state is cleared. The user must sign in again.
+
+    The token is presented by the user, so a specific "invalid or
+    expired" error does not reveal account existence.
+    """
+    try:
+        flows.complete_password_reset(
+            db,
+            raw_token=req.token,
+            new_password=req.new_password,
+            ip_address=_client_ip(request),
+            user_agent=_user_agent(request),
+        )
+    except flows.InvalidOrExpiredToken:
+        raise HTTPException(status_code=400, detail=_GENERIC_TOKEN_FAILURE)
+    return MessageResponse(message=_GENERIC_RESET_COMPLETE_MESSAGE)
+
+
+# ---------------------------------------------------------------------------
+# Current user context (unchanged behaviour, unchanged dependency)
+# ---------------------------------------------------------------------------
 @app.get("/api/auth/me", response_model=UserOut)
 def me(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Return the authenticated user's context: identity, application
-    roles, and organization memberships. The frontend uses this to
-    render the correct experience; the backend remains the authority for
-    authorization."""
+    roles, and organization memberships.
+
+    Uses the existing JWT dependency. A pending-auth reference is not a
+    JWT and will fail decoding here — the pending-auth credential cannot
+    be used to authenticate any authenticated endpoint.
+    """
     return _build_user_out(db, current_user)
 
 
@@ -904,7 +1510,6 @@ def update_account_settings(
         db, current_user, req.name, current_user.profile_picture_url,
     )
     return _build_user_out(db, updated)
-
 
 # ---------------------------------------------------------------------------
 # Profile picture handling
