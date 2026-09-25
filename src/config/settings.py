@@ -17,13 +17,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # `src/config/settings.py` → parent `src/config` → parent `src` → parent root.
 # Computed from `__file__` (an absolute path once imported) rather than from
 # the process's current working directory, so the value is stable no matter
-# where the process was launched from. Every relative path in the settings
-# below is anchored to this constant, which eliminates the class of bug
-# where the server and an ad-hoc script agree on the *setting* but
-# disagree on the *physical directory* because their CWDs differ. This is
-# what made profile-picture uploads appear to vanish: the file was written
-# to the server's CWD-relative output/profile_pictures/, and a later read
-# from a different CWD-relative path resolved to a different directory.
+# where the process was launched from.
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
@@ -31,35 +25,24 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables.
 
     Cross-field invariants (enforced by validators below):
-      * At least one LLM provider must be fully configured. A provider is
-        configured only when BOTH its API key AND its model identifier are
-        present and valid; an API key with no model (or vice versa) does
-        not count. The hybrid LLM wrapper supports four providers, and
-        it's a legitimate deployment to run with only one.
+      * At least one LLM provider must be fully configured.
       * SerpApi key is required only when `enable_google_search` is on.
-        It's a feature flag, not a global prerequisite.
       * The per-phase timeout must be at least as long as the worst-case
-        LLM fallback chain, so the phase doesn't get killed before the
-        LLM layer has a chance to exhaust its retries and fall back. The
-        exact tier count isn't knowable here (dependencies on which keys
-        are set), so this checks the conservative bound.
+        LLM fallback chain.
+      * SMTP configuration is required when email delivery is enabled.
+      * SMTP must use exactly one of TLS or SSL, and at least one when
+        email delivery is enabled.
+      * Secure cookies are required outside the development environment.
 
     Provider model identifiers are environment-driven only. There are no
     hardcoded production model names or defaults anywhere in this file.
-    Changing a model requires only an environment-variable change
-    (GEMINI_MODEL / GROQ_MODEL / OPENAI_MODEL / ANTHROPIC_MODEL), with no
-    Python code change.
 
     Path anchoring: output_dir, logs_dir, and the .env file location are
-    all resolved against _REPO_ROOT (this file's grandparent directory),
-    not the process's current working directory. See _make_paths_absolute
-    below for the validator that enforces this.
+    all resolved against _REPO_ROOT, not the process's current working
+    directory.
     """
 
     model_config = SettingsConfigDict(
-        # Anchored to the repository root, not the process CWD. A server
-        # started from a subdirectory would otherwise load a different
-        # .env than the one the developer edits.
         env_file=str(_REPO_ROOT / '.env'),
         env_file_encoding='utf-8',
         case_sensitive=False,
@@ -69,12 +52,6 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     # LLM provider credentials
     # ------------------------------------------------------------------ #
-    # All four are Optional at the type level. Each provider is considered
-    # configured only when BOTH its API key AND its matching model are
-    # present; enforced by _require_at_least_one_llm_provider below. The
-    # hybrid wrapper skips any tier that is not fully configured, so an
-    # unset key (or unset model) just means that tier is inactive, not a
-    # startup failure.
     gemini_api_key: Optional[str] = Field(
         None, description="Gemini API Key (primary, free tier)"
     )
@@ -91,12 +68,6 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     # Model identifiers
     # ------------------------------------------------------------------ #
-    # These are environment-driven only - there are no hardcoded defaults.
-    # Set via GEMINI_MODEL, GROQ_MODEL, OPENAI_MODEL, ANTHROPIC_MODEL.
-    # A missing (None) value is valid at Settings-construction time; the
-    # provider is simply treated as not configured. An empty string,
-    # whitespace-only value, or a value with internal whitespace is
-    # rejected by validation - never silently substituted.
     gemini_model: Optional[str] = Field(
         None,
         description="Gemini model ID (from GEMINI_MODEL; no built-in default)",
@@ -139,15 +110,8 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     # Phase / LLM call timeouts
     # ------------------------------------------------------------------ #
-    # Phase-level ceiling: bounds one whole agent phase call (tool use +
-    # LLM calls + document generation), wired into
-    # ERPOrchestratorAgent._call_agent_safely via run_with_timeout.
     timeout_seconds: int = Field(default=300, gt=0)
 
-    # LLM-call-level settings: bound and harden individual provider calls,
-    # wired into HybridLLMClient. Deliberately smaller than timeout_seconds
-    # so several of these (retries, provider fallback) can happen inside
-    # one phase. See llm_total_timeout_seconds for the aggregate bound.
     llm_call_timeout_seconds: int = Field(
         default=60, gt=0,
         description="Per-attempt timeout for a single provider call",
@@ -158,17 +122,13 @@ class Settings(BaseSettings):
     )
     llm_total_timeout_seconds: int = Field(
         default=180, gt=0,
-        description="Aggregate budget for the entire provider fallback chain "
-                    "(all retries across all tiers). Must be <= timeout_seconds "
-                    "so the LLM layer returns a clean 'all providers failed' "
-                    "error before the phase timeout fires.",
+        description="Aggregate budget for the entire provider fallback chain. "
+                    "Must be <= timeout_seconds.",
     )
     llm_max_concurrent_calls: int = Field(
         default=16, gt=0,
-        description="Bounded size of the shared thread pool used for "
-                    "timeout-wrapped LLM calls. When saturated, new calls fail "
-                    "fast with OperationTimeoutError rather than blocking; raise "
-                    "this if you see saturation in production.",
+        description="Bounded size of the shared thread pool for timeout-wrapped "
+                    "LLM calls.",
     )
 
     # ------------------------------------------------------------------ #
@@ -189,7 +149,8 @@ class Settings(BaseSettings):
     max_memory_items: int = Field(default=100, gt=0)
     max_conversation_history_items: int = Field(
         default=200, gt=0,
-        description="Maximum conversation turns kept per session before oldest entries are trimmed",
+        description="Maximum conversation turns kept per session before oldest "
+                    "entries are trimmed",
     )
 
     # ------------------------------------------------------------------ #
@@ -201,30 +162,21 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     # Directories
     # ------------------------------------------------------------------ #
-    # Both are anchored to _REPO_ROOT by _make_paths_absolute below when
-    # they are relative. Absolute values are passed through unchanged.
     output_dir: str = Field(default="output")
     logs_dir: str = Field(default="logs")
 
     # ------------------------------------------------------------------ #
     # Database
     # ------------------------------------------------------------------ #
-    # Defaults to a local SQLite file so the app runs with zero external
-    # setup; set to a Postgres DSN in production
-    # (postgresql+psycopg2://user:pass@host:5432/dbname).
     database_url: str = Field(default="sqlite:///output/erp_agent.db")
 
     # ------------------------------------------------------------------ #
     # Object storage (S3-compatible)
     # ------------------------------------------------------------------ #
-    # All optional so the app starts without them configured - file upload
-    # endpoints return a clear 503 if used before these are set.
     s3_bucket_name: Optional[str] = Field(default=None)
     s3_access_key_id: Optional[str] = Field(default=None)
     s3_secret_access_key: Optional[str] = Field(default=None)
     s3_region: str = Field(default="auto")
-    # Set for R2/MinIO/any non-AWS S3-compatible endpoint; leave unset for
-    # real AWS S3 (boto3 resolves the endpoint from s3_region instead).
     s3_endpoint_url: Optional[str] = Field(default=None)
     max_upload_size_mb: int = Field(default=15, gt=0)
 
@@ -233,9 +185,9 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     api_auth_key: Optional[str] = Field(
         default=None,
-        description="Deprecated: static shared API key. Superseded by per-user JWT auth "
-                    "(see jwt_secret_key). Kept only so old .env files don't fail to load; "
-                    "no endpoint checks it anymore.",
+        description="Deprecated: static shared API key. Superseded by per-user "
+                    "JWT auth (see jwt_secret_key). Kept only so old .env files "
+                    "don't fail to load; no endpoint checks it anymore.",
     )
     allowed_origins: str = Field(
         default="http://localhost:3000,http://localhost:8000",
@@ -243,27 +195,217 @@ class Settings(BaseSettings):
     )
     trusted_proxy_hops: int = Field(
         default=0, ge=0,
-        description=(
-            "Number of trusted reverse proxies in front of the app. Used by "
-            "the rate limiter to extract the true client IP from X-Forwarded-For. "
-            "0 = no proxy (use direct peer). 1 = single LB. 2 = CDN + LB."
-        ),
+        description="Number of trusted reverse proxies in front of the app.",
     )
     max_request_body_mb: int = Field(
         default=25, gt=0,
-        description=(
-            "Maximum Content-Length for non-upload endpoints. The upload "
-            "endpoints enforce their own per-file cap via max_upload_size_mb."
-        ),
+        description="Maximum Content-Length for non-upload endpoints.",
     )
 
-    # JWT auth (per-user accounts)
-    jwt_secret_key: str = Field(..., description="Secret key used to sign access tokens - required, no default")
-    jwt_algorithm: str = Field(default="HS256")
+    # ================================================================== #
+    # Authentication
+    # ================================================================== #
+    # JWT (access tokens)
+    # ------------------------------------------------------------------ #
+    jwt_secret_key: str = Field(
+        ...,
+        description="Secret key used to sign access tokens - required, no "
+                    "default. Must be at least 32 characters.",
+    )
+    jwt_algorithm: str = Field(
+        default="HS256",
+        description="Fixed JWT signing algorithm. Validated at import time "
+                    "against an allowlist; 'none' is never accepted. The "
+                    "algorithm is never read from the token header.",
+    )
+    # ------------------------------------------------------------------ #
+    # Access token TTL
+    # ------------------------------------------------------------------ #
+    # Phase 1 locked architecture: JWT access tokens are SHORT-LIVED.
+    # The default is 15 minutes, matching the locked architecture.
+    # Deployments with an explicit ACCESS_TOKEN_EXPIRE_MINUTES in their
+    # environment keep their configured value; only the built-in default
+    # changed. Access tokens are still accepted until they expire even
+    # after this change - existing sessions continue to work.
     access_token_expire_minutes: int = Field(
-        default=1440, gt=0,
-        description="Access token lifetime in minutes (default 24h). No refresh-token flow yet - "
-                    "a user simply logs in again once expired.",
+        default=15, gt=0, le=1440,
+        description="Access-token lifetime in minutes (default 15). Bounded "
+                    "at 1440 (24h); short-lived tokens are paired with the "
+                    "server-side revocable refresh flow.",
+    )
+    refresh_token_expire_days: int = Field(
+        default=30, gt=0, le=365,
+        description="Refresh-token lifetime in days. Refresh tokens are "
+                    "opaque, stored server-side, and revocable.",
+    )
+    pending_auth_expire_minutes: int = Field(
+        default=10, gt=0, le=60,
+        description="Lifetime of the pre-authentication state issued between "
+                    "password verification and OTP verification. Short-lived; "
+                    "the pre-auth credential grants NO authenticated API "
+                    "access on its own.",
+    )
+
+    # ------------------------------------------------------------------ #
+    # Email OTP (MFA)
+    # ------------------------------------------------------------------ #
+    otp_length: int = Field(
+        default=6, ge=4, le=10,
+        description="Number of digits in an email OTP. Cryptographically "
+                    "generated; not a sequence or timestamp.",
+    )
+    otp_expire_minutes: int = Field(
+        default=10, gt=0, le=60,
+        description="OTP lifetime in minutes. Short expiry is a core "
+                    "brute-force defence alongside attempt limits.",
+    )
+    otp_max_attempts: int = Field(
+        default=5, gt=0, le=20,
+        description="Maximum failed OTP verification attempts per issued "
+                    "code before the code is invalidated.",
+    )
+    otp_resend_interval_seconds: int = Field(
+        default=60, ge=0, le=3600,
+        description="Minimum interval between OTP resends for the same "
+                    "pending-auth flow. Enforced at the service layer; also "
+                    "paired with endpoint-level rate limiting.",
+    )
+
+    # ------------------------------------------------------------------ #
+    # Email verification and password reset
+    # ------------------------------------------------------------------ #
+    email_verification_expire_hours: int = Field(
+        default=24, gt=0, le=168,
+        description="Lifetime of an email-verification token in hours.",
+    )
+    password_reset_expire_minutes: int = Field(
+        default=30, gt=0, le=1440,
+        description="Lifetime of a password-reset token in minutes.",
+    )
+
+    # ------------------------------------------------------------------ #
+    # Progressive login protection (account-level)
+    # ------------------------------------------------------------------ #
+    # Account-level backstop. Endpoint-level rate limiting is the primary
+    # control; these values shape the account-level response. Lockout is
+    # time-bounded and reset on successful authentication, so an attacker
+    # cannot permanently disable an account through this mechanism alone.
+    login_max_failed_attempts: int = Field(
+        default=10, gt=0, le=100,
+        description="Consecutive failed password attempts before the "
+                    "account is temporarily locked.",
+    )
+    login_lockout_duration_minutes: int = Field(
+        default=15, gt=0, le=1440,
+        description="Duration of the temporary account lockout once the "
+                    "failed-attempt threshold is reached.",
+    )
+
+    # ------------------------------------------------------------------ #
+    # Authentication cookies
+    # ------------------------------------------------------------------ #
+    # Refresh credentials are delivered as Secure, HttpOnly cookies. The
+    # HttpOnly flag is hardcoded True wherever the cookie is set - it is
+    # NOT configurable here, because a value of False for an auth cookie
+    # is always a security defect and offering it as an option invites
+    # accidental misconfiguration.
+    auth_cookie_secure: bool = Field(
+        default=True,
+        description="Set the Secure flag on authentication cookies. Must "
+                    "remain True outside development; the validator below "
+                    "enforces that.",
+    )
+    auth_cookie_samesite: str = Field(
+        default="lax",
+        description="SameSite attribute for auth cookies: 'strict', 'lax', "
+                    "or 'none'. 'none' additionally requires "
+                    "auth_cookie_secure=True (browser rule).",
+    )
+    auth_cookie_domain: Optional[str] = Field(
+        default=None,
+        description="Cookie Domain attribute. Leave unset to scope cookies "
+                    "to the exact request host.",
+    )
+    auth_cookie_path: str = Field(
+        default="/",
+        description="Cookie Path attribute.",
+    )
+    auth_refresh_cookie_name: str = Field(
+        default="erp_refresh_token",
+        description="Name of the HttpOnly refresh-credential cookie.",
+    )
+    auth_csrf_cookie_name: str = Field(
+        default="erp_csrf_token",
+        description="Name of the CSRF double-submit cookie. Read by the "
+                    "frontend and echoed in the CSRF header.",
+    )
+    auth_csrf_header_name: str = Field(
+        default="X-CSRF-Token",
+        description="Name of the header the frontend uses to echo the "
+                    "CSRF cookie value on state-changing requests.",
+    )
+
+    # ------------------------------------------------------------------ #
+    # Email delivery (SMTP)
+    # ------------------------------------------------------------------ #
+    # The current provider is Gmail SMTP. Gmail SMTP has known constraints
+    # that are documented here rather than only in external docs:
+    #
+    #   * The sending account MUST have 2-Step Verification enabled.
+    #   * Authentication uses an APP PASSWORD, not the account password.
+    #   * Gmail enforces daily sending limits (roughly a few hundred per
+    #     day for a personal account; lower for a fresh account).
+    #   * Deliverability and reputation are materially weaker than a
+    #     dedicated transactional email provider (SendGrid, SES,
+    #     Postmark). Messages may be throttled or filtered.
+    #
+    # The application talks to email through an interface
+    # (send_email(to, subject, body)); the Gmail SMTP client is one
+    # implementation behind that interface. Switching providers later
+    # does not change authentication call sites.
+    #
+    # No credentials are hardcoded; all values come from the environment.
+    email_delivery_enabled: bool = Field(
+        default=False,
+        description="Gate for SMTP configuration validation. When False, "
+                    "SMTP fields are not required and no email is sent. Set "
+                    "to True (and configure SMTP) to enable the email "
+                    "verification and MFA flows.",
+    )
+    smtp_host: Optional[str] = Field(
+        default=None,
+        description="SMTP server hostname. For Gmail: smtp.gmail.com.",
+    )
+    smtp_port: int = Field(
+        default=587, gt=0, le=65535,
+        description="SMTP server port. Gmail uses 587 (STARTTLS) or "
+                    "465 (implicit TLS).",
+    )
+    smtp_username: Optional[str] = Field(
+        default=None,
+        description="SMTP username. For Gmail, the full email address of "
+                    "the sending account.",
+    )
+    smtp_password: Optional[str] = Field(
+        default=None,
+        description="SMTP password. For Gmail, an APP PASSWORD generated "
+                    "after enabling 2-Step Verification on the account.",
+    )
+    smtp_from_address: Optional[str] = Field(
+        default=None,
+        description="Sender address used in the From header. For Gmail, "
+                    "must match (or be an alias of) smtp_username.",
+    )
+    smtp_use_tls: bool = Field(
+        default=True,
+        description="Use STARTTLS on the connection (upgrade an ordinary "
+                    "SMTP connection to TLS). Mutually exclusive with "
+                    "smtp_use_ssl.",
+    )
+    smtp_use_ssl: bool = Field(
+        default=False,
+        description="Use implicit TLS (SMTPS). Mutually exclusive with "
+                    "smtp_use_tls.",
     )
 
     # ------------------------------------------------------------------ #
@@ -279,16 +421,7 @@ class Settings(BaseSettings):
 
     @property
     def configured_llm_providers(self) -> List[str]:
-        """Ordered list of fully configured LLM providers, matching the
-        fallback order used by HybridLLMClient. Useful for startup logging
-        and for diagnosing why a call landed on a paid tier.
-
-        A provider is listed only when BOTH its API key AND its matching
-        model identifier are present (the model field validator already
-        rejects empty/whitespace-only/internal-whitespace values, so a
-        non-None model here is a valid, non-whitespace identifier). A
-        provider with a key but no model, or a model but no key, is not
-        configured."""
+        """Ordered list of fully configured LLM providers."""
         providers: List[str] = []
         if self.gemini_api_key and self.gemini_model:
             providers.append("gemini")
@@ -302,32 +435,40 @@ class Settings(BaseSettings):
 
     @property
     def unconfigured_llm_providers(self) -> List[str]:
-        """Ordered list of providers that are not fully configured (missing
-        API key, missing model, or both). Mirrors the fallback order."""
+        """Ordered list of providers that are not fully configured."""
         configured = set(self.configured_llm_providers)
         return [p for p in ("gemini", "groq", "openai", "anthropic") if p not in configured]
+
+    @property
+    def smtp_configured(self) -> bool:
+        """True when every SMTP field required to actually send is set.
+        Independent of email_delivery_enabled - a caller can be enabled
+        but misconfigured, in which case this returns False and the
+        startup validator would already have raised."""
+        return bool(
+            self.smtp_host
+            and self.smtp_username
+            and self.smtp_password
+            and self.smtp_from_address
+        )
 
     # ------------------------------------------------------------------ #
     # Validators
     # ------------------------------------------------------------------ #
-    # Known placeholder values from .env.example and common weak defaults -
-    # rejected outright regardless of length, since someone could copy one
-    # of these and pad it to 32+ characters without it being any less
-    # guessable.
     _WEAK_JWT_SECRETS: ClassVar[set] = {
         "generate_a_long_random_secret_here",
         "changeme", "change_me", "secret", "your-secret-key",
         "your_secret_key_here", "insecure", "development",
+        "your key here",
     }
 
     @field_validator("jwt_secret_key")
     @classmethod
     def _validate_jwt_secret_strength(cls, v: str) -> str:
-        """Fails fast at startup rather than silently accepting a weak
-        signing key that would make every issued access token forgeable.
-        This intentionally has no test/dev bypass - see .env.example and
-        SECURITY.md for how to generate a real one; every environment,
-        including local dev, needs one."""
+        """Reject placeholder or short JWT secrets at startup. Preserved
+        verbatim from the previous implementation, with one addition to
+        the blocklist: 'your key here', which is the value used in the
+        shipped .env.example."""
         if v.strip().lower() in cls._WEAK_JWT_SECRETS:
             raise ValueError(
                 "JWT_SECRET_KEY is set to a known placeholder/example value. "
@@ -335,8 +476,7 @@ class Settings(BaseSettings):
             )
         if len(v) < 32:
             raise ValueError(
-                f"JWT_SECRET_KEY must be at least 32 characters (got {len(v)}) - a short key "
-                "is brute-forceable and would let an attacker forge access tokens. "
+                f"JWT_SECRET_KEY must be at least 32 characters (got {len(v)}). "
                 "Generate one: openssl rand -hex 32"
             )
         return v
@@ -344,26 +484,7 @@ class Settings(BaseSettings):
     @field_validator("gemini_model", "groq_model", "openai_model", "anthropic_model")
     @classmethod
     def _validate_model_name(cls, v: Optional[str]) -> Optional[str]:
-        """Model identifiers are environment-driven only - no hardcoded
-        defaults exist anywhere.
-
-        Contract:
-          * None            -> valid; the provider's model is not
-                               configured, so that provider is not
-                               configured (see configured_llm_providers).
-          * empty / ""      -> invalid; rejected so a stray empty env var
-                               surfaces at startup.
-          * whitespace-only -> invalid; rejected for the same reason.
-          * internal WS     -> invalid; a stray space inside a model name
-                               fails on every provider call with an opaque
-                               400, so reject it early.
-          * non-empty str   -> valid; returned stripped of surrounding
-                               whitespace. The exact non-whitespace model
-                               identifier is preserved with no provider-
-                               specific format enforcement.
-
-        No substitution: an invalid or missing value is never silently
-        replaced with a different model."""
+        """Model identifiers are environment-driven only."""
         if v is None:
             return None
         stripped = v.strip()
@@ -379,76 +500,117 @@ class Settings(BaseSettings):
     @field_validator("output_dir", "logs_dir")
     @classmethod
     def _make_paths_absolute(cls, v: str) -> str:
-        """Resolve relative directory paths against the repository root,
-        never the process's current working directory.
-
-        An unanchored relative path resolves differently depending on
-        where the process was started. In practice that means the server
-        and any ad-hoc script (a migration, a shell one-liner, a test
-        run) can agree on the setting while disagreeing on the physical
-        directory - files written by one are invisible to the other. That
-        is exactly the class of bug that made uploaded profile pictures
-        appear to disappear: the upload wrote to <server-CWD>/output/
-        profile_pictures/ and a later read from a different resolved
-        directory 404'd.
-
-        Absolute paths (production configuration, container WORKDIR-based
-        paths) are returned unchanged.
-        """
+        """Resolve relative directory paths against the repository root."""
         path = Path(v)
         if path.is_absolute():
             return str(path)
         return str((_REPO_ROOT / path).resolve())
 
+    @field_validator("auth_cookie_samesite")
+    @classmethod
+    def _normalize_auth_cookie_samesite(cls, v: str) -> str:
+        """Normalize to lowercase and restrict to the three values
+        browsers recognize. Any other value is rejected rather than
+        passed through to a Set-Cookie header where it would be silently
+        ignored."""
+        normalized = (v or "").strip().lower()
+        if normalized not in ("strict", "lax", "none"):
+            raise ValueError(
+                "auth_cookie_samesite must be one of 'strict', 'lax', "
+                f"'none' (got {v!r})"
+            )
+        return normalized
+
     @model_validator(mode="after")
     def _require_at_least_one_llm_provider(self) -> "Settings":
-        """The hybrid LLM wrapper can run with any single fully-configured
-        provider. A provider counts as configured only when BOTH its API
-        key AND its matching model identifier are present - a key without
-        a model, or a model without a key, is not configured and cannot
-        serve requests."""
+        """At least one complete LLM provider must be configured."""
         if not self.configured_llm_providers:
             raise ValueError(
                 "At least one complete LLM provider must be configured. Each "
-                "provider requires BOTH an API key AND a model identifier. "
-                "Set at least one of these pairs: "
-                "GEMINI_API_KEY + GEMINI_MODEL, "
-                "GROQ_API_KEY + GROQ_MODEL, "
-                "OPENAI_API_KEY + OPENAI_MODEL, "
-                "ANTHROPIC_API_KEY + ANTHROPIC_MODEL."
+                "provider requires BOTH an API key AND a model identifier."
             )
         return self
 
     @model_validator(mode="after")
     def _require_serpapi_when_search_enabled(self) -> "Settings":
-        """SerpApi is a feature-gated dependency, not a global prerequisite."""
+        """SerpApi is a feature-gated dependency."""
         if self.enable_google_search and not self.serpapi_api_key:
             raise ValueError(
-                "SERPAPI_API_KEY is required when ENABLE_GOOGLE_SEARCH is true. "
-                "Either set the key or set ENABLE_GOOGLE_SEARCH=false."
+                "SERPAPI_API_KEY is required when ENABLE_GOOGLE_SEARCH is true."
             )
         return self
 
     @model_validator(mode="after")
     def _check_timeout_budget(self) -> "Settings":
-        """The per-phase timeout must accommodate the aggregate LLM fallback
-        budget, otherwise a phase will get killed by its own ceiling mid-
-        fallback instead of surfacing a clean 'all providers failed' error.
-
-        We intentionally only require `llm_total_timeout_seconds <=
-        timeout_seconds` (the aggregate is a bounded quantity); the
-        per-attempt math (attempts * tiers * call_timeout) can still exceed
-        the phase ceiling if the aggregate is misconfigured, which is what
-        this check catches. We log a warning for the per-attempt math but
-        don't fail on it, because the aggregate is the real guarantee.
-        """
+        """The per-phase timeout must accommodate the aggregate LLM
+        fallback budget."""
         if self.llm_total_timeout_seconds > self.timeout_seconds:
             raise ValueError(
                 f"llm_total_timeout_seconds ({self.llm_total_timeout_seconds}s) "
-                f"must not exceed timeout_seconds ({self.timeout_seconds}s) - "
-                "otherwise the phase-level timeout fires before the LLM "
-                "fallback chain can finish, turning a clean provider-failure "
-                "into an ambiguous phase failure."
+                f"must not exceed timeout_seconds ({self.timeout_seconds}s)."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_auth_cookie_security(self) -> "Settings":
+        """Cookie security rules that must not be silently weakened.
+
+        * SameSite=None requires Secure=True (browsers reject the
+          combination outright, so failing here is clearer than a silent
+          no-op in the Set-Cookie header).
+        * Outside development, Secure must be True. Development is exempt
+          so a developer testing over a plain-HTTP non-localhost host can
+          still receive the cookie; every other environment must be
+          served over HTTPS with Secure cookies.
+        """
+        if self.auth_cookie_samesite == "none" and not self.auth_cookie_secure:
+            raise ValueError(
+                "auth_cookie_samesite='none' requires auth_cookie_secure=True "
+                "(browsers reject SameSite=None without Secure)."
+            )
+        if self.environment != "development" and not self.auth_cookie_secure:
+            raise ValueError(
+                f"auth_cookie_secure must be True when environment is "
+                f"{self.environment!r}. Secure cookies are required outside "
+                "development."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_smtp_tls_ssl(self) -> "Settings":
+        """TLS and SSL modes are mutually exclusive; at least one must be
+        in use when email delivery is enabled."""
+        if self.smtp_use_tls and self.smtp_use_ssl:
+            raise ValueError(
+                "smtp_use_tls and smtp_use_ssl are mutually exclusive."
+            )
+        if self.email_delivery_enabled and not (self.smtp_use_tls or self.smtp_use_ssl):
+            raise ValueError(
+                "SMTP must use TLS or SSL when email_delivery_enabled is True."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_smtp_when_enabled(self) -> "Settings":
+        """Require a complete SMTP configuration when email delivery is
+        enabled. The error names every missing field so the operator can
+        fix the configuration in one pass rather than one variable at a
+        time."""
+        if not self.email_delivery_enabled:
+            return self
+        missing: List[str] = []
+        if not self.smtp_host:
+            missing.append("smtp_host")
+        if not self.smtp_username:
+            missing.append("smtp_username")
+        if not self.smtp_password:
+            missing.append("smtp_password")
+        if not self.smtp_from_address:
+            missing.append("smtp_from_address")
+        if missing:
+            raise ValueError(
+                "email_delivery_enabled=True requires the following SMTP "
+                f"settings: {', '.join(missing)}."
             )
         return self
 
@@ -456,24 +618,13 @@ class Settings(BaseSettings):
     # Startup helpers
     # ------------------------------------------------------------------ #
     def init_directories(self) -> None:
-        """Create output, log, and SQLite parent directories. Call once at
-        application startup.
-
-        All paths are absolute by the time they reach this method (see
-        _make_paths_absolute), so directory creation is independent of the
-        process's current working directory.
-        """
+        """Create output, log, and SQLite parent directories."""
         os.makedirs(self.output_dir, exist_ok=True)
         os.makedirs(self.logs_dir, exist_ok=True)
 
-        # For the default SQLite database, make sure the parent dir exists
-        # so the first connection doesn't fail with an opaque error. Other
-        # DSNs (Postgres, etc.) are the operator's responsibility.
         if self.database_url.startswith("sqlite:///"):
             db_path = self.database_url[len("sqlite:///"):]
             if db_path and db_path != ":memory:":
-                # Anchor a relative SQLite path the same way output_dir and
-                # logs_dir are anchored. Absolute paths pass through.
                 db_p = Path(db_path)
                 if not db_p.is_absolute():
                     db_p = _REPO_ROOT / db_p
@@ -482,17 +633,7 @@ class Settings(BaseSettings):
                     os.makedirs(parent, exist_ok=True)
 
     def describe_llm_configuration(self) -> dict:
-        """Return a log-friendly summary of the effective LLM routing.
-
-        Intended to be called once at startup so operators can see at a
-        glance which providers are active, which are not, and which
-        environment-supplied model each tier will use. In particular, this
-        surfaces a wrong model name (which fails silently at call time and
-        shifts load to a paid tier) as a config line you can eyeball.
-
-        Distinguishes configured from unconfigured providers. API keys and
-        other secrets are never included in the output.
-        """
+        """Log-friendly summary of the effective LLM routing."""
         configured = self.configured_llm_providers
         return {
             "providers": configured,
@@ -537,7 +678,6 @@ class AgentConfig:
         self.tools = tools or []
 
 
-# Agent configurations
 REQUIREMENTS_AGENT_CONFIG = AgentConfig(
     name="Requirements Gathering Agent",
     description="Analyzes stakeholder inputs and generates comprehensive requirement documents",

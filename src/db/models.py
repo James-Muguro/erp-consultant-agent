@@ -31,6 +31,16 @@ Identity, roles, and multi-tenancy:
     (organization_id uses ON DELETE RESTRICT), so an ordinary
     organization delete cannot silently destroy project history.
 
+Authentication persistence (added by the auth build):
+
+  * User gains email verification state and progressive-login state.
+  * AuthRefreshToken stores hashed, revocable refresh tokens with
+    rotation-family identity for reuse detection.
+  * AuthPasswordResetToken and AuthEmailVerificationToken store hashed,
+    single-use tokens with expiry.
+  * AuthOtpRecord stores hashed OTP codes for email MFA.
+  * AuthAuditEvent is the auth audit log; it never contains secrets.
+
 Session ownership and deletion semantics: every table whose rows have no
 lifecycle independent of the owning session declares
 ON DELETE CASCADE on its sessions.session_id foreign key. This is the
@@ -124,6 +134,42 @@ class User(Base):
     profile_picture_url = Column(Text, nullable=True)
     hashed_password = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
+    # ------------------------------------------------------------------
+    # Authentication state (added by the auth build)
+    # ------------------------------------------------------------------
+    # email_verified_at: NULL = never verified; non-NULL = the UTC
+    # timestamp at which the user completed email verification. The
+    # login flow consults this for any feature that requires a verified
+    # address. Pre-existing accounts were backfilled to created_at by
+    # the migration that introduced this column, because they were
+    # created before the verification flow existed and must remain
+    # able to log in.
+    email_verified_at = Column(
+        DateTime(timezone=True), nullable=True,
+    )
+    # failed_login_count: number of consecutive failed password attempts
+    # since the last successful login (or since the last counter reset).
+    # Used together with locked_until for progressive abuse protection.
+    # Reset to 0 on successful authentication.
+    failed_login_count = Column(
+        Integer, nullable=False, default=0, server_default=text("0"),
+    )
+    # locked_until: when non-NULL and in the future, the account is
+    # locked and password authentication must be refused until this
+    # timestamp. Lockout is time-bounded on purpose so an attacker
+    # cannot permanently disable an account by triggering the counter;
+    # rate limiting on the endpoint is the primary control and this is
+    # the account-level backstop.
+    locked_until = Column(
+        DateTime(timezone=True), nullable=True,
+    )
+    # last_login_at: timestamp of the most recent successful
+    # authentication. Informational; used for the /me response and for
+    # security investigation. Never used as an authorization input.
+    last_login_at = Column(
+        DateTime(timezone=True), nullable=True,
+    )
 
 
 # ============================================================================
@@ -231,6 +277,261 @@ class UserRoleRecord(Base):
 
     __table_args__ = (
         UniqueConstraint("user_id", "role", name="uq_user_role_user_role"),
+    )
+
+
+# ============================================================================
+# Authentication: tokens, MFA, audit
+# ============================================================================
+# Raw token material (refresh tokens, password-reset tokens, email-
+# verification tokens, OTP codes) is NEVER stored in plaintext. Every
+# table in this section stores a SHA-256 hex digest of the token under
+# a `*_hash` column. SHA-256 is used rather than bcrypt because the
+# underlying secrets are cryptographically random (or, for OTPs, short
+# but protected by attempt limits + short expiry), so the deliberate
+# slowness of password hashing is not needed here and would add latency
+# to every refresh / verification.
+#
+# Every table also declares a `user_id` FK with ON DELETE CASCADE, so
+# deleting a user removes all of their auth state in the same
+# transaction. The audit log is the exception: its user_id uses
+# ON DELETE SET NULL, so the historical record of auth events survives
+# account deletion for security investigation.
+
+
+class AuthRefreshToken(Base):
+    """Server-side refresh-token / session record.
+
+    Access tokens are short-lived JWTs; refresh tokens are long-lived
+    opaque random strings whose SHA-256 digest is stored here. The raw
+    refresh token is returned to the client once, at issuance, and is
+    never retrievable from the database.
+
+    Rotation. Every successful use of a refresh token issues a new
+    refresh token and revokes the current one (revoked_at set,
+    revoked_reason='rotated'). Reuse detection: if a token that was
+    already rotated is presented again, that is treated as a token-theft
+    signal; the entire family (family_id) is revoked, and a
+    RefreshTokenReuseDetected event is written to the audit log.
+
+    Family identity. All tokens issued from a single login share the same
+    family_id. Rotation preserves the family; reuse revokes it. A fresh
+    login always starts a new family.
+
+    Revocation reasons used by the service layer (documented so callers
+    write consistent values):
+
+        'rotated'          superseded by the next token in the family
+        'logout'           user explicitly logged this session out
+        'logout_all'       user signed out of all devices
+        'reuse_detected'   token presented after it was already rotated
+                           (whole family revoked)
+        'password_reset'   password reset completed; sessions invalidated
+        'password_change'  password changed by authenticated user
+        'admin_revoke'     reserved for a future administrative action
+
+    No raw refresh token is stored here or logged anywhere.
+    """
+    __tablename__ = "auth_refresh_tokens"
+
+    id = Column(String, primary_key=True)
+    user_id = Column(
+        String,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    # All tokens from a single login share this identifier. Rotation
+    # preserves it; reuse detection revokes every row with the same value.
+    family_id = Column(String, nullable=False, index=True)
+    # SHA-256 hex digest of the raw refresh token. Unique so lookup is a
+    # single indexed probe and two live tokens cannot collide.
+    token_hash = Column(String, nullable=False, unique=True, index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    # Free-text reason; see class docstring for the expected values.
+    revoked_reason = Column(String, nullable=True)
+    # Metadata captured at issuance for security investigation. Neither
+    # field is used for authorization decisions.
+    user_agent = Column(String, nullable=True)
+    ip_address = Column(String, nullable=True)
+
+    __table_args__ = (
+        # "All active sessions for a user" (logout-all-devices).
+        Index(
+            "ix_auth_refresh_tokens_user_revoked",
+            "user_id", "revoked_at",
+        ),
+    )
+
+
+class AuthPasswordResetToken(Base):
+    """Password-reset token record.
+
+    The raw token is emailed to the user; only its SHA-256 digest is
+    stored here. Tokens are short-lived and single-use: a successful
+    reset sets used_at, and any subsequent presentation of the same
+    token is rejected. Request-time behavior (returning the same
+    externally-visible response whether or not the email corresponds
+    to an account) is the service layer's concern; this table only
+    stores tokens that were actually issued.
+    """
+    __tablename__ = "auth_password_reset_tokens"
+
+    id = Column(String, primary_key=True)
+    user_id = Column(
+        String,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    token_hash = Column(String, nullable=False, unique=True, index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    used_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class AuthEmailVerificationToken(Base):
+    """Email-verification token record.
+
+    Issued at signup and on resend. The raw token is emailed to the user;
+    only its SHA-256 digest is stored here. Tokens are short-lived and
+    single-use: a successful verification sets used_at, and any
+    subsequent presentation of the same token is rejected.
+    """
+    __tablename__ = "auth_email_verification_tokens"
+
+    id = Column(String, primary_key=True)
+    user_id = Column(
+        String,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    token_hash = Column(String, nullable=False, unique=True, index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    used_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class AuthOtpRecord(Base):
+    """Email OTP record for MFA and any future OTP-based flow.
+
+    The row's `id` is the pending-authentication reference that the
+    client submits alongside the code; it is an opaque identifier, not a
+    bearer credential, since the OTP code itself is what proves identity.
+    The code is never stored in plaintext - only its SHA-256 digest.
+
+    Attempts. `attempt_count` is incremented on every failed verification
+    within this record's lifetime. The service layer refuses further
+    attempts once the count reaches its configured ceiling, and marks the
+    record invalid (used_at set) so a new OTP must be requested. A
+    successful verification sets used_at and returns the code to the
+    invalidated state, so a second submission of the same code is
+    rejected.
+
+    `purpose` distinguishes the flow that issued the OTP. The locked
+    scope uses 'login_mfa'; the enum is a plain string so additional
+    purposes can be added without a schema change.
+
+    No OTP code is stored here in plaintext or logged anywhere.
+    """
+    __tablename__ = "auth_otp_records"
+
+    id = Column(String, primary_key=True)
+    user_id = Column(
+        String,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    purpose = Column(String, nullable=False, index=True)  # e.g. 'login_mfa'
+    # SHA-256 hex digest of the OTP code. Deliberately NOT unique: two
+    # different flows can legitimately produce the same short code, and
+    # lookup always goes through `id` first.
+    code_hash = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    used_at = Column(DateTime(timezone=True), nullable=True)
+    attempt_count = Column(
+        Integer, nullable=False, default=0, server_default=text("0"),
+    )
+    last_attempt_at = Column(DateTime(timezone=True), nullable=True)
+    ip_address = Column(String, nullable=True)
+    user_agent = Column(String, nullable=True)
+
+    __table_args__ = (
+        # "Find the active OTP for this user and purpose" - used by
+        # resend, by progressive attempt tracking, and by any future
+        # cleanup job that walks a user's pending OTPs.
+        Index(
+            "ix_auth_otp_records_user_purpose",
+            "user_id", "purpose",
+        ),
+    )
+
+
+class AuthAuditEvent(Base):
+    """Authentication audit log. One row per auth-relevant event.
+
+    Every row records what happened, when, from where, and for which
+    user, so a security investigation can reconstruct an authentication
+    history without any access to secrets.
+
+    NEVER contains, in any column or in event_metadata:
+      * passwords or password hashes
+      * raw JWTs
+      * raw refresh tokens
+      * OTP codes
+      * password-reset tokens
+      * email-verification tokens
+
+    event_metadata is a small JSON object for contextual details (the
+    failure reason class, the flow name, the client's claimed user-agent
+    family, etc.). It is deliberately NOT the raw request body.
+
+    Expected event_type values (service layer is authoritative):
+        signup_completed, email_verification_requested,
+        email_verification_completed, login_succeeded, login_failed,
+        account_locked, otp_requested, otp_verified, otp_failed,
+        password_changed, password_reset_requested,
+        password_reset_completed, logout, logout_all,
+        refresh_token_reuse_detected
+
+    user_id uses ON DELETE SET NULL: the audit history is preserved even
+    after the account is removed. Rows with user_id NULL are still
+    meaningful (they record the event, just not the identity).
+    """
+    __tablename__ = "auth_audit_events"
+
+    id = Column(String, primary_key=True)
+    user_id = Column(
+        String,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+    event_type = Column(String, nullable=False, index=True)
+    # 'success' | 'failure' - describes the outcome of the event itself.
+    # For informational events (logout initiated) this is always
+    # 'success'; for outcome-bearing events (login, OTP verification) it
+    # distinguishes the two possible results.
+    outcome = Column(String, nullable=False)
+    ip_address = Column(String, nullable=True)
+    user_agent = Column(String, nullable=True)
+    event_metadata = Column(_json_type()(), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, index=True,
+    )
+
+    __table_args__ = (
+        # "Recent events for this user" and "recent events of this type" -
+        # the two shapes the audit view and the security alarms consume.
+        Index(
+            "ix_auth_audit_events_user_created",
+            "user_id", "created_at",
+        ),
+        Index(
+            "ix_auth_audit_events_type_created",
+            "event_type", "created_at",
+        ),
     )
 
 
@@ -782,10 +1083,12 @@ class SolutionBaselineItem(Base):
 
     id = Column(String, primary_key=True)
     baseline_id = Column(
-        String, ForeignKey("solution_baselines.id", ondelete="CASCADE"),
+        String,
+        ForeignKey("solution_baselines.id", ondelete="CASCADE"),
         nullable=False, index=True,
     )
     solution_decision_id = Column(
-        String, ForeignKey("solution_decisions.id", ondelete="CASCADE"),
+        String,
+        ForeignKey("solution_decisions.id", ondelete="CASCADE"),
         nullable=False,
     )
