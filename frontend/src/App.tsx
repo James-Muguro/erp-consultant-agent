@@ -1,6 +1,10 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./context/useAuth";
 import { LoginPage } from "./pages/LoginPage";
+import { MfaPage } from "./pages/MfaPage";
+import { VerifyEmailPage } from "./pages/VerifyEmailPage";
+import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
+import { ResetPasswordPage } from "./pages/ResetPasswordPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { RequireAuth } from "./routes/RequireAuth";
 import { AppLayout } from "./routes/AppLayout";
@@ -21,10 +25,21 @@ export default function App() {
 
   return (
     <Routes>
+      {/* Public authentication routes. Any of these redirects to the
+          authenticated home if the user is already signed in. */}
       <Route
         path="/login"
         element={user ? <Navigate to="/" replace /> : <LoginPage />}
       />
+      <Route
+        path="/mfa"
+        element={user ? <Navigate to="/" replace /> : <MfaPage />}
+      />
+      <Route path="/verify-email" element={<VerifyEmailPage />} />
+      <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+      <Route path="/reset-password" element={<ResetPasswordPage />} />
+
+      {/* Authenticated workspace. */}
       <Route
         element={
           <RequireAuth>

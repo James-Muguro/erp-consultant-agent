@@ -121,6 +121,16 @@ export interface ApiErrorBody {
 
 export type ReviewStatus = "draft" | "approved" | "rejected";
 
+export interface MessageResponse {
+  message: string;
+}
+
+export interface PendingLoginResponse {
+  pending_auth_ref: string;
+  expires_in_minutes: number;
+  message: string;
+}
+
 export interface RequirementItem {
   id: string;
   category: string;

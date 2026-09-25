@@ -16,6 +16,8 @@ import type {
   ReviewAction,
   User,
   SignupPayload,
+  MessageResponse,
+  PendingLoginResponse,
 } from "../types";
 import { parseSseChunk } from "./sse";
 
@@ -23,24 +25,49 @@ const TOKEN_KEY = "erp_agent_token";
 const TOKEN_EXPIRES_KEY = "erp_agent_token_expires_at";
 
 // ---------------------------------------------------------------------------
+// CSRF
+// ---------------------------------------------------------------------------
+// The backend issues a JS-readable CSRF cookie alongside the HttpOnly
+// refresh cookie (both set by POST /api/auth/login/verify-otp and by
+// every successful POST /api/auth/refresh). The SPA echoes the cookie
+// value in a header on cookie-authenticated requests — refresh and, when
+// a session is present, logout.
+//
+// CRITICAL: the backend rotates the CSRF cookie on every successful
+// refresh (Step 6/7 design). The client must re-read the cookie AFTER
+// every refresh — caching the value in memory across a refresh will
+// fail the next state-changing request. The helpers below always read
+// from document.cookie; nothing in this file caches the CSRF value.
+//
+// The refresh cookie itself is HttpOnly and is never read from JS. The
+// names here mirror the backend defaults in
+// src/config/settings.py (auth_csrf_cookie_name / auth_csrf_header_name).
+// If those defaults change, this constant must be updated to match.
+export const CSRF_COOKIE_NAME = "erp_csrf_token";
+export const CSRF_HEADER_NAME = "X-CSRF-Token";
+
+export function readCsrfToken(): string | null {
+  if (typeof document === "undefined") return null;
+  const name = CSRF_COOKIE_NAME.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = document.cookie.match(
+    new RegExp("(?:^|;\\s*)" + name + "=([^;]*)"),
+  );
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+// ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
-
-/**
- * Discriminator for the kind of failure an ApiError represents. Callers
- * should branch on `kind`, not on `status` or on the presence/absence of
- * a message string - the message is user-facing and may change.
- */
 export type ApiErrorKind =
-  | "auth"        // 401 (session expired / invalid) or 403 (forbidden)
-  | "validation"  // 400, 413, 422 - the caller sent something wrong
-  | "rate_limit"  // 429
-  | "not_found"   // 404
-  | "conflict"    // 409 - state disagreement (already archived, etc.)
-  | "server"      // 5xx
-  | "network"     // fetch itself failed
-  | "aborted"     // caller cancelled via AbortController
-  | "unknown";    // anything else
+  | "auth"
+  | "validation"
+  | "rate_limit"
+  | "not_found"
+  | "conflict"
+  | "server"
+  | "network"
+  | "aborted"
+  | "unknown";
 
 export class ApiError extends Error {
   readonly status: number;
@@ -78,12 +105,6 @@ export class ApiError extends Error {
 // ---------------------------------------------------------------------------
 // Token storage
 // ---------------------------------------------------------------------------
-// Two keys instead of one: the original `erp_agent_token` key is preserved
-// so existing sessions survive the upgrade, and a companion key records
-// when the token expires. The companion key is absent when the server did
-// not return an expiry - `isTokenExpired()` treats "unknown" as "not
-// expired" rather than guessing.
-
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
 }
@@ -103,30 +124,17 @@ export function clearToken(): void {
   localStorage.removeItem(TOKEN_EXPIRES_KEY);
 }
 
-/**
- * True when we know the token has expired (or is within a small safety
- * margin of expiring). Returns false when the expiry is unknown, so a
- * token obtained before this code shipped is not spuriously rejected.
- */
 export function isTokenExpired(): boolean {
   const raw = localStorage.getItem(TOKEN_EXPIRES_KEY);
   if (!raw) return false;
   const expiresAt = Number(raw);
   if (!Number.isFinite(expiresAt)) return false;
-  // 5s margin: avoids handing a token to the server that will expire in
-  // flight and produce a confusing mid-request 401.
   return Date.now() >= expiresAt - 5_000;
 }
 
 // ---------------------------------------------------------------------------
 // Auth-expired signal
 // ---------------------------------------------------------------------------
-// The client owns the token; AuthContext owns the user object. When any
-// protected request returns 401, the client fires this signal and the
-// AuthContext subscriber transitions the app to the logged-out state.
-// The subscriber pattern (rather than an import of AuthContext here)
-// keeps client.ts free of React and prevents a circular import.
-
 type AuthExpiredHandler = () => void;
 const authExpiredHandlers = new Set<AuthExpiredHandler>();
 
@@ -148,16 +156,34 @@ function fireAuthExpired(): void {
   }
 }
 
-function isAuthEndpoint(path: string): boolean {
-  // A 401 from these endpoints is a credentials failure, not an expired
-  // session, so it must not trigger the global logout.
-  return path === "/api/auth/login" || path === "/api/auth/signup";
+// Endpoints that legitimately return 400/401/403 as part of their
+// public, unauthenticated contract. A failure from any of these must
+// NOT trigger the app-wide logout. Every other 401 means the access
+// token is bad and the app should transition to logged-out.
+//
+// - /login, /login/verify-otp, /login/resend-otp: bad credentials or OTP
+// - /signup, /verify-email, /resend-verification: enumeration-resistant
+// - /password-reset/*: enumeration-resistant
+// - /refresh: 401 when no session, 403 on CSRF mismatch — both normal
+const PUBLIC_AUTH_ENDPOINTS = new Set<string>([
+  "/api/auth/signup",
+  "/api/auth/login",
+  "/api/auth/verify-email",
+  "/api/auth/resend-verification",
+  "/api/auth/login/verify-otp",
+  "/api/auth/login/resend-otp",
+  "/api/auth/password-reset/request",
+  "/api/auth/password-reset/complete",
+  "/api/auth/refresh",
+]);
+
+function isPublicAuthEndpoint(path: string): boolean {
+  return PUBLIC_AUTH_ENDPOINTS.has(path);
 }
 
 // ---------------------------------------------------------------------------
 // Error normalization
 // ---------------------------------------------------------------------------
-
 function classifyStatus(status: number): ApiErrorKind {
   if (status === 401 || status === 403) return "auth";
   if (status === 404) return "not_found";
@@ -186,15 +212,6 @@ function isAbortError(err: unknown): boolean {
   return false;
 }
 
-/**
- * Turn an HTTP response (status, headers, parsed or unparsed body) into a
- * uniform ApiError. The three error shapes the backend can emit are all
- * handled here:
- *
- *   A. HTTPException / unhandled 500 -> { error: { code, message, request_id } }
- *   B. SlowAPI rate limit           -> { error: "Rate limit exceeded: ..." }
- *   C. FastAPI validation (422)     -> { detail: [ { loc, msg, type }, ... ] }
- */
 function normalizeErrorResponse(
   status: number,
   headers: Headers,
@@ -212,8 +229,6 @@ function normalizeErrorResponse(
   if (body && typeof body === "object") {
     const b = body as Record<string, unknown>;
 
-    // Shape A: { error: { code, message, request_id } }
-    // Shape B: { error: "string" }
     if ("error" in b) {
       const err = b.error;
       if (err && typeof err === "object") {
@@ -231,7 +246,6 @@ function normalizeErrorResponse(
       }
     }
 
-    // Shape C: { detail: "..." } or { detail: [ { loc, msg, type }, ... ] }
     if (!userMessage && "detail" in b) {
       const detail = b.detail;
       if (typeof detail === "string") {
@@ -257,7 +271,6 @@ function normalizeErrorResponse(
   }
 
   if (!userMessage) {
-    // Kind-specific fallback so the user never sees "Request failed (500)".
     switch (kind) {
       case "auth":
         userMessage =
@@ -303,7 +316,6 @@ function normalizeErrorResponse(
 // ---------------------------------------------------------------------------
 // Request helper
 // ---------------------------------------------------------------------------
-
 async function parseResponseBody(res: Response): Promise<unknown> {
   if (res.status === 204 || res.status === 205) return undefined;
   const text = await res.text();
@@ -317,8 +329,6 @@ async function parseResponseBody(res: Response): Promise<unknown> {
   try {
     return JSON.parse(text);
   } catch {
-    // Server declared JSON but sent something else - return the raw
-    // text rather than throwing, so callers still get a usable payload.
     return text;
   }
 }
@@ -326,17 +336,23 @@ async function parseResponseBody(res: Response): Promise<unknown> {
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = getToken();
   const headers = new Headers(options.headers);
-  // Only declare a JSON body when there is a string body. GET with
-  // Content-Type: application/json and no body is valid but triggers
-  // unnecessary CORS preflights and looks like a bug to reviewers.
   if (typeof options.body === "string" && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  if (token) headers.set("Authorization", `Bearer ${token}`);
+  if (token && !isPublicAuthEndpoint(path)) {
+  headers.set("Authorization", `Bearer ${token}`);
+  }
 
   let res: Response;
   try {
-    res = await fetch(path, { ...options, headers });
+    // credentials: "include" is required so the browser sends and
+    // stores the refresh and CSRF cookies on auth endpoints. It is
+    // harmless on endpoints that do not use cookies.
+    res = await fetch(path, {
+      ...options,
+      headers,
+      credentials: "include",
+    });
   } catch (err) {
     if (isAbortError(err)) {
       throw new ApiError({
@@ -358,7 +374,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   if (!res.ok) {
     const apiError = normalizeErrorResponse(res.status, res.headers, body);
-    if (res.status === 401 && !isAuthEndpoint(path)) {
+    if (res.status === 401 && !isPublicAuthEndpoint(path)) {
       fireAuthExpired();
     }
     throw apiError;
@@ -370,7 +386,6 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 // ---------------------------------------------------------------------------
 // Types for specific responses
 // ---------------------------------------------------------------------------
-
 type StartProjectResponse = {
   session_id: string;
   project_name: string;
@@ -387,13 +402,6 @@ type MessageRecord = { role: string; content: string; timestamp: string };
 // ---------------------------------------------------------------------------
 // Download helper
 // ---------------------------------------------------------------------------
-
-/**
- * Trigger a browser download from a Blob. The object URL is revoked on a
- * short delay rather than synchronously: some browsers cancel the
- * download if the URL is revoked before the fetch has actually started,
- * which manifests as "the file just doesn't download sometimes".
- */
 function triggerBlobDownload(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -408,21 +416,172 @@ function triggerBlobDownload(blob: Blob, filename: string): void {
 // ---------------------------------------------------------------------------
 // API surface
 // ---------------------------------------------------------------------------
-
 export const api = {
-  async signup(payload: SignupPayload): Promise<TokenResponse> {
-    return request<TokenResponse>("/api/auth/signup", {
+  // --- Auth: unauthenticated flow endpoints ---
+
+  /**
+   * Create an account. The response is enumeration-resistant: identical
+   * whether the email was new or already registered. NO tokens are
+   * issued; the user must verify their email and then sign in with the
+   * password + OTP flow.
+   */
+  async signup(payload: SignupPayload): Promise<MessageResponse> {
+    return request<MessageResponse>("/api/auth/signup", {
       method: "POST",
       body: JSON.stringify(payload),
     });
   },
 
-  async login(email: string, password: string): Promise<TokenResponse> {
-    return request<TokenResponse>("/api/auth/login", {
+  /**
+   * Consume an email-verification token. The token is presented by the
+   * user from the emailed link. Invalid/expired tokens return the same
+   * generic 400 (enumeration-resistant).
+   */
+  async verifyEmail(token: string): Promise<MessageResponse> {
+    return request<MessageResponse>("/api/auth/verify-email", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    });
+  },
+
+  /**
+   * Request a new verification email. Enumeration-resistant: identical
+   * response whether the email is unknown, already verified, or newly
+   * sent.
+   */
+  async resendVerification(email: string): Promise<MessageResponse> {
+    return request<MessageResponse>("/api/auth/resend-verification", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    });
+  },
+
+  /**
+   * Stage 1 of login: verify email + password.
+   *
+   * The response contains ONLY an opaque `pending_auth_ref`. It is NOT
+   * an access token, NOT a refresh token, and NOT a bearer credential
+   * for any authenticated endpoint. Store it only for the MFA step and
+   * discard it once the OTP is verified (or the flow is abandoned).
+   */
+  async initiateLogin(
+    email: string,
+    password: string,
+  ): Promise<PendingLoginResponse> {
+    return request<PendingLoginResponse>("/api/auth/login", {
       method: "POST",
       body: JSON.stringify({ email, password }),
     });
   },
+
+  /**
+   * Stage 2 of login: verify the OTP.
+   *
+   * On success, the backend sets the HttpOnly refresh cookie and a
+   * JS-readable CSRF cookie, and returns the access token in the body.
+   * The refresh token is never visible to JS.
+   */
+  async verifyOtp(
+    pendingAuthRef: string,
+    code: string,
+  ): Promise<TokenResponse> {
+    return request<TokenResponse>("/api/auth/login/verify-otp", {
+      method: "POST",
+      body: JSON.stringify({ pending_auth_ref: pendingAuthRef, code }),
+    });
+  },
+
+  /**
+   * Request a new OTP for an existing pending-auth flow. Enumeration-
+   * resistant: an unknown ref and a valid ref produce the same shape.
+   */
+  async resendOtp(pendingAuthRef: string): Promise<PendingLoginResponse> {
+    return request<PendingLoginResponse>("/api/auth/login/resend-otp", {
+      method: "POST",
+      body: JSON.stringify({ pending_auth_ref: pendingAuthRef }),
+    });
+  },
+
+  /**
+   * Rotate the refresh token and issue a new access token.
+   *
+   * The refresh token is read exclusively from the HttpOnly cookie by
+   * the backend. The CSRF value is read fresh from document.cookie on
+   * every call — the backend rotates the CSRF cookie on every
+   * successful refresh, so a cached value would fail the next request.
+   *
+   * On any failure (no session, expired, revoked, reused, CSRF
+   * mismatch) the backend clears the session cookies and returns a
+   * generic 401/403. The caller treats any error as "session not
+   * available" and clears local token state.
+   */
+  async refresh(): Promise<TokenResponse> {
+    const csrf = readCsrfToken();
+    const headers: HeadersInit = {};
+    if (csrf) headers[CSRF_HEADER_NAME] = csrf;
+    return request<TokenResponse>("/api/auth/refresh", {
+      method: "POST",
+      headers,
+    });
+  },
+
+  /**
+   * Revoke the current refresh session server-side and clear the
+   * session cookies. Idempotent: succeeds whether or not a session
+   * cookie is present. The CSRF header is included whenever the CSRF
+   * cookie is present — the backend requires it when a refresh cookie
+   * exists.
+   */
+  async logout(): Promise<MessageResponse> {
+    const csrf = readCsrfToken();
+    const headers: HeadersInit = {};
+    if (csrf) headers[CSRF_HEADER_NAME] = csrf;
+    return request<MessageResponse>("/api/auth/logout", {
+      method: "POST",
+      headers,
+    });
+  },
+
+  /**
+   * Revoke every active refresh session for the authenticated user.
+   * Requires a Bearer access token. The backend clears the current
+   * session cookies as part of the response; existing access JWTs
+   * remain valid until their short expiry.
+   */
+  async logoutAll(): Promise<MessageResponse> {
+    return request<MessageResponse>("/api/auth/logout-all", {
+      method: "POST",
+    });
+  },
+
+  /**
+   * Request a password-reset email. Enumeration-resistant: identical
+   * response whether the email exists or not. The token is never
+   * returned through the API.
+   */
+  async requestPasswordReset(email: string): Promise<MessageResponse> {
+    return request<MessageResponse>("/api/auth/password-reset/request", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    });
+  },
+
+  /**
+   * Complete a password reset with the token from the reset email.
+   * The token is presented by the user; invalid/expired tokens return
+   * the same generic 400.
+   */
+  async completePasswordReset(
+    token: string,
+    newPassword: string,
+  ): Promise<MessageResponse> {
+    return request<MessageResponse>("/api/auth/password-reset/complete", {
+      method: "POST",
+      body: JSON.stringify({ token, new_password: newPassword }),
+    });
+  },
+
+  // --- Auth: authenticated endpoints ---
 
   async me() {
     return request<User>("/api/auth/me");
@@ -445,6 +604,7 @@ export const api = {
         method: "POST",
         headers: token ? { Authorization: `Bearer ${token}` } : {},
         body: form,
+        credentials: "include",
       });
     } catch (err) {
       if (isAbortError(err)) {
@@ -480,6 +640,8 @@ export const api = {
   async deleteAccount() {
     return request<{ deleted: boolean }>("/api/auth/account", { method: "DELETE" });
   },
+
+  // --- Projects ---
 
   async listProjects(includeArchived = false) {
     return request<{ projects: ProjectSummary[] }>(
@@ -538,7 +700,10 @@ export const api = {
     try {
       res = await fetch(
         `/api/projects/${sessionId}/documents/${encodeURIComponent(filename)}`,
-        { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+        {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          credentials: "include",
+        },
       );
     } catch (err) {
       if (isAbortError(err)) {
@@ -605,13 +770,6 @@ export const api = {
     );
   },
 
-  /**
-   * List issues for a project. Pass a specific status to filter; pass
-   * `null` / `undefined` to omit the query parameter entirely, in which
-   * case the backend applies its own default ("open"). Note: the backend
-   * endpoint does not currently support "all statuses" - that is a
-   * backend limitation, not a client one.
-   */
   async getIssues(sessionId: string, status?: string | null) {
     const url = status
       ? `/api/projects/${sessionId}/issues?status=${encodeURIComponent(status)}`
@@ -665,6 +823,7 @@ export const api = {
         method: "POST",
         headers: token ? { Authorization: `Bearer ${token}` } : {},
         body: form,
+        credentials: "include",
       });
     } catch (err) {
       if (isAbortError(err)) {
@@ -696,7 +855,10 @@ export const api = {
     try {
       res = await fetch(
         `/api/projects/${sessionId}/uploads/${encodeURIComponent(documentId)}/download`,
-        { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+        {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          credentials: "include",
+        },
       );
     } catch (err) {
       if (isAbortError(err)) {
@@ -724,16 +886,8 @@ export const api = {
     );
   },
 
-  /**
-   * Streams a chat turn via SSE, invoking onEvent for each parsed event
-   * as it arrives. Uses fetch + a manual reader (not EventSource) because
-   * this is a POST with an Authorization header and a JSON body -
-   * EventSource only supports GET with no custom headers.
-   *
-   * The trailing buffer is flushed after the stream closes, so an event
-   * whose `\n\n` terminator never arrived (because the connection ended
-   * immediately after the last chunk) is still dispatched.
-   */
+  // --- Chat SSE ---
+
   async streamChat(
     message: string,
     sessionId: string | null,
@@ -759,6 +913,7 @@ export const api = {
           prefer_web: preferWeb ?? false,
         }),
         signal,
+        credentials: "include",
       });
     } catch (err) {
       if (isAbortError(err)) {
@@ -797,8 +952,6 @@ export const api = {
         for (const event of events) onEvent(event);
       }
 
-      // Flush any event whose terminating blank line never arrived.
-      // `parseSseChunk` needs a separator, so we append one.
       if (buffer.trim()) {
         const { events } = parseSseChunk(buffer + "\n\n");
         for (const event of events) onEvent(event);
