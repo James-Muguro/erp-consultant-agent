@@ -23,7 +23,8 @@ Coverage:
 Fixtures:
   * client       TestClient entered as a context manager so the
                  lifespan shutdown hook runs per test.
-  * auth_headers a fresh user per call.
+  * auth_headers a fresh user per call, returned as a Bearer header
+                 dict ready to pass to httpx.
   * report_session
                  starts a project, yields its id, deletes it on
                  teardown.
@@ -32,6 +33,10 @@ Signup note:
   Every signup uses account_type='functional_consultant'. That role
   holds DOCUMENTS_GENERATE and PROJECT_CREATE, which are required by
   the report route and the fixture's project creation.
+
+  The auth flow used here is: signup → verify-email → login →
+  verify-otp. `signup_and_authenticate` from tests._auth_helpers
+  encapsulates that flow and returns the access token.
 """
 from __future__ import annotations
 
@@ -42,6 +47,7 @@ from fastapi.testclient import TestClient
 
 from src.orchestrator_api import app
 from src.memory import agent_memory
+from tests._auth_helpers import signup_and_authenticate
 
 
 # ---------------------------------------------------------------------------
@@ -59,17 +65,10 @@ def client():
 def auth_headers(client):
     """Sign up a fresh, unique user and return Authorization headers."""
     email = f"test-{uuid.uuid4().hex[:12]}@example.com"
-    r = client.post(
-        '/api/auth/signup',
-        json={
-            'email': email,
-            'password': 'testpassword123',
-            'account_type': 'functional_consultant',
-        },
+    token = signup_and_authenticate(
+        client, email=email, account_type="functional_consultant"
     )
-    assert r.status_code == 200, r.text
-    token = r.json()['access_token']
-    return {'Authorization': f'Bearer {token}'}
+    return {"Authorization": f"Bearer {token}"}
 
 
 @pytest.fixture
@@ -110,15 +109,10 @@ class TestReportAuthorization:
         else's session. The endpoint returns 404 (not 403) so it does
         not reveal whether the session exists."""
         other_email = f"test-{uuid.uuid4().hex[:12]}@example.com"
-        r = client.post(
-            '/api/auth/signup',
-            json={
-                'email': other_email,
-                'password': 'testpassword123',
-                'account_type': 'functional_consultant',
-            },
+        other_token = signup_and_authenticate(
+            client, email=other_email, account_type="functional_consultant"
         )
-        other_headers = {'Authorization': f"Bearer {r.json()['access_token']}"}
+        other_headers = {"Authorization": f"Bearer {other_token}"}
 
         r = client.post(
             f'/api/projects/{report_session}/report',

@@ -59,6 +59,7 @@ import uuid
 from contextlib import contextmanager
 from typing import Iterator, List
 from unittest.mock import MagicMock, patch
+from tests._auth_helpers import signup_and_authenticate
 
 import boto3
 import pytest
@@ -112,18 +113,16 @@ def _signup(
     client: TestClient,
     email: str,
     account_type: str = "functional_consultant",
+    organization_name: str | None = None,
 ) -> str:
-    """Sign up with an explicit account type and return the access token."""
-    r = client.post(
-        "/api/auth/signup",
-        json={
-            "email": email,
-            "password": "testpassword123",
-            "account_type": account_type,
-        },
+    """Sign up, complete verification and MFA, and return the access
+    token."""
+    return signup_and_authenticate(
+        client,
+        email=email,
+        account_type=account_type,
+        organization_name=organization_name,
     )
-    assert r.status_code == 200, r.text
-    return r.json()["access_token"]
 
 
 def _user_id_for_email(email: str) -> str:

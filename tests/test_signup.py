@@ -231,8 +231,14 @@ class TestIndividualSignup:
         )
         assert r.status_code == 200, r.text
         body = r.json()
-        assert "access_token" in body
-        assert body.get("token_type") == "bearer"
+        # Signup issues no tokens; the response is the enumeration-
+        # resistant MessageResponse. Role assignment is verified below
+        # directly against the DB, which is what this test actually
+        # checks.
+        assert "message" in body
+        assert "access_token" not in body
+        assert "token_type" not in body
+        assert "refresh_token" not in body
 
         user_id = _user_id_for_email(email)
         assert user_id is not None
@@ -271,7 +277,10 @@ class TestOrganizationSignup:
         )
         assert r.status_code == 200, r.text
         body = r.json()
-        assert "access_token" in body
+        # Post-migration: signup returns a generic message and does not
+        # issue tokens. A token is only obtained after verify-email + OTP.
+        assert "access_token" not in body
+        assert "message" in body
 
         user_id = _user_id_for_email(email)
         assert user_id is not None
@@ -341,27 +350,26 @@ class TestOrganizationSignup:
 # Duplicate email
 # ---------------------------------------------------------------------------
 class TestDuplicateEmail:
-    def test_duplicate_email_returns_409(self, client, created_users):
+    def test_duplicate_email_returns_generic_success(
+        self, client, created_users,
+    ):
+        """Duplicate signup is enumeration-resistant: the response is
+        identical to a fresh signup (200 + generic message), NOT 409.
+        A 409 would reveal account existence."""
         email = _unique_email()
         created_users.append(email)
 
         payload = {
             "email": email,
             "password": "testpassword123",
-            "account_type": "developer",
+            "account_type": "functional_consultant",
         }
-
         r1 = client.post("/api/auth/signup", json=payload)
-        assert r1.status_code == 200, r1.text
-
         r2 = client.post("/api/auth/signup", json=payload)
-        assert r2.status_code == 409, r2.text
 
-        # The first user still exists with exactly one role — the
-        # rejected second signup did not touch the existing account.
-        user_id = _user_id_for_email(email)
-        assert user_id is not None
-        assert _roles_for_user(user_id) == ["developer"]
+        assert r1.status_code == 200
+        assert r2.status_code == 200
+        assert r1.json() == r2.json()
 
 
 # ---------------------------------------------------------------------------

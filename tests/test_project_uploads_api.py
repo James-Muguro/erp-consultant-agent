@@ -62,6 +62,7 @@ import boto3
 import pytest
 from fastapi.testclient import TestClient
 from moto import mock_aws
+from tests._auth_helpers import signup_and_authenticate
 
 from src.config.settings import settings
 from src.memory import agent_memory
@@ -84,19 +85,11 @@ def client():
 
 @pytest.fixture
 def auth_headers(client):
-    """Sign up a fresh, unique user and return Authorization headers."""
-    email = f"test-{uuid.uuid4().hex[:12]}@example.com"
-    r = client.post(
-        '/api/auth/signup',
-        json={
-            'email': email,
-            'password': 'testpassword123',
-            'account_type': 'functional_consultant',
-        },
+    email = f"upload-{uuid.uuid4().hex[:12]}@example.com"
+    token = signup_and_authenticate(
+        client, email=email, account_type="functional_consultant"
     )
-    assert r.status_code == 200, r.text
-    token = r.json()['access_token']
-    return {'Authorization': f'Bearer {token}'}
+    return {"Authorization": f"Bearer {token}"}
 
 
 @pytest.fixture
@@ -178,17 +171,11 @@ class TestUpload:
 
     def test_upload_to_another_users_session_is_rejected(self, client, auth_headers, s3_configured):
         # A second, unrelated user.
-        other_email = f"test-{uuid.uuid4().hex[:12]}@example.com"
-        r = client.post(
-            '/api/auth/signup',
-            json={
-                'email': other_email,
-                'password': 'testpassword123',
-                'account_type': 'functional_consultant',
-            },
+        other_email = f"other-{uuid.uuid4().hex[:12]}@example.com"
+        other_token = signup_and_authenticate(
+            client, email=other_email, account_type="functional_consultant"
         )
-        other_headers = {'Authorization': f"Bearer {r.json()['access_token']}"}
-
+        other_headers = {"Authorization": f"Bearer {other_token}"}
         session_id = _start_project(client, auth_headers)
 
         r = client.post(
@@ -301,16 +288,11 @@ class TestListDownloadDelete:
     def test_list_is_scoped_to_the_owner(self, client, auth_headers, s3_configured):
         """A different user cannot see this session's documents —
         the ownership check returns 404."""
-        other_email = f"test-{uuid.uuid4().hex[:12]}@example.com"
-        r = client.post(
-            '/api/auth/signup',
-            json={
-                'email': other_email,
-                'password': 'testpassword123',
-                'account_type': 'functional_consultant',
-            },
+        other_email = f"other-{uuid.uuid4().hex[:12]}@example.com"
+        other_token = signup_and_authenticate(
+            client, email=other_email, account_type="functional_consultant"
         )
-        other_headers = {'Authorization': f"Bearer {r.json()['access_token']}"}
+        other_headers = {"Authorization": f"Bearer {other_token}"}
 
         session_id = _start_project(client, auth_headers)
 
@@ -337,16 +319,11 @@ class TestListDownloadDelete:
         assert r.content == b'exact original content'
 
     def test_download_another_users_document_is_rejected(self, client, auth_headers, s3_configured):
-        other_email = f"test-{uuid.uuid4().hex[:12]}@example.com"
-        r = client.post(
-            '/api/auth/signup',
-            json={
-                'email': other_email,
-                'password': 'testpassword123',
-                'account_type': 'functional_consultant',
-            },
+        other_email = f"other-{uuid.uuid4().hex[:12]}@example.com"
+        other_token = signup_and_authenticate(
+            client, email=other_email, account_type="functional_consultant"
         )
-        other_headers = {'Authorization': f"Bearer {r.json()['access_token']}"}
+        other_headers = {"Authorization": f"Bearer {other_token}"}
 
         session_id = _start_project(client, auth_headers)
         upload_resp = client.post(

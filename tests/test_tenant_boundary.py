@@ -75,6 +75,7 @@ from typing import Iterator, List, Optional
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
+from tests._auth_helpers import signup_and_authenticate
 
 from src.auth.permissions import OrganizationRole
 from src.db.base import SessionLocal
@@ -117,24 +118,12 @@ def _unique_name(prefix: str) -> str:
 def _signup_individual(
     client: TestClient,
     email: str,
-    account_type: str = "functional_consultant",
 ) -> str:
-    """Sign up an individual account and return the access token.
-
-    Defaults to `functional_consultant`, whose permission set includes
-    PROJECT_CREATE, PROJECT_READ, PROJECT_EDIT, and PROJECT_DELETE, so
-    callers reach the tenant-boundary check on every project-scoped
-    route exercised in this file."""
-    r = client.post(
-        "/api/auth/signup",
-        json={
-            "email": email,
-            "password": "testpassword123",
-            "account_type": account_type,
-        },
+    """Sign up, complete verification and MFA, and return the access
+    token."""
+    return signup_and_authenticate(
+        client, email=email, account_type="functional_consultant"
     )
-    assert r.status_code == 200, r.text
-    return r.json()["access_token"]
 
 
 def _user_id_for_email(email: str) -> Optional[str]:

@@ -58,6 +58,7 @@ from typing import Iterator, List, Optional, Tuple
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
+from tests._auth_helpers import signup_and_authenticate
 
 from src.db.base import SessionLocal
 from src.db.models import (
@@ -132,17 +133,11 @@ def _signup_individual(
     email: str,
     account_type: str,
 ) -> str:
-    """Sign up an individual account and return the access token."""
-    r = client.post(
-        "/api/auth/signup",
-        json={
-            "email": email,
-            "password": "testpassword123",
-            "account_type": account_type,
-        },
+    """Sign up an individual account, complete verification and MFA,
+    and return the access token."""
+    return signup_and_authenticate(
+        client, email=email, account_type=account_type
     )
-    assert r.status_code == 200, r.text
-    return r.json()["access_token"]
 
 
 def _signup_organization(
@@ -150,18 +145,14 @@ def _signup_organization(
     email: str,
     org_name: str,
 ) -> str:
-    """Sign up an organization account and return the access token."""
-    r = client.post(
-        "/api/auth/signup",
-        json={
-            "email": email,
-            "password": "testpassword123",
-            "account_type": "organization",
-            "organization_name": org_name,
-        },
+    """Sign up an organization account, complete verification and MFA,
+    and return the access token."""
+    return signup_and_authenticate(
+        client,
+        email=email,
+        account_type="organization",
+        organization_name=org_name,
     )
-    assert r.status_code == 200, r.text
-    return r.json()["access_token"]
 
 
 # ---------------------------------------------------------------------------
