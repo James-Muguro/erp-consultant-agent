@@ -29,9 +29,13 @@ class Settings(BaseSettings):
       * SerpApi key is required only when `enable_google_search` is on.
       * The per-phase timeout must be at least as long as the worst-case
         LLM fallback chain.
-      * SMTP configuration is required when email delivery is enabled.
+      * Email transport configuration is required when email delivery is
+        enabled, and differs by `email_provider`: SMTP fields for
+        `smtp`, HTTP API fields for `http_api`. Only the fields for the
+        selected transport are required; the other transport's fields
+        may be left unset.
       * SMTP must use exactly one of TLS or SSL, and at least one when
-        email delivery is enabled.
+        email delivery is enabled with the SMTP transport.
       * Secure cookies are required outside the development environment.
 
     Provider model identifiers are environment-driven only. There are no
@@ -346,32 +350,51 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------ #
-    # Email delivery (SMTP)
+    # Email delivery — transport selection
     # ------------------------------------------------------------------ #
-    # The current provider is Gmail SMTP. Gmail SMTP has known constraints
-    # that are documented here rather than only in external docs:
+    # There are exactly two supported transports: SMTP and HTTP API.
+    # `email_provider` selects which one src.email.service dispatches to;
+    # it never names a vendor. A given vendor is a configuration of one
+    # of these two transports (e.g. Gmail and Outlook both configure
+    # 'smtp'; Brevo, SendGrid, and Postmark's non-signing APIs configure
+    # 'http_api'). Vendors requiring request-signing (AWS SES's HTTP
+    # API) or OAuth2 token exchange (Microsoft Graph) are out of scope
+    # for the 'http_api' transport - those need their own module.
+    email_delivery_enabled: bool = Field(
+        default=False,
+        description="Master gate for email sending. When False, no "
+                    "transport's configuration is validated and no email is "
+                    "sent. Set to True (and fully configure the selected "
+                    "email_provider) to enable email verification, "
+                    "password reset, and MFA flows.",
+    )
+    email_provider: str = Field(
+        default="smtp",
+        description="Which transport src.email.service dispatches to: "
+                    "'smtp' or 'http_api'. Only that transport's "
+                    "configuration fields are required when "
+                    "email_delivery_enabled is True.",
+    )
+
+    # ------------------------------------------------------------------ #
+    # Email delivery — SMTP transport
+    # ------------------------------------------------------------------ #
+    # Works with any standard SMTP server (Gmail, Outlook/Microsoft 365,
+    # Zoho, a corporate relay, a vendor's own SMTP endpoint) purely
+    # through these fields; src/email/smtp_provider.py never names a
+    # vendor. Required only when email_provider == 'smtp'.
     #
+    # Gmail-specific notes, since Gmail is a common first choice here:
     #   * The sending account MUST have 2-Step Verification enabled.
     #   * Authentication uses an APP PASSWORD, not the account password.
     #   * Gmail enforces daily sending limits (roughly a few hundred per
     #     day for a personal account; lower for a fresh account).
     #   * Deliverability and reputation are materially weaker than a
-    #     dedicated transactional email provider (SendGrid, SES,
-    #     Postmark). Messages may be throttled or filtered.
-    #
-    # The application talks to email through an interface
-    # (send_email(to, subject, body)); the Gmail SMTP client is one
-    # implementation behind that interface. Switching providers later
-    # does not change authentication call sites.
+    #     dedicated transactional email provider - consider the
+    #     'http_api' transport with a provider such as Brevo, SendGrid,
+    #     or Postmark for production volume.
     #
     # No credentials are hardcoded; all values come from the environment.
-    email_delivery_enabled: bool = Field(
-        default=False,
-        description="Gate for SMTP configuration validation. When False, "
-                    "SMTP fields are not required and no email is sent. Set "
-                    "to True (and configure SMTP) to enable the email "
-                    "verification and MFA flows.",
-    )
     smtp_host: Optional[str] = Field(
         default=None,
         description="SMTP server hostname. For Gmail: smtp.gmail.com.",
@@ -409,6 +432,68 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------ #
+    # Email delivery — HTTP API transport
+    # ------------------------------------------------------------------ #
+    # Works with any transactional email API that accepts a JSON POST
+    # body and a static auth header (Brevo, SendGrid, Postmark, Mailgun,
+    # and most others) purely through these fields;
+    # src/email/http_api_provider.py never names a vendor. Required
+    # only when email_provider == 'http_api'.
+    #
+    # email_http_body_template is the vendor's JSON payload shape, with
+    # {{to}}, {{subject}}, {{body}}, {{from_email}}, {{from_name}}, and
+    # {{api_key}} as substitutable placeholders - substitution happens
+    # on the parsed JSON structure, not on raw text, so a subject or
+    # body containing quotes or newlines cannot break the payload.
+    email_http_api_url: Optional[str] = Field(
+        default=None,
+        description="The vendor's send-email endpoint URL.",
+    )
+    email_http_api_key: Optional[str] = Field(
+        default=None,
+        description="API key used to authenticate to the vendor's endpoint. "
+                    "Never logged.",
+    )
+    email_http_from_address: Optional[str] = Field(
+        default=None,
+        description="Sender address, substituted into the request as "
+                    "{{from_email}}.",
+    )
+    email_http_from_name: Optional[str] = Field(
+        default=None,
+        description="Sender display name, substituted into the request as "
+                    "{{from_name}}. Optional - leave unset if the vendor "
+                    "does not require it.",
+    )
+    email_http_body_template: Optional[str] = Field(
+        default=None,
+        description="The vendor's JSON request-body shape, as a JSON "
+                    "string, with {{to}}/{{subject}}/{{body}}/{{from_email}}/"
+                    "{{from_name}}/{{api_key}} placeholders. Must parse as "
+                    "valid JSON.",
+    )
+    email_http_extra_headers: Optional[str] = Field(
+        default=None,
+        description="Optional additional request headers, as a JSON "
+                    "object string. Values may also use the same "
+                    "placeholders as email_http_body_template. Must parse "
+                    "as valid JSON when set.",
+    )
+    email_http_auth_header_name: Optional[str] = Field(
+        default=None,
+        description="Name of the HTTP header carrying the API key (e.g. "
+                    "'api-key', 'Authorization'). Defaults to 'api-key' at "
+                    "the provider layer when unset.",
+    )
+    email_http_auth_header_prefix: Optional[str] = Field(
+        default=None,
+        description="Optional prefix prepended to the API key in the auth "
+                    "header (e.g. 'Bearer ' for an Authorization header). "
+                    "Defaults to no prefix at the provider layer when "
+                    "unset.",
+    )
+
+    # ------------------------------------------------------------------ #
     # Properties
     # ------------------------------------------------------------------ #
     @property
@@ -442,14 +527,30 @@ class Settings(BaseSettings):
     @property
     def smtp_configured(self) -> bool:
         """True when every SMTP field required to actually send is set.
-        Independent of email_delivery_enabled - a caller can be enabled
-        but misconfigured, in which case this returns False and the
-        startup validator would already have raised."""
+        Independent of email_delivery_enabled/email_provider - a caller
+        can be enabled and pointed at the SMTP transport but
+        misconfigured, in which case this returns False and the startup
+        validator would already have raised."""
         return bool(
             self.smtp_host
             and self.smtp_username
             and self.smtp_password
             and self.smtp_from_address
+        )
+
+    @property
+    def email_http_api_configured(self) -> bool:
+        """True when every HTTP API field required to actually send is
+        set. Independent of email_delivery_enabled/email_provider, same
+        rationale as smtp_configured. Does not validate that
+        email_http_body_template/email_http_extra_headers parse as JSON
+        - that check lives in http_api_provider.validate_configuration,
+        which is the single source of truth for HTTP API readiness."""
+        return bool(
+            self.email_http_api_url
+            and self.email_http_api_key
+            and self.email_http_from_address
+            and self.email_http_body_template
         )
 
     # ------------------------------------------------------------------ #
@@ -496,6 +597,20 @@ class Settings(BaseSettings):
         if any(c.isspace() for c in stripped):
             raise ValueError(f"model name must not contain whitespace: {v!r}")
         return stripped
+
+    @field_validator("email_provider")
+    @classmethod
+    def _validate_email_provider(cls, v: str) -> str:
+        """The transport name is validated here, independent of whether
+        email delivery is enabled, so a typo in EMAIL_PROVIDER is caught
+        at startup even in a deployment that hasn't turned on email
+        delivery yet."""
+        normalized = (v or "").strip().lower()
+        if normalized not in ("smtp", "http_api"):
+            raise ValueError(
+                f"EMAIL_PROVIDER must be 'smtp' or 'http_api' (got {v!r})."
+            )
+        return normalized
 
     @field_validator("output_dir", "logs_dir")
     @classmethod
@@ -578,39 +693,62 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_smtp_tls_ssl(self) -> "Settings":
-        """TLS and SSL modes are mutually exclusive; at least one must be
-        in use when email delivery is enabled."""
+        """TLS and SSL modes are mutually exclusive. At least one must be
+        in use when email delivery is enabled with the SMTP transport
+        specifically - this check no longer fires for the http_api
+        transport, which has no TLS/SSL concept of its own (httpx
+        handles TLS transparently over HTTPS)."""
         if self.smtp_use_tls and self.smtp_use_ssl:
             raise ValueError(
                 "smtp_use_tls and smtp_use_ssl are mutually exclusive."
             )
-        if self.email_delivery_enabled and not (self.smtp_use_tls or self.smtp_use_ssl):
+        if (
+            self.email_delivery_enabled
+            and self.email_provider == "smtp"
+            and not (self.smtp_use_tls or self.smtp_use_ssl)
+        ):
             raise ValueError(
-                "SMTP must use TLS or SSL when email_delivery_enabled is True."
+                "SMTP must use TLS or SSL when email_delivery_enabled is "
+                "True and email_provider is 'smtp'."
             )
         return self
 
     @model_validator(mode="after")
-    def _validate_smtp_when_enabled(self) -> "Settings":
-        """Require a complete SMTP configuration when email delivery is
-        enabled. The error names every missing field so the operator can
-        fix the configuration in one pass rather than one variable at a
-        time."""
+    def _validate_email_transport_when_enabled(self) -> "Settings":
+        """Require a complete configuration for whichever transport is
+        selected, when email delivery is enabled. The error names every
+        missing field for that transport so the operator can fix the
+        configuration in one pass rather than one variable at a time.
+        The other transport's fields are never required, regardless of
+        whether they happen to be set."""
         if not self.email_delivery_enabled:
             return self
+
         missing: List[str] = []
-        if not self.smtp_host:
-            missing.append("smtp_host")
-        if not self.smtp_username:
-            missing.append("smtp_username")
-        if not self.smtp_password:
-            missing.append("smtp_password")
-        if not self.smtp_from_address:
-            missing.append("smtp_from_address")
+        if self.email_provider == "smtp":
+            if not self.smtp_host:
+                missing.append("smtp_host")
+            if not self.smtp_username:
+                missing.append("smtp_username")
+            if not self.smtp_password:
+                missing.append("smtp_password")
+            if not self.smtp_from_address:
+                missing.append("smtp_from_address")
+        elif self.email_provider == "http_api":
+            if not self.email_http_api_url:
+                missing.append("email_http_api_url")
+            if not self.email_http_api_key:
+                missing.append("email_http_api_key")
+            if not self.email_http_from_address:
+                missing.append("email_http_from_address")
+            if not self.email_http_body_template:
+                missing.append("email_http_body_template")
+
         if missing:
             raise ValueError(
-                "email_delivery_enabled=True requires the following SMTP "
-                f"settings: {', '.join(missing)}."
+                f"email_delivery_enabled=True with email_provider="
+                f"{self.email_provider!r} requires the following settings: "
+                + ", ".join(missing) + "."
             )
         return self
 
