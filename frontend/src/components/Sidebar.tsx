@@ -1,6 +1,14 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
 import {
   Archive,
+  Briefcase,
+  Building2,
   ChevronDown,
   LogOut,
   MessageSquarePlus,
@@ -11,14 +19,21 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import { Link, useLocation } from "react-router-dom";
+import { Inbox as InboxIcon } from "lucide-react";
 import type { ProjectSummary } from "../types";
 import { useAuth } from "../context/useAuth";
+import { useCapabilities } from "../auth/useCapabilities";
+import { useInboxCount } from "../hooks/useInboxCount";
 import { Avatar } from "./Avatar";
+
 
 export function Sidebar({
   projects,
   activeSessionId,
+  activeOrganizationId,
   onSelect,
+  onSelectOrganization,
   onNewChat,
   onNewProject,
   onRename,
@@ -32,7 +47,9 @@ export function Sidebar({
 }: {
   projects: ProjectSummary[];
   activeSessionId: string | null;
+  activeOrganizationId: string | null;
   onSelect: (sessionId: string) => void;
+  onSelectOrganization: (organizationId: string) => void;
   onNewChat: () => void;
   onNewProject: () => void;
   onRename: (sessionId: string, newName: string) => void;
@@ -45,11 +62,28 @@ export function Sidebar({
   onClose: () => void;
 }) {
   const { user, logout } = useAuth();
+  const capabilities = useCapabilities();
+  const location = useLocation();
+  const onInbox =
+    location.pathname === "/inbox" || location.pathname.startsWith("/inbox/");
+  const onOpportunities =
+    location.pathname === "/opportunities" ||
+    location.pathname.startsWith("/opportunities/");
   const [query, setQuery] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingValue, setEditingValue] = useState("");
   const [profileOpen, setProfileOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
+
+
+  // Capability-based visibility. Every gate goes through the single
+  // central layer; no role strings anywhere in this component.
+  const canChat = capabilities.can("chat:submit");
+  const canCreateProject = capabilities.can("project:create");
+  const canReadInbox = capabilities.can("inbox:read");
+  const canSeeOpportunities = capabilities.can("opportunity:read");
+  const { count: inboxCount } = useInboxCount();
+
 
   useEffect(() => {
     if (!isOpen) return;
@@ -60,20 +94,30 @@ export function Sidebar({
     return () => window.removeEventListener("keydown", handleKey);
   }, [isOpen, onClose]);
 
+
   function selectAndClose(sessionId: string) {
     onSelect(sessionId);
     onClose();
   }
+
+
+  function selectOrgAndClose(organizationId: string) {
+    onSelectOrganization(organizationId);
+    onClose();
+  }
+
 
   function newChatAndClose() {
     onNewChat();
     onClose();
   }
 
+
   function newProjectAndClose() {
     onNewProject();
     onClose();
   }
+
 
   function openSettingsAndClose() {
     setProfileOpen(false);
@@ -81,17 +125,20 @@ export function Sidebar({
     onClose();
   }
 
+
   const filtered = useMemo(() => {
     if (!query.trim()) return projects;
     const q = query.toLowerCase();
     return projects.filter((p) => p.project_name.toLowerCase().includes(q));
   }, [projects, query]);
 
+
   function startEditing(sessionId: string, currentName: string) {
     setEditingId(sessionId);
     setEditingValue(currentName);
     requestAnimationFrame(() => inputRef.current?.select());
   }
+
 
   function commitEdit(sessionId: string, originalName: string) {
     const trimmed = editingValue.trim();
@@ -100,6 +147,7 @@ export function Sidebar({
       onRename(sessionId, trimmed);
     }
   }
+
 
   function handleEditKeyDown(
     e: KeyboardEvent<HTMLInputElement>,
@@ -115,7 +163,10 @@ export function Sidebar({
     }
   }
 
+
   const displayName = user?.name || "Your profile";
+  const organizations = user?.organizations ?? [];
+
 
   return (
     <>
@@ -144,20 +195,24 @@ export function Sidebar({
               <X size={18} />
             </button>
           </div>
-          <button
-            onClick={newChatAndClose}
-            className="mt-3 flex w-full items-center justify-center gap-2 rounded-md bg-accent py-2.5 text-sm font-medium text-white transition-colors hover:bg-accent-strong"
-          >
-            <MessageSquarePlus size={15} />
-            New chat
-          </button>
-          <button
-            onClick={newProjectAndClose}
-            className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-border-strong py-2 text-xs font-medium text-ink-muted transition-colors hover:border-accent hover:text-accent"
-          >
-            <Plus size={13} />
-            New project (structured)
-          </button>
+          {canChat && (
+            <button
+              onClick={newChatAndClose}
+              className="mt-3 flex w-full items-center justify-center gap-2 rounded-md bg-accent py-2.5 text-sm font-medium text-white transition-colors hover:bg-accent-strong"
+            >
+              <MessageSquarePlus size={15} />
+              New chat
+            </button>
+          )}
+          {canCreateProject && (
+            <button
+              onClick={newProjectAndClose}
+              className={`${canChat ? "mt-2" : "mt-3"} flex w-full items-center justify-center gap-1.5 rounded-md border border-border-strong py-2 text-xs font-medium text-ink-muted transition-colors hover:border-accent hover:text-accent`}
+            >
+              <Plus size={13} />
+              New project (structured)
+            </button>
+          )}
           <button
             onClick={onToggleArchived}
             className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-border-strong py-2 text-xs font-medium text-ink-muted transition-colors hover:border-accent hover:text-accent"
@@ -165,7 +220,43 @@ export function Sidebar({
             <Archive size={13} />
             {showArchived ? "Hide archived" : "Show archived"}
           </button>
+          {canReadInbox && (
+            <Link
+              to="/inbox"
+              onClick={onClose}
+              className={`mt-2 flex w-full items-center justify-between gap-2 rounded-md border px-3 py-2 text-xs font-medium transition-colors ${
+                onInbox
+                  ? "border-accent bg-accent-soft text-accent-strong"
+                  : "border-border-strong text-ink-muted hover:border-accent hover:text-accent"
+              }`}
+            >
+              <span className="flex items-center gap-1.5">
+                <InboxIcon size={13} />
+                Inbox
+              </span>
+              {inboxCount > 0 && (
+                <span className="rounded-full bg-accent px-1.5 py-0.5 text-[10px] font-medium text-white">
+                  {inboxCount > 99 ? "99+" : inboxCount}
+                </span>
+              )}
+            </Link>
+          )}
+          {canSeeOpportunities && (
+            <Link
+              to="/opportunities"
+              onClick={onClose}
+              className={`mt-2 flex w-full items-center gap-1.5 rounded-md border px-3 py-2 text-xs font-medium transition-colors ${
+                onOpportunities
+                  ? "border-accent bg-accent-soft text-accent-strong"
+                  : "border-border-strong text-ink-muted hover:border-accent hover:text-accent"
+              }`}
+            >
+              <Briefcase size={13} />
+              Opportunities
+            </Link>
+          )}
         </div>
+
 
         <div className="border-b border-border p-3">
           <div className="flex items-center gap-2 rounded-md border border-border-strong bg-paper px-2.5 py-2">
@@ -179,6 +270,44 @@ export function Sidebar({
             />
           </div>
         </div>
+
+
+        {/* Organizations section. Additive context: application-role
+            navigation below is not replaced by this. Shown whenever the
+            user holds at least one membership. */}
+        {organizations.length > 0 && (
+          <div className="border-b border-border p-3">
+            <h2 className="mb-2 px-1 text-[10px] font-semibold uppercase tracking-wider text-ink-faint">
+              Organizations
+            </h2>
+            <ul className="space-y-0.5">
+              {organizations.map((org) => {
+                const isActive = org.id === activeOrganizationId;
+                return (
+                  <li key={org.id}>
+                    <button
+                      onClick={() => selectOrgAndClose(org.id)}
+                      className={`flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors ${
+                        isActive
+                          ? "bg-accent-soft text-accent-strong"
+                          : "text-ink hover:bg-paper"
+                      }`}
+                    >
+                      <Building2 size={14} className="shrink-0" aria-hidden="true" />
+                      <span className="min-w-0 flex-1 truncate font-medium">
+                        {org.name}
+                      </span>
+                      <span className="shrink-0 text-[10px] uppercase tracking-wide text-ink-faint">
+                        {org.role}
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
+
 
         <nav className="min-h-0 flex-1 overflow-y-auto p-2">
           {filtered.length === 0 && (
@@ -279,6 +408,7 @@ export function Sidebar({
             })}
           </ul>
         </nav>
+
 
         <div className="relative border-t border-border p-3">
           {profileOpen && (

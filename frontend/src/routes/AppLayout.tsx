@@ -6,6 +6,8 @@ import { NewProjectModal } from "../components/NewProjectModal";
 import { useConfirm } from "../context/useConfirm";
 import { api } from "../api/client";
 import { ErrorBoundary } from "./ErrorBoundary";
+import { ProjectTabs } from "./ProjectTabs";
+import { matchRouteConfig } from "./routeConfig";
 import type { ProjectSummary } from "../types";
 
 function RouteContentError({
@@ -46,7 +48,10 @@ export function AppLayout() {
   const navigate = useNavigate();
   const location = useLocation();
   const confirm = useConfirm();
-  const { sessionId } = useParams<{ sessionId?: string }>();
+  const { sessionId, orgId } = useParams<{
+    sessionId?: string;
+    orgId?: string;
+  }>();
 
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [loadingProjects, setLoadingProjects] = useState(true);
@@ -55,9 +60,12 @@ export function AppLayout() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showNewProject, setShowNewProject] = useState(false);
 
-  // Load (or reload) the project list. State updates happen only after
-  // the awaited call, so this can be invoked from the mount effect
-  // without triggering react/set-state-in-effect.
+  // The route config is the single source of truth for whether the
+  // current route sits inside a project workspace. Sidebar and main
+  // window both consume this signal; neither decides independently.
+  const routeConfig = matchRouteConfig(location.pathname);
+  const hasWorkspace = routeConfig?.hasWorkspace ?? false;
+
   const refreshProjects = useCallback(async () => {
     try {
       const res = await api.listProjects(showArchived);
@@ -115,6 +123,14 @@ export function AppLayout() {
   const handleSelectProject = useCallback(
     (id: string) => {
       navigate(`/p/${id}`);
+      setSidebarOpen(false);
+    },
+    [navigate],
+  );
+
+  const handleSelectOrganization = useCallback(
+    (organizationId: string) => {
+      navigate(`/org/${organizationId}`);
       setSidebarOpen(false);
     },
     [navigate],
@@ -205,7 +221,9 @@ export function AppLayout() {
       <Sidebar
         projects={projects}
         activeSessionId={sessionId ?? null}
+        activeOrganizationId={orgId ?? null}
         onSelect={handleSelectProject}
+        onSelectOrganization={handleSelectOrganization}
         onNewChat={handleNewChat}
         onNewProject={handleNewProject}
         onRename={handleRenameProject}
@@ -247,6 +265,8 @@ export function AppLayout() {
           </div>
         ) : (
           <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+            {/* Workspace chrome decided once, here, from route metadata. */}
+            {hasWorkspace && sessionId && <ProjectTabs sessionId={sessionId} />}
             <ErrorBoundary
               key={location.pathname}
               fallback={(error, reset) => (

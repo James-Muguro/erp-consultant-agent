@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { ChatPanel } from "../components/ChatPanel";
-import { ProjectTabs } from "./ProjectTabs";
 import { useChat } from "../hooks/useChat";
 import { api, ApiError } from "../api/client";
 import type { ChatMessage, NextAction } from "../types";
@@ -36,7 +35,8 @@ function ChatRouteInner({
   >(null);
 
   const navState = location.state as { nextAction?: NextAction | null } | null;
-  const projectStartAction = mode === "project" ? navState?.nextAction ?? null : null;
+  const projectStartAction =
+    mode === "project" ? navState?.nextAction ?? null : null;
 
   const handleSessionCreated = useCallback(
     (id: string) => {
@@ -90,7 +90,11 @@ function ChatRouteInner({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {mode === "project" && sessionId && <ProjectTabs sessionId={sessionId} />}
+      {/*
+       * ProjectTabs is rendered by AppLayout based on route metadata.
+       * This component renders only chat content; chrome is not its
+       * responsibility.
+       */}
       {loadError ? (
         <div className="flex flex-1 items-center justify-center px-6">
           <p className="text-sm text-danger">{loadError}</p>

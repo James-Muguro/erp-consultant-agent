@@ -36,6 +36,28 @@ const SAMPLE_USER: User = {
   created_at: "2026-01-01T00:00:00Z",
   roles: ["developer"],
   organizations: [],
+  permissions: [
+    "chat:submit",
+    "documents:generate",
+    "documents:read",
+    "feedback:submit",
+    "health:read",
+    "issues:read",
+    "issues:write",
+    "phase:execute",
+    "process_steps:read",
+    "profile:edit",
+    "project:read",
+    "requirements:read",
+    "solution:read",
+    "solution:record_actual",
+    "testing:read",
+    "testing:write",
+    "training:read",
+    "uploads:read",
+    "uploads:write",
+  ],
+  organization_privileges: {},
 };
 
 function wrapper({ children }: { children: ReactNode }) {

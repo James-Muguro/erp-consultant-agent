@@ -5,12 +5,9 @@ import { MfaPage } from "./pages/MfaPage";
 import { VerifyEmailPage } from "./pages/VerifyEmailPage";
 import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
 import { ResetPasswordPage } from "./pages/ResetPasswordPage";
-import { SettingsPage } from "./pages/SettingsPage";
 import { RequireAuth } from "./routes/RequireAuth";
 import { AppLayout } from "./routes/AppLayout";
-import { ProjectListRoute } from "./routes/ProjectListRoute";
-import { ChatRoute } from "./routes/ChatRoute";
-import { WorkspaceRoute } from "./routes/WorkspaceRoute";
+import { ROUTES } from "./routes/routeConfig";
 
 export default function App() {
   const { user, loading } = useAuth();
@@ -39,7 +36,9 @@ export default function App() {
       <Route path="/forgot-password" element={<ForgotPasswordPage />} />
       <Route path="/reset-password" element={<ResetPasswordPage />} />
 
-      {/* Authenticated workspace. */}
+      {/* Authenticated routes. Route definitions come from
+          routeConfig.tsx, which is also the source of truth consulted
+          by AppLayout (chrome) and RequireAuth (access). */}
       <Route
         element={
           <RequireAuth>
@@ -47,13 +46,9 @@ export default function App() {
           </RequireAuth>
         }
       >
-        <Route path="/" element={<ProjectListRoute />} />
-        <Route path="/settings" element={<SettingsPage />} />
-        <Route path="/chat" element={<ChatRoute mode="adhoc" />} />
-        <Route path="/chat/:sessionId" element={<ChatRoute mode="adhoc" />} />
-        <Route path="/p/:sessionId" element={<WorkspaceRoute />} />
-        <Route path="/p/:sessionId/:tab" element={<WorkspaceRoute />} />
-        <Route path="/p/:sessionId/chat" element={<ChatRoute mode="project" />} />
+        {ROUTES.map((route) => (
+          <Route key={route.path} path={route.path} element={route.element} />
+        ))}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

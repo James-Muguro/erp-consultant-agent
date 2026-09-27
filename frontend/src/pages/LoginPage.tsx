@@ -20,8 +20,8 @@ const ACCOUNT_TYPE_OPTIONS: { value: AccountType; label: string; hint: string }[
     hint: "Solution design and implementation work, with read access to requirements.",
   },
   {
-    value: "marketer",
-    label: "Marketer",
+    value: "business_development",
+    label: "Business Development",
     hint: "Case-study view, document generation, and content workflows.",
   },
   {
