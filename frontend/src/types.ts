@@ -2,7 +2,7 @@ export type AccountType =
   | "erp_user"
   | "functional_consultant"
   | "developer"
-  | "marketer"
+  | "business_development"
   | "organization";
 
 export interface SignupPayload {
@@ -28,11 +28,20 @@ export interface User {
   profile_picture_url: string | null;
   created_at: string;
   /** Application roles. Populated from the /me response; empty when the
-   *  user holds no roles (should not happen for a signed-up user). */
+   *  user holds no roles (e.g. an organization-only account). */
   roles: string[];
   /** Organizations the user is a member of. Empty when the user has not
    *  created or joined an organization. */
   organizations: OrganizationSummary[];
+  /** Effective application permissions, computed server-side from the
+   *  union of the permission sets of every role the user holds. The
+   *  frontend treats this list as opaque — no role→permission mapping
+   *  is duplicated here. */
+  permissions: string[];
+  /** Per-organization privileges, keyed by organization id. Values are
+   *  the privileges granted by the user's membership role in that org
+   *  (e.g. "org:member:manage", "org:settings:edit"). */
+  organization_privileges: Record<string, string[]>;
 }
 
 export interface ProjectSummary {
@@ -168,6 +177,13 @@ export interface TestCase {
   scenario: string;
   priority: string | null;
   expected_result: string | null;
+  status: string;
+  completion_count?: number;
+  last_completed_at?: string | null;
+  last_completed_by_user_id?: string | null;
+  reopen_note?: string | null;
+  reopen_at?: string | null;
+  reopen_by_user_id?: string | null;
 }
 
 export interface TrainingStep {
@@ -186,6 +202,13 @@ export interface ProjectIssue {
   status: string;
   related_object_type: string | null;
   related_object_id: string | null;
+  completion_count?: number;
+  last_completed_at?: string | null;
+  last_completed_by_user_id?: string | null;
+  reopen_note?: string | null;
+  reopen_at?: string | null;
+  reopen_by_user_id?: string | null;
+  resolved_at?: string | null;
 }
 
 export interface ProjectHealth {
@@ -223,3 +246,179 @@ export interface UploadedDocument {
 }
 
 export type ReviewAction = "approved" | "rejected" | "corrected";
+
+export interface ErpUserGrantInfo {
+  artifact_type: string;
+  is_signatory: boolean;
+  is_uat_participant: boolean;
+}
+
+export interface ErpUserArtifactsResponse {
+  session_id: string;
+  grants: ErpUserGrantInfo[];
+}
+
+export interface ErpUserSubmission {
+  id: string;
+  answers: string;
+  submitted_at: string;
+}
+
+export interface ErpUserQuestionnaireState {
+  submitted: boolean;
+  last_submission: ErpUserSubmission | null;
+  template_available: boolean;
+  template_download_path: string | null;
+}
+
+export interface FrdStatus {
+  current_revision_id: string | null;
+  current_filename: string | null;
+  current_generated_at: string | null;
+  signed_revision_id: string | null;
+  signed_action: string | null;
+  signed_at: string | null;
+  signed_by_user_id: string | null;
+  signed_note: string | null;
+  signoff_stale: boolean;
+  is_signatory: boolean;
+  can_sign_off: boolean;
+}
+
+export interface UatScenarioItem {
+  id: string;
+  scenario: string;
+  priority?: string | null;
+  expected_result?: string | null;
+  [key: string]: unknown;
+}
+
+export interface UatScenariosResponse {
+  is_uat_participant: boolean;
+  scenarios: UatScenarioItem[];
+}
+
+export interface TrainingMaterialsResponse {
+  steps: Array<Record<string, unknown>>;
+  documents: Array<{
+    label: string;
+    filename: string;
+    generated_at: string | null;
+    download_path: string;
+  }>;
+}
+
+export interface GrantRecord {
+  id: string;
+  user_id: string;
+  user_email: string | null;
+  user_name: string | null;
+  artifact_type: string;
+  is_signatory: boolean;
+  is_uat_participant: boolean;
+  granted_at: string | null;
+  granted_by_user_id: string | null;
+  granted_by_email: string | null;
+  revoked_at: string | null;
+  revoked_by_user_id: string | null;
+  revoked_by_email: string | null;
+}
+
+export interface EligibleErpUser {
+  user_id: string;
+  email: string;
+  name: string | null;
+  org_role: string;
+}
+
+export interface InboxItem {
+  id: string;
+  source_type: string;
+  source_id: string;
+  session_id: string | null;
+  organization_id: string | null;
+  status: "pending" | "resolved";
+  created_at: string | null;
+  resolved_at: string | null;
+  resolved_by_user_id?: string | null;
+  title: string | null;
+  subtitle: string | null;
+  context_url: string | null;
+}
+
+export interface InboxResponse {
+  items: InboxItem[];
+}
+
+export interface InboxCountResponse {
+  pending: number;
+}
+
+export interface ErpUserRequestItem {
+  id: string;
+  request_type: string;
+  subject: string;
+  body: string;
+  status: "open" | "resolved";
+  created_at: string | null;
+  resolved_at?: string | null;
+  created_by_user_id?: string | null;
+  resolved_by_user_id?: string | null;
+}
+
+export interface Opportunity {
+  id: string;
+  organization_id: string;
+  title: string;
+  client_name: string;
+  status: "draft" | "tor_finalized" | "won" | "lost" | "archived";
+  assigned_consultant_user_id: string | null;
+  converted_session_id: string | null;
+  owner_user_id: string | null;
+  created_by_user_id: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  won_at: string | null;
+}
+
+export interface OpportunityRequirement {
+  id: string;
+  opportunity_id: string;
+  external_code: string | null;
+  category: string | null;
+  description: string;
+  priority: string;
+  req_type: string;
+  acceptance_criteria: string | null;
+  status: string;
+  importance: string | null;
+  fit_response: string | null;
+  fit_response_ai: string | null;
+  fit_response_comment: string | null;
+  fit_response_ai_comment: string | null;
+  ai_draft_status: "pending" | "drafted" | "finalized";
+  source: string | null;
+  source_excerpt: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface EligibleConsultant {
+  user_id: string;
+  email: string;
+  name: string | null;
+  org_role: string;
+}
+
+export interface CaseStudyResponse {
+  session_id: string;
+  project_name: string;
+  module: string;
+  erp_system: string;
+  current_phase: string;
+  completed_phases: string[];
+  created_at: string | null;
+  last_updated: string | null;
+  requirements: { total: number; by_status: Record<string, number> };
+  deliverables: Array<{ phase: string; label: string; filename: string }>;
+}

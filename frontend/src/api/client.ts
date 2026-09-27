@@ -18,6 +18,20 @@ import type {
   SignupPayload,
   MessageResponse,
   PendingLoginResponse,
+  ErpUserArtifactsResponse,
+  ErpUserQuestionnaireState,
+  FrdStatus,
+  UatScenariosResponse,
+  TrainingMaterialsResponse,
+  EligibleErpUser,
+  InboxResponse,
+  InboxCountResponse,
+  ErpUserRequestItem,
+  Opportunity,
+  OpportunityRequirement,
+  EligibleConsultant,
+  CaseStudyResponse,
+  GrantRecord,
 } from "../types";
 import { parseSseChunk } from "./sse";
 
@@ -340,7 +354,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     headers.set("Content-Type", "application/json");
   }
   if (token && !isPublicAuthEndpoint(path)) {
-  headers.set("Authorization", `Bearer ${token}`);
+    headers.set("Authorization", `Bearer ${token}`);
   }
 
   let res: Response;
@@ -411,6 +425,50 @@ function triggerBlobDownload(blob: Blob, filename: string): void {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1_000);
+}
+
+/**
+ * Shared download implementation for the ERP User artifact endpoints.
+ *
+ * Every ERP User download route requires a Bearer access token (the
+ * backend guards on `Depends(get_current_user)`), so a plain anchor
+ * click would fail with 401. This helper fetches with the header,
+ * normalizes errors through the same envelope parser as the rest of
+ * the client, and triggers a client-side blob download on success.
+ *
+ * `onAuthExpired` is fired on 401 so the SPA can transition to
+ * logged-out consistently with every other authenticated request.
+ */
+async function fetchAndDownload(
+  path: string,
+  filename: string,
+  abortMessage: string,
+): Promise<void> {
+  const token = getToken();
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      credentials: "include",
+    });
+  } catch (err) {
+    if (isAbortError(err)) {
+      throw new ApiError({ status: 0, kind: "aborted", message: abortMessage });
+    }
+    throw new ApiError({
+      status: 0,
+      kind: "network",
+      message: "Couldn't reach the server. Check your connection and try again.",
+      developerMessage: err instanceof Error ? err.message : String(err),
+    });
+  }
+  if (!res.ok) {
+    const body = await parseResponseBody(res);
+    const apiError = normalizeErrorResponse(res.status, res.headers, body);
+    if (res.status === 401) fireAuthExpired();
+    throw apiError;
+  }
+  triggerBlobDownload(await res.blob(), filename);
 }
 
 // ---------------------------------------------------------------------------
@@ -641,6 +699,278 @@ export const api = {
     return request<{ deleted: boolean }>("/api/auth/account", { method: "DELETE" });
   },
 
+  // ---- ERP User artifact endpoints --------------------------------------
+  getErpUserArtifacts: (sessionId: string) =>
+    request<ErpUserArtifactsResponse>(
+      `/api/projects/${sessionId}/erp-user/artifacts`,
+    ),
+  getErpUserQuestionnaire: (sessionId: string) =>
+    request<ErpUserQuestionnaireState>(
+      `/api/projects/${sessionId}/erp-user/questionnaire`,
+    ),
+  submitErpUserQuestionnaire: (sessionId: string, answers: string) =>
+    request<{ id: string; submitted_at: string; note: string }>(
+      `/api/projects/${sessionId}/erp-user/questionnaire/submit`,
+      { method: "POST", body: JSON.stringify({ answers }) },
+    ),
+  getErpUserFrd: (sessionId: string) =>
+    request<FrdStatus>(`/api/projects/${sessionId}/erp-user/frd`),
+  signOffErpUserFrd: (
+    sessionId: string,
+    revisionId: string,
+    decision: "confirm" | "request_changes",
+    note?: string,
+  ) =>
+    request<{ signed_revision_id: string; action: string; signoff_stale: boolean }>(
+      `/api/projects/${sessionId}/erp-user/frd/sign-off`,
+      {
+        method: "POST",
+        body: JSON.stringify({ revision_id: revisionId, decision, note }),
+      },
+    ),
+  getErpUserUatScenarios: (sessionId: string) =>
+    request<UatScenariosResponse>(
+      `/api/projects/${sessionId}/erp-user/uat-scenarios`,
+    ),
+  getErpUserTrainingMaterials: (sessionId: string) =>
+    request<TrainingMaterialsResponse>(
+      `/api/projects/${sessionId}/erp-user/training-materials`,
+    ),
+
+  // --- ERP User artifact downloads (Bearer-authenticated) ---
+  //
+  // Plain anchor navigation cannot reach these routes because the
+  // backend requires a Bearer access token, not a cookie. Each method
+  // fetches with the header and triggers a client-side blob download.
+  downloadErpUserFrd: (sessionId: string, filename: string) =>
+    fetchAndDownload(
+      `/api/projects/${sessionId}/erp-user/frd/download`,
+      filename,
+      "Download cancelled.",
+    ),
+  downloadErpUserQuestionnaireTemplate: (
+    sessionId: string,
+    filename: string,
+  ) =>
+    fetchAndDownload(
+      `/api/projects/${sessionId}/erp-user/questionnaire/template/download`,
+      filename,
+      "Download cancelled.",
+    ),
+  downloadErpUserTrainingDocument: (
+    sessionId: string,
+    documentId: string,
+    filename: string,
+  ) =>
+    fetchAndDownload(
+      `/api/projects/${sessionId}/erp-user/training-materials/documents/${encodeURIComponent(documentId)}/download`,
+      filename,
+      "Download cancelled.",
+    ),
+
+    // ---- Opportunity / TOR workflow (Phase 2.5 D1) -----------------------
+  listOpportunities: (organizationId?: string) => {
+    const qs = organizationId
+      ? `?organization_id=${encodeURIComponent(organizationId)}`
+      : "";
+    return request<{ opportunities: Opportunity[] }>(
+      `/api/opportunities${qs}`,
+    );
+  },
+  createOpportunity: (body: {
+    title: string;
+    client_name: string;
+    organization_id?: string;
+  }) =>
+    request<Opportunity>("/api/opportunities", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  getOpportunity: (opportunityId: string) =>
+    request<Opportunity>(
+      `/api/opportunities/${encodeURIComponent(opportunityId)}`,
+    ),
+  updateOpportunity: (
+    opportunityId: string,
+    body: { title?: string; client_name?: string },
+  ) =>
+    request<Opportunity>(
+      `/api/opportunities/${encodeURIComponent(opportunityId)}`,
+      { method: "PATCH", body: JSON.stringify(body) },
+    ),
+  listOpportunityRequirements: (opportunityId: string) =>
+    request<{ requirements: OpportunityRequirement[] }>(
+      `/api/opportunities/${encodeURIComponent(opportunityId)}/requirements`,
+    ),
+  listEligibleConsultants: (opportunityId: string) =>
+    request<{ users: EligibleConsultant[] }>(
+      `/api/opportunities/${encodeURIComponent(opportunityId)}/eligible-consultants`,
+    ),
+  assignConsultant: (opportunityId: string, consultantUserId: string) =>
+    request<Opportunity>(
+      `/api/opportunities/${encodeURIComponent(opportunityId)}/assign-consultant`,
+      {
+        method: "POST",
+        body: JSON.stringify({ consultant_user_id: consultantUserId }),
+      },
+    ),
+  uploadTor: async (opportunityId: string, file: File) => {
+    const token = getToken();
+    const form = new FormData();
+    form.append("file", file);
+    const res = await fetch(
+      `/api/opportunities/${encodeURIComponent(opportunityId)}/tor`,
+      {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: form,
+        credentials: "include",
+      },
+    );
+    const body = await parseResponseBody(res);
+    if (!res.ok) {
+      const apiError = normalizeErrorResponse(res.status, res.headers, body);
+      if (res.status === 401) fireAuthExpired();
+      throw apiError;
+    }
+    return body as {
+      opportunity_id: string;
+      source_format: string;
+      requirements_added: number;
+      requirements: OpportunityRequirement[];
+    };
+  },
+  draftRequirement: (opportunityId: string, requirementId: string) =>
+    request<OpportunityRequirement>(
+      `/api/opportunities/${encodeURIComponent(opportunityId)}/requirements/${encodeURIComponent(requirementId)}/draft`,
+      { method: "POST" },
+    ),
+  finalizeRequirement: (
+    opportunityId: string,
+    requirementId: string,
+    body: { fit_response: string; comment?: string },
+  ) =>
+    request<OpportunityRequirement>(
+      `/api/opportunities/${encodeURIComponent(opportunityId)}/requirements/${encodeURIComponent(requirementId)}`,
+      { method: "PATCH", body: JSON.stringify(body) },
+    ),
+  markTorFinalized: (opportunityId: string) =>
+    request<Opportunity>(
+      `/api/opportunities/${encodeURIComponent(opportunityId)}/mark-tor-finalized`,
+      { method: "POST" },
+    ),
+  generateTenderResponse: (opportunityId: string) =>
+    request<{ opportunity_id: string; document_id: string; filename: string }>(
+      `/api/opportunities/${encodeURIComponent(opportunityId)}/generate-response`,
+      { method: "POST" },
+    ),
+  downloadTenderResponse: async (opportunityId: string, filename: string) => {
+    const token = getToken();
+    const res = await fetch(
+      `/api/opportunities/${encodeURIComponent(opportunityId)}/tender-response/download`,
+      {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        credentials: "include",
+      },
+    );
+    if (!res.ok) {
+      const body = await parseResponseBody(res);
+      const apiError = normalizeErrorResponse(res.status, res.headers, body);
+      if (res.status === 401) fireAuthExpired();
+      throw apiError;
+    }
+    triggerBlobDownload(await res.blob(), filename);
+  },
+  markWon: (
+    opportunityId: string,
+    body: { consultant_user_id?: string; module?: string; erp_system?: string },
+  ) =>
+    request<{
+      opportunity_id: string;
+      session_id: string;
+      consultant_user_id: string;
+    }>(
+      `/api/opportunities/${encodeURIComponent(opportunityId)}/mark-won`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  getCaseStudy: (sessionId: string) =>
+    request<CaseStudyResponse>(
+      `/api/projects/${sessionId}/case-study`,
+    ),
+  
+  // ---- Inbox (Phase 2.5 D3) --------------------------------------------
+  getInbox: () =>
+    request<InboxResponse>("/api/inbox"),
+  getInboxHistory: () =>
+    request<InboxResponse>("/api/inbox/history"),
+  getInboxCount: () =>
+    request<InboxCountResponse>("/api/inbox/count"),
+  resolveInboxItem: (itemId: string) =>
+    request<{ resolved: boolean }>(
+      `/api/inbox/${encodeURIComponent(itemId)}/resolve`,
+      { method: "POST" },
+    ),
+
+  // ---- ERP User requests ------------------------------------------------
+  listErpUserRequestsForMe: (sessionId: string) =>
+    request<{ requests: ErpUserRequestItem[] }>(
+      `/api/projects/${sessionId}/erp-user/requests`,
+    ),
+  createErpUserRequest: (
+    sessionId: string,
+    body: { request_type: string; subject: string; body: string },
+  ) =>
+    request<ErpUserRequestItem>(
+      `/api/projects/${sessionId}/erp-user/requests`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  listErpUserRequestsForProject: (sessionId: string, status?: string) => {
+    const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+    return request<{ session_id: string; requests: ErpUserRequestItem[] }>(
+      `/api/projects/${sessionId}/erp-user-requests${qs}`,
+    );
+  },
+  resolveErpUserRequest: (sessionId: string, requestId: string) =>
+    request<{ id: string; resolved: boolean }>(
+      `/api/projects/${sessionId}/erp-user-requests/${encodeURIComponent(requestId)}/resolve`,
+      { method: "POST" },
+    ),
+  // ---- Grant management ------------------------------------------------
+  getEligibleErpUsers: (sessionId: string) =>
+    request<{ users: EligibleErpUser[] }>(
+      `/api/projects/${sessionId}/grants/eligible-erp-users`,
+    ),
+  getGrants: (sessionId: string) =>
+    request<{ grants: GrantRecord[] }>(
+      `/api/projects/${sessionId}/grants`,
+    ),
+  getGrantHistory: (sessionId: string) =>
+    request<{ grants: GrantRecord[] }>(
+      `/api/projects/${sessionId}/grants/history`,
+    ),
+  createGrant: (
+    sessionId: string,
+    body: {
+      user_id: string;
+      artifact_type: string;
+      is_signatory?: boolean;
+      is_uat_participant?: boolean;
+    },
+  ) =>
+    request<GrantRecord>(`/api/projects/${sessionId}/grants`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  revokeGrant: (
+    sessionId: string,
+    userId: string,
+    artifactType: string,
+  ) =>
+    request<{ revoked: boolean }>(
+      `/api/projects/${sessionId}/grants/${userId}/${artifactType}`,
+      { method: "DELETE" },
+    ),
+
   // --- Projects ---
 
   async listProjects(includeArchived = false) {
@@ -758,10 +1088,14 @@ export const api = {
     );
   },
 
-  async getTestCases(sessionId: string) {
-    return request<{ session_id: string; test_cases: TestCase[] }>(
-      `/api/projects/${sessionId}/test-cases`,
-    );
+  async getTestCases(sessionId: string, status?: string | null) {
+    const params = new URLSearchParams();
+    if (status) params.set("status", status);
+    const qs = params.toString();
+    const url = qs
+      ? `/api/projects/${sessionId}/test-cases?${qs}`
+      : `/api/projects/${sessionId}/test-cases`;
+    return request<{ session_id: string; test_cases: TestCase[] }>(url);
   },
 
   async getTrainingSteps(sessionId: string) {
@@ -804,6 +1138,38 @@ export const api = {
       { method: "POST" },
     );
   },
+
+  // ---- Developer completion workflow (Phase 2.5 D2) --------------------
+  markIssueDeveloperComplete: (sessionId: string, issueId: string) =>
+    request<{ review_action_id: string; success: boolean }>(
+      `/api/projects/${sessionId}/issues/${encodeURIComponent(issueId)}/developer-complete`,
+      { method: "POST" },
+    ),
+  confirmIssueResolved: (sessionId: string, issueId: string) =>
+    request<{ review_action_id: string; success: boolean }>(
+      `/api/projects/${sessionId}/issues/${encodeURIComponent(issueId)}/confirm`,
+      { method: "POST" },
+    ),
+  reopenIssue: (sessionId: string, issueId: string, note: string) =>
+    request<{ review_action_id: string; success: boolean }>(
+      `/api/projects/${sessionId}/issues/${encodeURIComponent(issueId)}/reopen`,
+      { method: "POST", body: JSON.stringify({ note }) },
+    ),
+  markTestCaseDeveloperComplete: (sessionId: string, testCaseId: string) =>
+    request<{ review_action_id: string; success: boolean }>(
+      `/api/projects/${sessionId}/test-cases/${encodeURIComponent(testCaseId)}/developer-complete`,
+      { method: "POST" },
+    ),
+  confirmTestCaseResolved: (sessionId: string, testCaseId: string) =>
+    request<{ review_action_id: string; success: boolean }>(
+      `/api/projects/${sessionId}/test-cases/${encodeURIComponent(testCaseId)}/confirm`,
+      { method: "POST" },
+    ),
+  reopenTestCase: (sessionId: string, testCaseId: string, note: string) =>
+    request<{ review_action_id: string; success: boolean }>(
+      `/api/projects/${sessionId}/test-cases/${encodeURIComponent(testCaseId)}/reopen`,
+      { method: "POST", body: JSON.stringify({ note }) },
+    ),
 
   // --- Uploaded project documents ---
 
