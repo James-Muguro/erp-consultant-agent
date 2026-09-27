@@ -333,10 +333,10 @@ class TestProjectCreationPermission:
         )
         assert r.status_code == 403, r.text
 
-    def test_marketer_cannot_create_project(self, client, reg):
+    def test_business_development_cannot_create_project(self, client, reg):
         email = _unique_email("mkt")
         reg.emails.append(email)
-        token = _signup(client, email, "marketer")
+        token = _signup(client, email, "business_development")
 
         r = client.post(
             "/api/projects/start",
@@ -580,19 +580,19 @@ class TestDeveloperRestrictedActions:
 # 6. Marketer permissions
 # ---------------------------------------------------------------------------
 class TestMarketerPermissions:
-    def test_marketer_can_list_projects(self, client, reg):
+    def test_business_development_can_list_projects(self, client, reg):
         email = _unique_email("mkt-list")
         reg.emails.append(email)
-        token = _signup(client, email, "marketer")
+        token = _signup(client, email, "business_development")
 
         r = client.get("/api/projects", headers=_headers(token))
         assert r.status_code == 200, r.text
         assert "projects" in r.json()
 
-    def test_marketer_cannot_read_requirements(self, client, reg):
+    def test_business_development_cannot_read_requirements(self, client, reg):
         email = _unique_email("mkt-req")
         reg.emails.append(email)
-        token = _signup(client, email, "marketer")
+        token = _signup(client, email, "business_development")
 
         # The permission guard fires before tenant lookup, so the
         # session id does not need to exist.
@@ -602,10 +602,10 @@ class TestMarketerPermissions:
         )
         assert r.status_code == 403, r.text
 
-    def test_marketer_cannot_read_process_steps(self, client, reg):
+    def test_business_development_cannot_read_process_steps(self, client, reg):
         email = _unique_email("mkt-ps")
         reg.emails.append(email)
-        token = _signup(client, email, "marketer")
+        token = _signup(client, email, "business_development")
 
         r = client.get(
             f"/api/projects/{_FAKE_SESSION_ID}/process-steps",
@@ -613,10 +613,10 @@ class TestMarketerPermissions:
         )
         assert r.status_code == 403, r.text
 
-    def test_marketer_cannot_read_solution_decisions(self, client, reg):
+    def test_business_development_cannot_read_solution_decisions(self, client, reg):
         email = _unique_email("mkt-sd")
         reg.emails.append(email)
-        token = _signup(client, email, "marketer")
+        token = _signup(client, email, "business_development")
 
         r = client.get(
             f"/api/projects/{_FAKE_SESSION_ID}/solution-decisions",
@@ -624,10 +624,10 @@ class TestMarketerPermissions:
         )
         assert r.status_code == 403, r.text
 
-    def test_marketer_cannot_read_test_cases(self, client, reg):
+    def test_business_development_cannot_read_test_cases(self, client, reg):
         email = _unique_email("mkt-tc")
         reg.emails.append(email)
-        token = _signup(client, email, "marketer")
+        token = _signup(client, email, "business_development")
 
         r = client.get(
             f"/api/projects/{_FAKE_SESSION_ID}/test-cases",
@@ -635,10 +635,10 @@ class TestMarketerPermissions:
         )
         assert r.status_code == 403, r.text
 
-    def test_marketer_cannot_read_training_steps(self, client, reg):
+    def test_business_development_cannot_read_training_steps(self, client, reg):
         email = _unique_email("mkt-tr")
         reg.emails.append(email)
-        token = _signup(client, email, "marketer")
+        token = _signup(client, email, "business_development")
 
         r = client.get(
             f"/api/projects/{_FAKE_SESSION_ID}/training-steps",
@@ -646,10 +646,10 @@ class TestMarketerPermissions:
         )
         assert r.status_code == 403, r.text
 
-    def test_marketer_cannot_read_issues(self, client, reg):
+    def test_business_development_cannot_read_issues(self, client, reg):
         email = _unique_email("mkt-iss")
         reg.emails.append(email)
-        token = _signup(client, email, "marketer")
+        token = _signup(client, email, "business_development")
 
         r = client.get(
             f"/api/projects/{_FAKE_SESSION_ID}/issues",
@@ -657,10 +657,10 @@ class TestMarketerPermissions:
         )
         assert r.status_code == 403, r.text
 
-    def test_marketer_cannot_read_health(self, client, reg):
+    def test_business_development_cannot_read_health(self, client, reg):
         email = _unique_email("mkt-health")
         reg.emails.append(email)
-        token = _signup(client, email, "marketer")
+        token = _signup(client, email, "business_development")
 
         r = client.get(
             f"/api/projects/{_FAKE_SESSION_ID}/health",
@@ -668,10 +668,10 @@ class TestMarketerPermissions:
         )
         assert r.status_code == 403, r.text
 
-    def test_marketer_cannot_read_coverage_gaps(self, client, reg):
+    def test_business_development_cannot_read_coverage_gaps(self, client, reg):
         email = _unique_email("mkt-cov")
         reg.emails.append(email)
-        token = _signup(client, email, "marketer")
+        token = _signup(client, email, "business_development")
 
         r = client.get(
             f"/api/projects/{_FAKE_SESSION_ID}/coverage-gaps",
@@ -679,10 +679,10 @@ class TestMarketerPermissions:
         )
         assert r.status_code == 403, r.text
 
-    def test_marketer_cannot_execute_phase(self, client, reg):
+    def test_business_development_cannot_execute_phase(self, client, reg):
         email = _unique_email("mkt-phase")
         reg.emails.append(email)
-        token = _signup(client, email, "marketer")
+        token = _signup(client, email, "business_development")
 
         r = client.post(
             f"/api/projects/{_FAKE_SESSION_ID}/phase/qa_testing/execute",
@@ -691,10 +691,10 @@ class TestMarketerPermissions:
         )
         assert r.status_code == 403, r.text
 
-    def test_marketer_can_read_documents(self, client, reg):
+    def test_business_development_can_read_documents(self, client, reg):
         email = _unique_email("mkt-docs")
         reg.emails.append(email)
-        token = _signup(client, email, "marketer")
+        token = _signup(client, email, "business_development")
         user_id = _user_id_for_email(email)
 
         sid = _own_project(user_id)
@@ -706,10 +706,10 @@ class TestMarketerPermissions:
         assert r.status_code == 200, r.text
         assert "documents" in r.json()
 
-    def test_marketer_can_generate_documents(self, client, reg):
+    def test_business_development_can_generate_documents(self, client, reg):
         email = _unique_email("mkt-gendoc")
         reg.emails.append(email)
-        token = _signup(client, email, "marketer")
+        token = _signup(client, email, "business_development")
         user_id = _user_id_for_email(email)
 
         sid = _own_project(user_id)
@@ -717,14 +717,14 @@ class TestMarketerPermissions:
         with patch.object(
             doc_generator,
             "generate_project_report",
-            return_value="/tmp/fake-marketer-report.docx",
+            return_value="/tmp/fake-business_development-report.docx",
         ):
             r = client.post(
                 f"/api/projects/{sid}/report",
                 headers=_headers(token),
             )
         assert r.status_code == 200, r.text
-        assert r.json()["filename"] == "fake-marketer-report.docx"
+        assert r.json()["filename"] == "fake-business_development-report.docx"
 
 
 # ---------------------------------------------------------------------------
@@ -788,7 +788,7 @@ class TestErpUserPermissions:
 # 8. Multi-role union at the HTTP layer
 # ---------------------------------------------------------------------------
 class TestMultiRoleUnion:
-    def test_multi_role_developer_plus_marketer_gets_union(self, client, reg):
+    def test_multi_role_developer_plus_business_development_gets_union(self, client, reg):
         """A user holding both Developer and Marketer can perform an
         action permitted by Developer and an action permitted by
         Marketer. This proves the union computed by
@@ -806,7 +806,7 @@ class TestMultiRoleUnion:
         user_id = _user_id_for_email(email)
 
         # Add Marketer on top of Developer.
-        _grant_role(user_id, "marketer")
+        _grant_role(user_id, "business_development")
 
         sid = _own_project(user_id)
 
@@ -854,7 +854,7 @@ class TestPermissionTenantOrdering:
         404 because the session does not exist."""
         email = _unique_email("mkt-order-1")
         reg.emails.append(email)
-        token = _signup(client, email, "marketer")
+        token = _signup(client, email, "business_development")
 
         r = client.get(
             f"/api/projects/{_FAKE_SESSION_ID}/requirements",
@@ -957,7 +957,7 @@ class TestFeedbackPermissions:
         `_COMMON_USER_PERMS`) succeeds."""
         email = _unique_email("fb-global")
         reg.emails.append(email)
-        token = _signup(client, email, "marketer")
+        token = _signup(client, email, "business_development")
 
         r = client.post(
             "/api/feedback",
@@ -1003,7 +1003,7 @@ class TestProfileEditCurrentBehavior:
         than as an unexplained response change elsewhere."""
         email = _unique_email("profile")
         reg.emails.append(email)
-        token = _signup(client, email, "marketer")
+        token = _signup(client, email, "business_development")
 
         r = client.patch(
             "/api/auth/settings",

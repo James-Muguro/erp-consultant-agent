@@ -152,54 +152,63 @@ def test_functional_consultant_has_all_project_scoped_writes():
 # ---------------------------------------------------------------------------
 # Marketer — read list and document generation only
 # ---------------------------------------------------------------------------
-def test_marketer_has_project_read_documents_read_documents_generate():
-    marketer = ROLE_PERMISSIONS[UserRole.MARKETER]
-    assert Permission.PROJECT_READ in marketer
-    assert Permission.DOCUMENTS_READ in marketer
-    assert Permission.DOCUMENTS_GENERATE in marketer
+def test_business_development_has_project_read_documents_read_documents_generate():
+    business_development = ROLE_PERMISSIONS[UserRole.BUSINESS_DEVELOPMENT]
+    assert Permission.PROJECT_READ in business_development
+    assert Permission.DOCUMENTS_READ in business_development
+    assert Permission.DOCUMENTS_GENERATE in business_development
 
 
-def test_marketer_does_not_have_project_create():
-    assert Permission.PROJECT_CREATE not in ROLE_PERMISSIONS[UserRole.MARKETER]
+def test_business_development_does_not_have_project_create():
+    assert Permission.PROJECT_CREATE not in ROLE_PERMISSIONS[UserRole.BUSINESS_DEVELOPMENT]
 
 
-def test_marketer_has_chat_submit():
+def test_business_development_has_chat_submit():
     """CHAT_SUBMIT is granted through `_COMMON_USER_PERMS` to every
     application role, including Marketer. This test exists specifically
-    to lock that in — the earlier `test_marketer_does_not_have_...`
+    to lock that in — the earlier `test_business_development_does_not_have_...`
     naming in the impact map was flagged as incorrect; the correct
     assertion is that Marketer HAS CHAT_SUBMIT."""
-    assert Permission.CHAT_SUBMIT in ROLE_PERMISSIONS[UserRole.MARKETER]
+    assert Permission.CHAT_SUBMIT in ROLE_PERMISSIONS[UserRole.BUSINESS_DEVELOPMENT]
 
 
 # ---------------------------------------------------------------------------
 # effective_permissions — union semantics
 # ---------------------------------------------------------------------------
 def test_effective_permissions_union_of_roles():
-    """Roles combine additively. ERP_USER + MARKETER are chosen
-    because their permission sets are not subsets of one another, so
-    the test proves a real union rather than re-asserting one role's
-    set.
+    """Roles combine additively. FUNCTIONAL_CONSULTANT and
+    BUSINESS_DEVELOPMENT are chosen because their permission sets are
+    not subsets of one another, so the test proves a real union rather
+    than re-asserting one role's set.
+
+    (Phase 2.3 reduced ERP_USER to {chat:submit, feedback:submit,
+    profile:edit, project:read}, which is a strict subset of
+    BUSINESS_DEVELOPMENT. ERP_USER is no longer suitable for this
+    test; the pair was migrated to FUNCTIONAL_CONSULTANT + BD.
     """
-    erp_user = ROLE_PERMISSIONS[UserRole.ERP_USER]
-    marketer = ROLE_PERMISSIONS[UserRole.MARKETER]
-    combined = effective_permissions([UserRole.ERP_USER, UserRole.MARKETER])
+    fc = ROLE_PERMISSIONS[UserRole.FUNCTIONAL_CONSULTANT]
+    bd = ROLE_PERMISSIONS[UserRole.BUSINESS_DEVELOPMENT]
+    combined = effective_permissions([
+        UserRole.FUNCTIONAL_CONSULTANT, UserRole.BUSINESS_DEVELOPMENT,
+    ])
 
-    erp_only = erp_user - marketer
-    marketer_only = marketer - erp_user
+    fc_only = fc - bd
+    bd_only = bd - fc
 
-    assert erp_only, (
-        "ERP_USER must hold at least one permission Marketer does not; "
-        f"diff was empty (erp_user={sorted(p.value for p in erp_user)})"
+    assert fc_only, (
+        "FUNCTIONAL_CONSULTANT must hold at least one permission "
+        "BUSINESS_DEVELOPMENT does not; "
+        f"diff was empty (fc={sorted(p.value for p in fc)})"
     )
-    assert marketer_only, (
-        "MARKETER must hold at least one permission ERP_USER does not; "
-        f"diff was empty (marketer={sorted(p.value for p in marketer)})"
+    assert bd_only, (
+        "BUSINESS_DEVELOPMENT must hold at least one permission "
+        "FUNCTIONAL_CONSULTANT does not; "
+        f"diff was empty (bd={sorted(p.value for p in bd)})"
     )
 
-    assert combined == (erp_user | marketer)
-    assert erp_user.issubset(combined)
-    assert marketer.issubset(combined)
+    assert combined == (fc | bd)
+    assert fc.issubset(combined)
+    assert bd.issubset(combined)
 
 
 def test_effective_permissions_ignores_unknown_roles():
@@ -243,7 +252,7 @@ def test_account_type_individual_to_user_role_matches_enum_value():
     assert AccountType.ERP_USER.to_user_role() is UserRole.ERP_USER
     assert AccountType.FUNCTIONAL_CONSULTANT.to_user_role() is UserRole.FUNCTIONAL_CONSULTANT
     assert AccountType.DEVELOPER.to_user_role() is UserRole.DEVELOPER
-    assert AccountType.MARKETER.to_user_role() is UserRole.MARKETER
+    assert AccountType.BUSINESS_DEVELOPMENT.to_user_role() is UserRole.BUSINESS_DEVELOPMENT
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +267,7 @@ def test_no_org_admin_or_combined_role_exists():
         UserRole.ERP_USER,
         UserRole.FUNCTIONAL_CONSULTANT,
         UserRole.DEVELOPER,
-        UserRole.MARKETER,
+        UserRole.BUSINESS_DEVELOPMENT,
     }
     assert actual == expected
 

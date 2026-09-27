@@ -147,6 +147,22 @@ PROJECT_SCOPED_ROUTES: Tuple[Tuple[str, str, Permission, bool], ...] = (
     ("POST", "/api/projects/{session_id}/baselines", Permission.BASELINES_CREATE, True),
     ("GET", "/api/projects/{session_id}/baselines", Permission.PROJECT_READ, True),
     ("GET", "/api/projects/{session_id}/baselines/active", Permission.PROJECT_READ, True),
+        # -- Issues state machine ---------------------------------------------
+    ("POST", "/api/projects/{session_id}/issues/{issue_id}/developer-complete", Permission.ISSUES_WRITE, True),
+    ("POST", "/api/projects/{session_id}/issues/{issue_id}/confirm", Permission.REVIEWS_SUBMIT, True),
+    ("POST", "/api/projects/{session_id}/issues/{issue_id}/reopen", Permission.REVIEWS_SUBMIT, True),
+
+    # -- Test-case state machine ------------------------------------------
+    ("POST", "/api/projects/{session_id}/test-cases/{test_case_id}/developer-complete", Permission.TESTING_WRITE, True),
+    ("POST", "/api/projects/{session_id}/test-cases/{test_case_id}/confirm", Permission.REVIEWS_SUBMIT, True),
+    ("POST", "/api/projects/{session_id}/test-cases/{test_case_id}/reopen", Permission.REVIEWS_SUBMIT, True),
+
+    # -- ERP user requests (consultant side, orchestrator_api.py) ---------
+    ("GET", "/api/projects/{session_id}/erp-user-requests", Permission.ISSUES_READ, True),
+    ("POST", "/api/projects/{session_id}/erp-user-requests/{request_id}/resolve", Permission.ISSUES_READ, True),
+
+    # -- Case study -------------------------------------------------------
+    ("GET", "/api/projects/{session_id}/case-study", Permission.OPPORTUNITY_CASE_STUDY_READ, False),
 )
 
 
@@ -371,6 +387,22 @@ def test_post_projects_start_enforces_organization_membership():
         "name"
     )
 
+def test_case_study_uses_org_membership_tenancy():
+    """`GET /api/projects/{session_id}/case-study` is project-scoped but
+    enforces tenancy via the org-membership layer rather than
+    `_get_owned_session`; a case-study is an org-level concept and the
+    endpoint only serves projects converted from an opportunity. The
+    route's `requires_tenant` flag is False; this test names the
+    mechanism so the exception is documented in code, not silent."""
+    route = _find_route("GET", "/api/projects/{session_id}/case-study")
+    assert route is not None
+    endpoint = _unwrapped_endpoint(route)
+    names = set(getattr(endpoint.__code__, "co_names", ()))
+    assert names & {"is_project_member", "get_membership", "has_active_membership"}, (
+        "GET /api/projects/{session_id}/case-study must enforce tenancy "
+        "via an org-membership helper; the endpoint's code object "
+        f"references none of the known names. co_names={sorted(names)}"
+    )
 
 # ---------------------------------------------------------------------------
 # 3. Session-carrying routes without {session_id} in path

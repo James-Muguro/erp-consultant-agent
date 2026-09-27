@@ -12,21 +12,27 @@ Coverage:
   Request body size limit
 
 Fixtures:
-  * client      a single TestClient per test, entered via context
-                manager so the lifespan runs once and cleanly shuts
-                down at the end.
-  * auth_headers
-                completes the full new auth flow (signup →
-                verify-email → login → verify-otp) and returns Bearer
-                headers. Each call = one signup + one login (two
-                bcrypt operations ≈ 500ms) plus the flow's HTTP
-                overhead. Tests needing two distinct users call it
-                twice.
+  Shared fixtures live in tests/conftest.py:
+
+    * client        a single TestClient per test, entered via context
+                    manager so the lifespan runs once and cleanly
+                    shuts down at the end.
+    * auth_headers  completes the full auth flow (signup →
+                    verify-email → login → verify-otp) and returns
+                    Bearer headers. Registers its generated user with
+                    cleanup_registry so the row is removed at teardown.
+                    Tests needing two distinct users call
+                    `_new_user_headers(client)` (below).
 
 Notes on test behavior:
   * The new auth flow requires email verification and OTP-based MFA.
-    The email abstraction is mocked during the flow via
-    `set_email_provider`, matching tests/test_auth_lifecycle.py.
+    The email abstraction is mocked during the flow by the shared
+    `signup_and_authenticate` helper, which installs and clears its
+    own capturing provider. Nothing in this file installs a provider
+    directly.
+  * `_new_user_headers` is a thin local wrapper over the shared auth
+    helper. It exists only to keep the six tests that need a second
+    user readable; it does not reimplement the auth flow.
   * The `mock_info_retriever` in the chat tests returns
     `web_results` as a list of dicts, matching the pre-review
     info_retriever output shape. The mock is patched at the boundary,
@@ -40,91 +46,30 @@ from __future__ import annotations
 
 import json
 import uuid
-from typing import List, Tuple
 
 import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import MagicMock, patch
 
 from src.config.settings import settings
-from src.email import reset_email_provider, set_email_provider
-from src.orchestrator_api import app
+from tests._auth_helpers import signup_and_authenticate
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Local helpers
 # ---------------------------------------------------------------------------
-@pytest.fixture(autouse=True)
-def _reset_email_provider_after_test():
-    yield
-    reset_email_provider()
-
-
-@pytest.fixture
-def client():
-    with TestClient(app) as c:
-        yield c
-
-
-def _complete_auth_flow(client: TestClient, email: str) -> str:
-    """Run signup → verify-email → login → verify-otp and return the
-    access token. The email abstraction is mocked for the duration so
-    no SMTP connection is attempted."""
-    captured: List[Tuple[str, str, str]] = []
-
-    def _capture(to: str, subject: str, body: str) -> None:
-        captured.append((to, subject, body))
-
-    set_email_provider(_capture)
-    try:
-        r = client.post(
-            "/api/auth/signup",
-            json={
-                "email": email,
-                "password": "testpassword123",
-                "account_type": "functional_consultant",
-            },
-        )
-        assert r.status_code == 200, r.text
-
-        verify_body = captured[-1][2]
-        raw_verify = verify_body.split("token=")[1].split("\n")[0]
-        r = client.post(
-            "/api/auth/verify-email", json={"token": raw_verify}
-        )
-        assert r.status_code == 200, r.text
-
-        r = client.post(
-            "/api/auth/login",
-            json={"email": email, "password": "testpassword123"},
-        )
-        assert r.status_code == 200, r.text
-        pending_ref = r.json()["pending_auth_ref"]
-
-        otp_body = captured[-1][2]
-        otp_code = otp_body.split("    ")[1].split("\n")[0].strip()
-
-        r = client.post(
-            "/api/auth/login/verify-otp",
-            json={"pending_auth_ref": pending_ref, "code": otp_code},
-        )
-        assert r.status_code == 200, r.text
-        return r.json()["access_token"]
-    finally:
-        reset_email_provider()
-
-
 def _new_user_headers(client: TestClient) -> dict:
     """Sign up a fresh, unique user, complete the full auth flow, and
-    return Authorization headers."""
+    return Authorization headers.
+
+    Delegates the flow to the shared `signup_and_authenticate` helper
+    in tests/_auth_helpers.py. Kept local so the six tests that need a
+    second distinct user can call it without taking an extra fixture
+    dependency.
+    """
     email = f"test-{uuid.uuid4().hex[:12]}@example.com"
-    token = _complete_auth_flow(client, email)
+    token = signup_and_authenticate(client, email=email)
     return {"Authorization": f"Bearer {token}"}
-
-
-@pytest.fixture
-def auth_headers(client):
-    return _new_user_headers(client)
 
 
 # ---------------------------------------------------------------------------
@@ -181,9 +126,11 @@ def test_signup_returns_generic_message_and_login_starts_mfa(client):
       * /signup returns a generic MessageResponse; no tokens.
       * /login returns a pending_auth_ref; no tokens.
       * Token acquisition requires /login/verify-otp."""
+    from src.email import reset_email_provider, set_email_provider
+
     email = f"test-{uuid.uuid4().hex[:12]}@example.com"
 
-    captured: List[Tuple[str, str, str]] = []
+    captured = []
     set_email_provider(lambda t, s, b: captured.append((t, s, b)))
     try:
         signup_payload = {

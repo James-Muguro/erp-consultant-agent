@@ -207,7 +207,7 @@ def created_users():
 class TestIndividualSignupMe:
     @pytest.mark.parametrize(
         "account_type",
-        ["erp_user", "functional_consultant", "developer", "marketer"],
+        ["erp_user", "functional_consultant", "developer", "business_development"],
     )
     def test_me_returns_matching_role_and_empty_organizations(
         self, client, created_users, account_type,

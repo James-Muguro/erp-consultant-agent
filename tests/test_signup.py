@@ -5,7 +5,7 @@ Coverage:
 
   Individual signup
     - Each of the four application account types (erp_user,
-      functional_consultant, developer, marketer) creates exactly one
+      functional_consultant, developer, business_development) creates exactly one
       matching UserRoleRecord and no other role rows.
 
   Organization signup
@@ -212,7 +212,7 @@ class TestIndividualSignup:
             ("erp_user", "erp_user"),
             ("functional_consultant", "functional_consultant"),
             ("developer", "developer"),
-            ("marketer", "marketer"),
+            ("business_development", "business_development"),
         ],
     )
     def test_creates_exactly_one_matching_role_record(
