@@ -103,6 +103,12 @@ import uuid
 from contextlib import contextmanager
 from typing import Any, Dict, Iterable, List, Optional, Set
 
+from datetime import datetime, timezone
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
 from sqlalchemy import func
 
 from src.db.base import SessionLocal
@@ -116,6 +122,7 @@ from src.db.models import (
     SolutionBaseline,
     SolutionBaselineItem,
     ReviewAction,
+    SessionRecord,
     TraceLink,
 )
 
@@ -587,6 +594,7 @@ def record_review_action(
             "process_step": ProcessStepRecord,
             "test_case": TestCaseRecord,
             "training_step": TrainingStepRecord,
+            "issue": ProjectIssue,
         }
         target_model = model_for_type.get(object_type)
         if target_model is not None and not _owns(db, target_model, object_id, session_id):
@@ -628,23 +636,67 @@ def create_issue(
         return iid
 
 
-def get_issues(session_id: str, status: Optional[str] = "open") -> List[Dict[str, Any]]:
+def get_issues(
+    session_id: str, status: Optional[Any] = "open",
+) -> List[Dict[str, Any]]:
+    """Return issues for a session.
+
+    `status` accepts either a single string (backward compatible) or a
+    list of strings. `None` or an empty value returns every status.
+    Each result row carries the most recent reopen note, if any, so the
+    frontend can render the consultant's feedback inline without a
+    second round-trip.
+    """
     with _db_session() as db:
         q = db.query(ProjectIssue).filter(ProjectIssue.session_id == session_id)
         if status:
-            q = q.filter(ProjectIssue.status == status)
+            if isinstance(status, str):
+                q = q.filter(ProjectIssue.status == status)
+            else:
+                statuses = [s for s in status if s]
+                if statuses:
+                    q = q.filter(ProjectIssue.status.in_(statuses))
         rows = q.order_by(ProjectIssue.created_at.desc()).all()
-        return [{
-            "id": r.id, "issue_type": r.issue_type, "severity": r.severity,
-            "description": r.description, "status": r.status,
-            "related_object_type": r.related_object_type, "related_object_id": r.related_object_id,
-            "test_case_id": getattr(r, "test_case_id", None),
-            "classification": getattr(r, "classification", None),
-            "created_at": r.created_at.isoformat() if r.created_at else None,
-            "updated_at": r.updated_at.isoformat() if getattr(r, "updated_at", None) else None,
-            "resolved_at": r.resolved_at.isoformat() if getattr(r, "resolved_at", None) else None,
-        } for r in rows]
 
+        reopen_by_object = _latest_reopen_notes(
+            db, session_id, "issue", [r.id for r in rows],
+        )
+
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            reopen = reopen_by_object.get(r.id)
+            out.append({
+                "id": r.id,
+                "issue_type": r.issue_type,
+                "severity": r.severity,
+                "description": r.description,
+                "status": r.status,
+                "related_object_type": r.related_object_type,
+                "related_object_id": r.related_object_id,
+                "test_case_id": getattr(r, "test_case_id", None),
+                "classification": getattr(r, "classification", None),
+                "completion_count": getattr(r, "completion_count", 0),
+                "last_completed_at": (
+                    r.last_completed_at.isoformat()
+                    if getattr(r, "last_completed_at", None) else None
+                ),
+                "last_completed_by_user_id": getattr(
+                    r, "last_completed_by_user_id", None,
+                ),
+                "reopen_note": reopen["note"] if reopen else None,
+                "reopen_at": reopen["created_at"] if reopen else None,
+                "reopen_by_user_id": reopen["user_id"] if reopen else None,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "updated_at": (
+                    r.updated_at.isoformat()
+                    if getattr(r, "updated_at", None) else None
+                ),
+                "resolved_at": (
+                    r.resolved_at.isoformat()
+                    if getattr(r, "resolved_at", None) else None
+                ),
+            })
+        return out
 
 # ---------------------------------------------------------------------------
 # Traceability
@@ -1113,25 +1165,70 @@ def get_test_failures(session_id: str, classification: Optional[str] = None) -> 
 
 
 def get_test_cases(
-    session_id: str, test_type: Optional[str] = None, needs_retest: Optional[bool] = None,
+    session_id: str,
+    test_type: Optional[str] = None,
+    needs_retest: Optional[bool] = None,
+    status: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
+    """Return test cases for a session.
+
+    `status` accepts either a single string or a list, matching the
+    `get_issues` contract. The default (None) returns every status,
+    preserving the pre-Phase-2.5 behaviour for callers that do not pass
+    a filter.
+    """
     with _db_session() as db:
         q = db.query(TestCaseRecord).filter(TestCaseRecord.session_id == session_id)
         if test_type:
             q = q.filter(TestCaseRecord.test_type == test_type)
         if needs_retest is not None:
             q = q.filter(TestCaseRecord.needs_retest.is_(needs_retest))
+        if status:
+            if isinstance(status, str):
+                q = q.filter(TestCaseRecord.status == status)
+            else:
+                statuses = [s for s in status if s]
+                if statuses:
+                    q = q.filter(TestCaseRecord.status.in_(statuses))
         rows = q.order_by(TestCaseRecord.created_at).all()
-        return [{
-            "id": r.id, "test_type": r.test_type, "external_code": r.external_code,
-            "scenario": r.scenario, "priority": r.priority, "expected_result": r.expected_result,
-            "needs_retest": r.needs_retest,
-            "user_role": getattr(r, "user_role", None),
-            "business_process": getattr(r, "business_process", None),
-            "acceptance_criteria": getattr(r, "acceptance_criteria", None),
-            "related_design_component": getattr(r, "related_design_component", None),
-            "updated_at": r.updated_at.isoformat() if getattr(r, "updated_at", None) else None,
-        } for r in rows]
+
+        reopen_by_object = _latest_reopen_notes(
+            db, session_id, "test_case", [r.id for r in rows],
+        )
+
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            reopen = reopen_by_object.get(r.id)
+            out.append({
+                "id": r.id,
+                "test_type": r.test_type,
+                "external_code": r.external_code,
+                "scenario": r.scenario,
+                "priority": r.priority,
+                "expected_result": r.expected_result,
+                "needs_retest": r.needs_retest,
+                "user_role": getattr(r, "user_role", None),
+                "business_process": getattr(r, "business_process", None),
+                "acceptance_criteria": getattr(r, "acceptance_criteria", None),
+                "related_design_component": getattr(r, "related_design_component", None),
+                "status": getattr(r, "status", "open") or "open",
+                "completion_count": getattr(r, "completion_count", 0),
+                "last_completed_at": (
+                    r.last_completed_at.isoformat()
+                    if getattr(r, "last_completed_at", None) else None
+                ),
+                "last_completed_by_user_id": getattr(
+                    r, "last_completed_by_user_id", None,
+                ),
+                "reopen_note": reopen["note"] if reopen else None,
+                "reopen_at": reopen["created_at"] if reopen else None,
+                "reopen_by_user_id": reopen["user_id"] if reopen else None,
+                "updated_at": (
+                    r.updated_at.isoformat()
+                    if getattr(r, "updated_at", None) else None
+                ),
+            })
+        return out
 
 
 def mark_test_case_retested(session_id: str, test_case_id: str) -> bool:
@@ -1634,3 +1731,316 @@ def get_baselines(session_id: str) -> List[Dict[str, Any]]:
             "id": r.id, "label": r.label, "notes": r.notes,
             "is_active": r.is_active, "created_at": r.created_at.isoformat(),
         } for r in rows]
+
+# ---------------------------------------------------------------------------
+# Completion workflow (Phase 2.5 Step 2, D2)
+# ---------------------------------------------------------------------------
+# Every transition is recorded as a ReviewAction so the full audit trail
+# (developer completions, consultant confirmations, consultant reopens,
+# reopen comments) is queryable. The row itself only carries the current
+# status and enough counters to distinguish "first-time open" from
+# "reopened".
+#
+# Every transition that changes status runs in ONE transaction with its
+# ReviewAction insert and (for developer-complete) its attention-item
+# fan-out. Partial state is not possible: an error rolls back everything.
+
+_ISSUE_STATUS_OPEN = "open"
+_ISSUE_STATUS_DEV_COMPLETE = "developer_marked_complete"
+_ISSUE_STATUS_CONFIRMED = "consultant_confirmed_resolved"
+_ISSUE_STATUS_REOPENED = "reopened_with_feedback"
+
+_ISSUE_ACTIVE_STATUSES = (
+    _ISSUE_STATUS_OPEN,
+    _ISSUE_STATUS_DEV_COMPLETE,
+    _ISSUE_STATUS_REOPENED,
+)
+
+
+def _latest_reopen_notes(
+    db: Any, session_id: str, object_type: str, object_ids: List[str],
+) -> Dict[str, Dict[str, Any]]:
+    """Return {object_id: {note, created_at, user_id}} for the most
+    recent consultant_reopened ReviewAction per row. Missing entries
+    mean the row has never been reopened. One query, no N+1."""
+    if not object_ids:
+        return {}
+    rows = (
+        db.query(ReviewAction)
+        .filter(
+            ReviewAction.session_id == session_id,
+            ReviewAction.object_type == object_type,
+            ReviewAction.object_id.in_(object_ids),
+            ReviewAction.action == "consultant_reopened",
+        )
+        .order_by(ReviewAction.created_at.desc())
+        .all()
+    )
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        if r.object_id in out:
+            continue
+        out[r.object_id] = {
+            "note": r.note,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "user_id": r.user_id,
+        }
+    return out
+
+
+def _insert_workflow_review_action(
+    db: Any,
+    session_id: str,
+    user_id: str,
+    object_type: str,
+    object_id: str,
+    action: str,
+    note: Optional[str],
+) -> str:
+    """Insert one ReviewAction for the completion workflow. Caller
+    guarantees ownership of `object_id` by session before calling.
+    Does not commit."""
+    rid = uuid.uuid4().hex
+    db.add(ReviewAction(
+        id=rid, session_id=session_id, user_id=user_id,
+        object_type=object_type, object_id=object_id,
+        action=action, note=note,
+    ))
+    return rid
+
+
+def _fanout_developer_completion(
+    db: Any,
+    session_id: str,
+    source_type: str,
+    source_id: str,
+) -> int:
+    """Create one pending attention item per consultant recipient for a
+    developer-completed issue or test case. Idempotent per recipient.
+    Does not commit."""
+    from src.services import attention_service
+
+    session = db.get(SessionRecord, session_id)
+    if session is None:
+        return 0
+    recipients = attention_service.resolve_recipients_for_session(db, session)
+    for recipient_id in recipients:
+        attention_service.create_attention_item(
+            db,
+            recipient_user_id=recipient_id,
+            source_type=source_type,
+            source_id=source_id,
+            organization_id=session.organization_id,
+            session_id=session.session_id,
+        )
+    return len(recipients)
+
+
+def _resolve_completion_attention(
+    db: Any, source_type: str, source_id: str,
+) -> int:
+    """Close every pending attention item for a source. Does not commit."""
+    from src.services import attention_service
+    return attention_service.resolve_for_source(db, source_type, source_id)
+
+
+# ---------------------------------------------------------------------------
+# Issue transitions
+# ---------------------------------------------------------------------------
+def mark_issue_developer_complete(
+    session_id: str, issue_id: str, user_id: str,
+) -> str:
+    """Transition an issue to developer_marked_complete. Allowed from
+    open or reopened_with_feedback. Records a ReviewAction and fans out
+    attention items to the project's consultant recipients. One
+    transaction."""
+    with _db_session() as db:
+        issue = db.get(ProjectIssue, issue_id)
+        if issue is None or issue.session_id != session_id:
+            raise ValueError("Issue not found for this session")
+        if issue.status not in (_ISSUE_STATUS_OPEN, _ISSUE_STATUS_REOPENED):
+            raise ValueError(
+                f"Cannot mark complete: issue is in status {issue.status!r}, "
+                "expected open or reopened_with_feedback."
+            )
+
+        rid = _insert_workflow_review_action(
+            db, session_id, user_id, "issue", issue_id,
+            "developer_marked_complete", None,
+        )
+        issue.status = _ISSUE_STATUS_DEV_COMPLETE
+        issue.completion_count = (issue.completion_count or 0) + 1
+        issue.last_completed_at = _utcnow()
+        issue.last_completed_by_user_id = user_id
+
+        from src.services import attention_service
+        _fanout_developer_completion(
+            db, session_id,
+            attention_service.SOURCE_TYPE_DEVELOPER_COMPLETION_ISSUE,
+            issue_id,
+        )
+        db.commit()
+        return rid
+
+
+def confirm_issue_resolved(
+    session_id: str, issue_id: str, user_id: str,
+) -> str:
+    """Transition an issue to consultant_confirmed_resolved. Allowed
+    only from developer_marked_complete. Records a ReviewAction and
+    closes every pending attention item for the issue. One transaction."""
+    with _db_session() as db:
+        issue = db.get(ProjectIssue, issue_id)
+        if issue is None or issue.session_id != session_id:
+            raise ValueError("Issue not found for this session")
+        if issue.status != _ISSUE_STATUS_DEV_COMPLETE:
+            raise ValueError(
+                f"Cannot confirm: issue is in status {issue.status!r}, "
+                "expected developer_marked_complete."
+            )
+
+        rid = _insert_workflow_review_action(
+            db, session_id, user_id, "issue", issue_id,
+            "consultant_confirmed_resolved", None,
+        )
+        issue.status = _ISSUE_STATUS_CONFIRMED
+        issue.resolved_at = _utcnow()
+
+        from src.services import attention_service
+        _resolve_completion_attention(
+            db, attention_service.SOURCE_TYPE_DEVELOPER_COMPLETION_ISSUE,
+            issue_id,
+        )
+        db.commit()
+        return rid
+
+
+def reopen_issue(
+    session_id: str, issue_id: str, user_id: str, note: str,
+) -> str:
+    """Transition an issue to reopened_with_feedback. Allowed only from
+    developer_marked_complete. Records a ReviewAction carrying the
+    consultant's reopen note. Does NOT create an attention item: the
+    inbox is consultant-only, and the reopened state surfaces the work
+    in the developer's project workspace. One transaction."""
+    if not note or not note.strip():
+        raise ValueError("A reopen note is required.")
+
+    with _db_session() as db:
+        issue = db.get(ProjectIssue, issue_id)
+        if issue is None or issue.session_id != session_id:
+            raise ValueError("Issue not found for this session")
+        if issue.status != _ISSUE_STATUS_DEV_COMPLETE:
+            raise ValueError(
+                f"Cannot reopen: issue is in status {issue.status!r}, "
+                "expected developer_marked_complete."
+            )
+
+        rid = _insert_workflow_review_action(
+            db, session_id, user_id, "issue", issue_id,
+            "consultant_reopened", note.strip(),
+        )
+        issue.status = _ISSUE_STATUS_REOPENED
+        issue.resolved_at = None
+
+        from src.services import attention_service
+        _resolve_completion_attention(
+            db, attention_service.SOURCE_TYPE_DEVELOPER_COMPLETION_ISSUE,
+            issue_id,
+        )
+        db.commit()
+        return rid
+
+
+# ---------------------------------------------------------------------------
+# Test case transitions
+# ---------------------------------------------------------------------------
+def mark_test_case_developer_complete(
+    session_id: str, test_case_id: str, user_id: str,
+) -> str:
+    with _db_session() as db:
+        tc = db.get(TestCaseRecord, test_case_id)
+        if tc is None or tc.session_id != session_id:
+            raise ValueError("Test case not found for this session")
+        if tc.status not in (_ISSUE_STATUS_OPEN, _ISSUE_STATUS_REOPENED):
+            raise ValueError(
+                f"Cannot mark complete: test case is in status {tc.status!r}, "
+                "expected open or reopened_with_feedback."
+            )
+
+        rid = _insert_workflow_review_action(
+            db, session_id, user_id, "test_case", test_case_id,
+            "developer_marked_complete", None,
+        )
+        tc.status = _ISSUE_STATUS_DEV_COMPLETE
+        tc.completion_count = (tc.completion_count or 0) + 1
+        tc.last_completed_at = _utcnow()
+        tc.last_completed_by_user_id = user_id
+
+        from src.services import attention_service
+        _fanout_developer_completion(
+            db, session_id,
+            attention_service.SOURCE_TYPE_DEVELOPER_COMPLETION_TEST_CASE,
+            test_case_id,
+        )
+        db.commit()
+        return rid
+
+
+def confirm_test_case_resolved(
+    session_id: str, test_case_id: str, user_id: str,
+) -> str:
+    with _db_session() as db:
+        tc = db.get(TestCaseRecord, test_case_id)
+        if tc is None or tc.session_id != session_id:
+            raise ValueError("Test case not found for this session")
+        if tc.status != _ISSUE_STATUS_DEV_COMPLETE:
+            raise ValueError(
+                f"Cannot confirm: test case is in status {tc.status!r}, "
+                "expected developer_marked_complete."
+            )
+
+        rid = _insert_workflow_review_action(
+            db, session_id, user_id, "test_case", test_case_id,
+            "consultant_confirmed_resolved", None,
+        )
+        tc.status = _ISSUE_STATUS_CONFIRMED
+
+        from src.services import attention_service
+        _resolve_completion_attention(
+            db, attention_service.SOURCE_TYPE_DEVELOPER_COMPLETION_TEST_CASE,
+            test_case_id,
+        )
+        db.commit()
+        return rid
+
+
+def reopen_test_case(
+    session_id: str, test_case_id: str, user_id: str, note: str,
+) -> str:
+    if not note or not note.strip():
+        raise ValueError("A reopen note is required.")
+
+    with _db_session() as db:
+        tc = db.get(TestCaseRecord, test_case_id)
+        if tc is None or tc.session_id != session_id:
+            raise ValueError("Test case not found for this session")
+        if tc.status != _ISSUE_STATUS_DEV_COMPLETE:
+            raise ValueError(
+                f"Cannot reopen: test case is in status {tc.status!r}, "
+                "expected developer_marked_complete."
+            )
+
+        rid = _insert_workflow_review_action(
+            db, session_id, user_id, "test_case", test_case_id,
+            "consultant_reopened", note.strip(),
+        )
+        tc.status = _ISSUE_STATUS_REOPENED
+
+        from src.services import attention_service
+        _resolve_completion_attention(
+            db, attention_service.SOURCE_TYPE_DEVELOPER_COMPLETION_TEST_CASE,
+            test_case_id,
+        )
+        db.commit()
+        return rid

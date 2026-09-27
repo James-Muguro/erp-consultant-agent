@@ -71,9 +71,14 @@ from src.auth.dependencies import (
     verify_csrf,
 )
 from src.auth.guards import require_permission
-from src.auth.permissions import Permission
+from src.auth.permissions import (
+    ORG_ROLE_PRIVILEGES,
+    Permission,
+    effective_permissions,
+)
 from src.auth.rbac import (
     get_membership,
+    get_membership_role,
     get_user_roles,
     list_organizations_for_user,
 )
@@ -97,7 +102,6 @@ from src.tools.document_extractor import (
 )
 from src.tools.document_generator import doc_generator
 from src.storage.object_storage import ObjectStorageNotConfigured, ObjectStorageError
-
 
 # ---------------------------------------------------------------------------
 # Lifespan
@@ -150,6 +154,21 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="ERP Orchestrator API", lifespan=lifespan)
+
+from src.api import (  # noqa: E402
+    erp_user_api, grants_api, attention_api, opportunity_api,
+)
+# Both imports below are side-effect-only: importing each module runs
+# its module-level `register_source_adapter(...)` calls so the unified
+# inbox can render those source types. Without them the attention API
+# falls back to a stub with no context_url, which breaks the "route the
+# user into the source workflow" contract.
+from src.services import opportunity_attention  # noqa: E402, F401
+from src.services import developer_completion  # noqa: E402, F401
+app.include_router(erp_user_api.router)
+app.include_router(grants_api.router)
+app.include_router(attention_api.router)
+app.include_router(opportunity_api.router)
 
 logger = get_logger(__name__)
 
@@ -616,13 +635,40 @@ def _build_user_out(db: Session, user: User) -> UserOut:
 
     Roles are sorted for stable output. Organizations are ordered by
     name (that ordering is established in list_organizations_for_user).
+
+    Two additional fields are computed here so the frontend never has
+    to duplicate the role→permission mapping:
+
+      * `permissions` — the caller's effective application permissions,
+        computed from the union of ROLE_PERMISSIONS over their
+        application roles. `effective_permissions` is the same helper
+        the backend guards use, so the client-visible set is guaranteed
+        to match the set the guards enforce against.
+
+      * `organization_privileges` — per-organization privileges derived
+        from ORG_ROLE_PRIVILEGES, keyed by organization id. Every
+        organization the caller is a member of appears, even if its
+        privilege list is empty, so `isInOrganization` can be evaluated
+        from this map alone without a second lookup.
+
+    Both maps are sorted for stable output and diff-friendly tests.
     """
-    roles = sorted(r.value for r in get_user_roles(db, user.id))
+    roles_enum = get_user_roles(db, user.id)
+    roles = sorted(r.value for r in roles_enum)
+    permissions = sorted(p.value for p in effective_permissions(roles_enum))
+
     org_pairs = list_organizations_for_user(db, user.id)
-    organizations = [
-        OrganizationSummary(id=org.id, name=org.name, role=membership.role)
-        for org, membership in org_pairs
-    ]
+    organizations = []
+    organization_privileges: Dict[str, List[str]] = {}
+    for org, membership in org_pairs:
+        organizations.append(
+            OrganizationSummary(id=org.id, name=org.name, role=membership.role)
+        )
+        org_role = get_membership_role(membership)
+        organization_privileges[org.id] = sorted(
+            p.value for p in ORG_ROLE_PRIVILEGES.get(org_role, frozenset())
+        )
+
     return UserOut(
         id=user.id,
         email=user.email,
@@ -631,6 +677,8 @@ def _build_user_out(db: Session, user: User) -> UserOut:
         created_at=user.created_at,
         roles=roles,
         organizations=organizations,
+        permissions=permissions,
+        organization_privileges=organization_privileges,
     )
 
 
@@ -1880,9 +1928,12 @@ def list_issues(
     current_user: User = Depends(require_permission(Permission.ISSUES_READ)),
 ):
     _get_owned_session(session_id, current_user)
+    status_arg: Any = status
+    if status and "," in status:
+        status_arg = [s.strip() for s in status.split(",") if s.strip()]
     return {
         "session_id": session_id,
-        "issues": project_intelligence.get_issues(session_id, status),
+        "issues": project_intelligence.get_issues(session_id, status_arg),
     }
 
 
@@ -2389,13 +2440,17 @@ def list_test_cases(
     test_type: Optional[str] = None,
     include_history: bool = False,
     needs_retest: Optional[bool] = None,
+    status: Optional[str] = None,
     current_user: User = Depends(require_permission(Permission.TESTING_READ)),
 ):
     _get_owned_session(session_id, current_user)
+    status_arg: Any = status
+    if status and "," in status:
+        status_arg = [s.strip() for s in status.split(",") if s.strip()]
     return {
         "session_id": session_id,
         "test_cases": project_intelligence.get_test_cases(
-            session_id, test_type, needs_retest,
+            session_id, test_type, needs_retest, status_arg,
         ),
     }
 
@@ -2544,6 +2599,119 @@ def list_test_failures(
     _get_owned_session(session_id, current_user)
     return {"test_failures": project_intelligence.get_test_failures(session_id, classification)}
 
+# ---------------------------------------------------------------------------
+# Developer completion / consultant confirm-reopen workflow (Phase 2.5 D2)
+# ---------------------------------------------------------------------------
+class ReopenRequest(BaseModel):
+    note: str = Field(..., min_length=1, max_length=2_000)
+
+
+def _map_workflow_error(e: ValueError) -> HTTPException:
+    """A state or ownership violation maps to 409 for a state mismatch,
+    404 for a missing/mismatched row. Callers raise ValueError with a
+    message that names the situation; this helper does not guess."""
+    msg = str(e)
+    if "not found" in msg.lower():
+        return HTTPException(status_code=404, detail=msg)
+    return HTTPException(status_code=409, detail=msg)
+
+
+@app.post("/api/projects/{session_id}/issues/{issue_id}/developer-complete")
+def issue_developer_complete(
+    session_id: str,
+    issue_id: str,
+    current_user: User = Depends(require_permission(Permission.ISSUES_WRITE)),
+):
+    _get_owned_session(session_id, current_user)
+    try:
+        rid = project_intelligence.mark_issue_developer_complete(
+            session_id, issue_id, current_user.id,
+        )
+    except ValueError as e:
+        raise _map_workflow_error(e)
+    return {"review_action_id": rid, "success": True}
+
+
+@app.post("/api/projects/{session_id}/issues/{issue_id}/confirm")
+def issue_confirm(
+    session_id: str,
+    issue_id: str,
+    current_user: User = Depends(require_permission(Permission.REVIEWS_SUBMIT)),
+):
+    _get_owned_session(session_id, current_user)
+    try:
+        rid = project_intelligence.confirm_issue_resolved(
+            session_id, issue_id, current_user.id,
+        )
+    except ValueError as e:
+        raise _map_workflow_error(e)
+    return {"review_action_id": rid, "success": True}
+
+
+@app.post("/api/projects/{session_id}/issues/{issue_id}/reopen")
+def issue_reopen(
+    session_id: str,
+    issue_id: str,
+    req: ReopenRequest,
+    current_user: User = Depends(require_permission(Permission.REVIEWS_SUBMIT)),
+):
+    _get_owned_session(session_id, current_user)
+    try:
+        rid = project_intelligence.reopen_issue(
+            session_id, issue_id, current_user.id, req.note,
+        )
+    except ValueError as e:
+        raise _map_workflow_error(e)
+    return {"review_action_id": rid, "success": True}
+
+
+@app.post("/api/projects/{session_id}/test-cases/{test_case_id}/developer-complete")
+def test_case_developer_complete(
+    session_id: str,
+    test_case_id: str,
+    current_user: User = Depends(require_permission(Permission.TESTING_WRITE)),
+):
+    _get_owned_session(session_id, current_user)
+    try:
+        rid = project_intelligence.mark_test_case_developer_complete(
+            session_id, test_case_id, current_user.id,
+        )
+    except ValueError as e:
+        raise _map_workflow_error(e)
+    return {"review_action_id": rid, "success": True}
+
+
+@app.post("/api/projects/{session_id}/test-cases/{test_case_id}/confirm")
+def test_case_confirm(
+    session_id: str,
+    test_case_id: str,
+    current_user: User = Depends(require_permission(Permission.REVIEWS_SUBMIT)),
+):
+    _get_owned_session(session_id, current_user)
+    try:
+        rid = project_intelligence.confirm_test_case_resolved(
+            session_id, test_case_id, current_user.id,
+        )
+    except ValueError as e:
+        raise _map_workflow_error(e)
+    return {"review_action_id": rid, "success": True}
+
+
+@app.post("/api/projects/{session_id}/test-cases/{test_case_id}/reopen")
+def test_case_reopen(
+    session_id: str,
+    test_case_id: str,
+    req: ReopenRequest,
+    current_user: User = Depends(require_permission(Permission.REVIEWS_SUBMIT)),
+):
+    _get_owned_session(session_id, current_user)
+    try:
+        rid = project_intelligence.reopen_test_case(
+            session_id, test_case_id, current_user.id, req.note,
+        )
+    except ValueError as e:
+        raise _map_workflow_error(e)
+    return {"review_action_id": rid, "success": True}
 
 @app.post("/api/projects/{session_id}/baselines")
 def create_baseline(
@@ -2578,6 +2746,136 @@ def active_baseline(
         raise HTTPException(status_code=404, detail="No active baseline for this project")
     return baseline
 
+# ---------------------------------------------------------------------------
+# ERP User requests (consultant view)
+# ---------------------------------------------------------------------------
+from src.services import erp_user_requests as _erp_user_requests_svc  # noqa: E402
+
+
+@app.get("/api/projects/{session_id}/erp-user-requests")
+def list_erp_user_requests(
+    session_id: str,
+    status: Optional[str] = "open",
+    current_user: User = Depends(require_permission(Permission.ISSUES_READ)),
+    db: Session = Depends(get_db),
+):
+    _get_owned_session(session_id, current_user)
+    rows = _erp_user_requests_svc.list_for_project(
+        db, session_id, status=status,
+    )
+    return {
+        "session_id": session_id,
+        "requests": [
+            {
+                "id": r.id,
+                "request_type": r.request_type,
+                "subject": r.subject,
+                "body": r.body,
+                "status": r.status,
+                "created_by_user_id": r.created_by_user_id,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "resolved_at": r.resolved_at.isoformat() if r.resolved_at else None,
+                "resolved_by_user_id": r.resolved_by_user_id,
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.post("/api/projects/{session_id}/erp-user-requests/{request_id}/resolve")
+def resolve_erp_user_request(
+    session_id: str,
+    request_id: str,
+    current_user: User = Depends(require_permission(Permission.ISSUES_READ)),
+    db: Session = Depends(get_db),
+):
+    _get_owned_session(session_id, current_user)
+    row = _erp_user_requests_svc.get_request(db, request_id, session_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Request not found")
+    resolved = _erp_user_requests_svc.resolve_request(
+        db, request=row, resolved_by_user_id=current_user.id,
+    )
+    db.commit()
+    return {"id": request_id, "resolved": bool(resolved)}
+
+# ---------------------------------------------------------------------------
+# Case-study view (Business Development)
+# ---------------------------------------------------------------------------
+@app.get("/api/projects/{session_id}/case-study")
+def project_case_study(
+    session_id: str,
+    current_user: User = Depends(
+        require_permission(Permission.OPPORTUNITY_CASE_STUDY_READ)
+    ),
+    db: Session = Depends(get_db),
+):
+    """Read-only summary of a converted project, for Business Developments.
+
+    Authorization:
+      * OPPORTUNITY_CASE_STUDY_READ is required (Business Development only).
+      * The project must be organization-owned and the caller must be a
+        member of the owning organization. Personal projects are
+        rejected (a case-study is an org-level concept).
+      * 404 for any failure - unknown project, personal project,
+        non-member - matching the enumeration-resistant pattern.
+
+    Returns no workspace data: no process steps, no solution decisions,
+    no test cases, no issues. Only the outcome summary.
+    """
+    session = db.get(SessionRecord, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if session.organization_id is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if get_membership(db, current_user.id, session.organization_id) is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Strict Opportunity-to-Project relationship. The
+    # case-study view is only for projects that were converted from an
+    # Opportunity via Mark-as-Won. `Opportunity.converted_session_id`
+    # is unique, so this is a single indexed lookup. 404 for projects
+    # created outside that flow - the caller cannot distinguish "project
+    # does not exist", "project is personal", "not a member", and
+    # "project was not created from an Opportunity".
+    from src.db.models import Opportunity
+    converted_from = (
+        db.query(Opportunity)
+        .filter(Opportunity.converted_session_id == session_id)
+        .first()
+    )
+    if converted_from is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    requirements = project_intelligence.get_requirements(session_id) or []
+    by_status: Dict[str, int] = {}
+    for r in requirements:
+        s = r.get("status") or "unknown"
+        by_status[s] = by_status.get(s, 0) + 1
+
+    generated = _collect_session_documents(session_id)
+
+    return {
+        "session_id": session_id,
+        "project_name": session.project_name,
+        "module": session.module,
+        "erp_system": session.erp_system,
+        "current_phase": session.current_phase,
+        "completed_phases": list(getattr(session, "completed_phases", []) or []),
+        "created_at": session.created_at.isoformat() if session.created_at else None,
+        "last_updated": (
+            session.updated_at.isoformat() if session.updated_at else None
+        ),
+        "requirements": {
+            "total": len(requirements),
+            "by_status": by_status,
+        },
+        "deliverables": [
+            {"phase": d["phase"], "label": d["label"],
+             "filename": os.path.basename(d["path"])}
+            for d in generated
+        ],
+    }
 
 # ---------------------------------------------------------------------------
 # Chat

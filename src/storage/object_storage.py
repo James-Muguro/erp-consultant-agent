@@ -197,3 +197,35 @@ def delete_object(key: str) -> None:
     except ClientError as e:
         logger.error("Object storage delete failed", key=key, error=str(e))
         raise ObjectStorageError(f"Delete failed: {e}") from e
+
+_OPPORTUNITY_ID_MAX_BYTES = 200
+_ORGANIZATION_ID_MAX_BYTES = 200
+
+
+def make_opportunity_storage_key(
+    organization_id: str,
+    opportunity_id: str,
+    document_id: str,
+    filename: str,
+) -> str:
+    """Return the S3 key for a TOR upload on an Opportunity.
+
+    Namespace: opportunities/<organization>/<opportunity>/<doc>_<filename>.
+    Uses the same sanitization and byte-budget rules as project document
+    keys, so a malformed component cannot inject extra '/' separators.
+    """
+    safe_org = _truncate_utf8(
+        _sanitize_key_component(organization_id), _ORGANIZATION_ID_MAX_BYTES,
+    )
+    safe_opp = _truncate_utf8(
+        _sanitize_key_component(opportunity_id), _OPPORTUNITY_ID_MAX_BYTES,
+    )
+    safe_document = _truncate_utf8(
+        _sanitize_key_component(document_id), _DOCUMENT_ID_MAX_BYTES,
+    )
+    safe_filename = _sanitize_key_component(filename)
+
+    prefix = f"opportunities/{safe_org}/{safe_opp}/{safe_document}_"
+    remaining = _MAX_KEY_BYTES - len(prefix.encode("utf-8"))
+    safe_filename = _truncate_utf8(safe_filename, remaining)
+    return f"{prefix}{safe_filename}"

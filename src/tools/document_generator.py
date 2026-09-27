@@ -18,6 +18,9 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt, RGBColor
 
+from sqlalchemy.orm import Session
+from src.db.models import SessionUserArtifactGrant, SessionRecord
+
 from src.config.settings import settings
 from src.utils.logger import AgentLogger
 
@@ -4102,5 +4105,141 @@ class DocumentGenerator:
         return filepath
 
 
+def list_eligible_erp_users(db: Session, session_id: str) -> list[dict]:
+    """Eligible ERP User assignment pool for a project.
+
+    Org-owned projects: members of the owning organization who hold the
+    erp_user application role.
+    Personal projects: empty list. Personal projects are not meaningful
+    ERP User assignment pools.
+    """
+    from src.db.models import OrganizationMembership, UserRoleRecord, User
+
+    session = db.get(SessionRecord, session_id)
+    if session is None or session.organization_id is None:
+        return []
+    rows = (
+        db.query(User, OrganizationMembership.role)
+        .join(OrganizationMembership, OrganizationMembership.user_id == User.id)
+        .join(UserRoleRecord, UserRoleRecord.user_id == User.id)
+        .filter(
+            OrganizationMembership.organization_id == session.organization_id,
+            UserRoleRecord.role == "erp_user",
+        )
+        .all()
+    )
+    seen: set[str] = set()
+    out: list[dict] = []
+    for user, org_role in rows:
+        if user.id in seen:
+            continue
+        seen.add(user.id)
+        out.append({
+            "user_id": user.id,
+            "email": user.email,
+            "name": user.name,
+            "org_role": org_role,
+        })
+    return out
+
+
+def list_active_grants(db: Session, session_id: str) -> list[SessionUserArtifactGrant]:
+    return (
+        db.query(SessionUserArtifactGrant)
+        .filter(
+            SessionUserArtifactGrant.session_id == session_id,
+            SessionUserArtifactGrant.revoked_at.is_(None),
+        )
+        .all()
+    )
+
+
+def list_revoked_grants(db: Session, session_id: str) -> list[SessionUserArtifactGrant]:
+    return (
+        db.query(SessionUserArtifactGrant)
+        .filter(
+            SessionUserArtifactGrant.session_id == session_id,
+            SessionUserArtifactGrant.revoked_at.is_not(None),
+        )
+        .order_by(SessionUserArtifactGrant.revoked_at.desc())
+        .all()
+    )
+
+def generate_tender_response(
+        self,
+        opportunity_id: str,
+        title: str,
+        client_name: str,
+        requirements: List[Dict[str, Any]],
+    ) -> str:
+        """Generate the tender response document from finalized
+        OpportunityRequirement data. Returns the local file path; the
+        caller persists to opportunity_generated_documents.
+
+        The requirements rows are the source of truth; this document is
+        derived and re-generatable.
+        """
+        doc = self._new_document("Tender Response", title)
+
+        def _or(value: Any, placeholder: str = "—") -> str:
+            s = str(value).strip() if value is not None else ""
+            return s if s else placeholder
+
+        doc.add_heading("1. Submission Summary", level=1)
+        self._add_info_table(doc, [
+            ("Client", client_name),
+            ("Tender", title),
+            ("Document Type", "Tender Response"),
+            ("Document Status", "Draft"),
+            ("Prepared Date", _utcnow().strftime('%Y-%m-%d')),
+        ])
+
+        doc.add_heading("2. Response Register", level=1)
+        rows = []
+        for r in requirements or []:
+            rows.append([
+                _or(r.get("external_code"), "—"),
+                _or(r.get("category"), "—"),
+                _or(r.get("description"), "—"),
+                _or(r.get("priority"), "—"),
+                _or(r.get("fit_response"), "—"),
+            ])
+        self._add_data_table(
+            doc,
+            ["Requirement ID", "Category", "Requirement",
+             "Priority", "Response"],
+            rows,
+        )
+
+        doc.add_heading("3. Detailed Responses", level=1)
+        for r in requirements or []:
+            rid = _or(r.get("external_code"), "Requirement")
+            doc.add_heading(str(rid), level=2)
+            doc.add_paragraph(_or(r.get("description"), "—"))
+            detail = []
+            if r.get("category"):
+                detail.append(("Category", r["category"]))
+            if r.get("priority"):
+                detail.append(("Priority", r["priority"]))
+            if r.get("fit_response"):
+                detail.append(("Response", r["fit_response"]))
+            if detail:
+                self._add_info_table(doc, detail)
+            if r.get("fit_response_comment"):
+                doc.add_heading("Response Notes", level=3)
+                doc.add_paragraph(str(r["fit_response_comment"]))
+
+        safe_title = _sanitize_component(title, fallback="tender", max_bytes=48)
+        timestamp = _utcnow().strftime('%Y%m%d_%H%M%S')
+        unique = uuid.uuid4().hex[:8]
+        filename = f"tender_response_{safe_title}_{timestamp}_{unique}.docx"
+        filepath = self.output_dir / filename
+        _atomic_save_docx(doc, filepath)
+        self.logger.log_tool_usage(
+            "generate_tender_response",
+            {"opportunity": opportunity_id},
+            f"Tender response saved to {filepath}",
+        )
+        return str(filepath)
 # Global document generator instance
 doc_generator = DocumentGenerator()
