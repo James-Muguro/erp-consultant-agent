@@ -38,11 +38,8 @@ module, because granting a permission for a capability that has no
 enforcement point would create the illusion of security without
 protecting anything. Current gaps:
 
-  * ERP User 'Assigned project, read-only' - no project-assignments
-    table, no assignment endpoint. ERP User holds read permissions but
-    has no project to read until the assignment mechanism exists.
   * ERP User 'My tickets/requests' - no ticket/request entity.
-  * Marketer 'Content library', 'Testimonial/outcome tracker' - no
+  * Business Development 'Content library', 'Testimonial/outcome tracker' - no
     corresponding entities or endpoints.
   * Organization 'Cross-project analytics', 'Firm knowledge base',
     'Billing/subscription', 'Invitations' - each requires new product
@@ -50,7 +47,25 @@ protecting anything. Current gaps:
     foundation.
 
 Each of these is a separate feature, not a permission-module change.
+
+ERP User project-artifact access (Phase 2.3)
+--------------------------------------------
+ERP User project-artifact access is deliberately NOT modelled as a
+role-level permission. Before Phase 2.3, the ERP_USER role bundled every
+read permission (REQUIREMENTS_READ, SOLUTION_READ, TESTING_READ, ...),
+which allowed any ERP User who was a member of an organization to read
+every artifact of every org project. That contradicted the locked
+architecture: an ERP User has no project access without project
+membership, and no artifact access without a per-project, per-user
+grant recorded in `session_user_artifact_grants`.
+
+The ERP_USER role therefore carries only PROJECT_READ (so the project
+list remains discoverable) plus the cross-cutting permissions. All
+artifact-level authorization for ERP Users flows through the grant
+model in `src/auth/project_access.py`; those checks are context-scoped
+and never collapse into a role-level boolean.
 """
+
 from __future__ import annotations
 
 from enum import Enum
@@ -70,7 +85,7 @@ class UserRole(str, Enum):
     ERP_USER = "erp_user"
     FUNCTIONAL_CONSULTANT = "functional_consultant"
     DEVELOPER = "developer"
-    MARKETER = "marketer"
+    BUSINESS_DEVELOPMENT = "business_development"
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +132,7 @@ class Permission(str, Enum):
 
     # Issues / health / coverage
     ISSUES_READ = "issues:read"
+    ISSUES_WRITE = "issues:write"
     HEALTH_READ = "health:read"
 
     # Generated documents
@@ -128,11 +144,34 @@ class Permission(str, Enum):
     UPLOADS_WRITE = "uploads:write"
 
     # Baselines
+        # Baselines
     BASELINES_CREATE = "baselines:create"
+
+    # Project artifact-grant management (Functional Consultant only).
+    # This is a role capability. Per-artifact access for ERP Users is
+    # context-scoped and lives in src/auth/project_access.py - it is
+    # deliberately not a role permission.
+    PROJECT_GRANTS_MANAGE = "project:grants:manage"
 
     # Reviews and consistency checks
     REVIEWS_SUBMIT = "reviews:submit"
     CONSISTENCY_RUN = "consistency:run"
+
+    # Unified consultant inbox (Phase 2.5 D3). Held by Functional
+    # Consultant only. Developers see reopened work through their
+    # project workspace, not through the inbox.
+    INBOX_READ = "inbox:read"
+
+    # Opportunity / TOR workflow (Phase 2.5 D1). Held by Business Development only.
+    # The Functional Consultant participates through assignment and the
+    # resulting project hand-off, not through direct Opportunity access.
+    OPPORTUNITY_CREATE = "opportunity:create"
+    OPPORTUNITY_READ = "opportunity:read"
+    OPPORTUNITY_EDIT = "opportunity:edit"
+    OPPORTUNITY_UPLOAD_TOR = "opportunity:upload_tor"
+    OPPORTUNITY_GENERATE_RESPONSE = "opportunity:generate_response"
+    OPPORTUNITY_MARK_WON = "opportunity:mark_won"
+    OPPORTUNITY_CASE_STUDY_READ = "opportunity:case_study_read"
 
     # Phase execution
     PHASE_EXECUTE = "phase:execute"
@@ -174,12 +213,36 @@ _CONSULTANT_WRITE_PERMS: frozenset = frozenset({
     Permission.PROCESS_STEPS_REVISE,
     Permission.SOLUTION_RECORD_ACTUAL,
     Permission.TESTING_WRITE,
+    Permission.ISSUES_WRITE,
     Permission.DOCUMENTS_GENERATE,
     Permission.UPLOADS_WRITE,
     Permission.BASELINES_CREATE,
     Permission.REVIEWS_SUBMIT,
     Permission.CONSISTENCY_RUN,
     Permission.PHASE_EXECUTE,
+    # Functional Consultant is the sole role that manages ERP User
+    # artifact grants on a project (Phase 2.3). Developer deliberately
+    # does not hold this.
+    Permission.PROJECT_GRANTS_MANAGE,
+})
+_ISSUE_WRITE_PERMS: frozenset = frozenset({
+    Permission.ISSUES_WRITE,
+})
+_INBOX_PERMS: frozenset = frozenset({
+    Permission.INBOX_READ,
+})
+
+# Opportunity / TOR permission set (Phase 2.5 D1). Granted to Business Development
+# only - see the Permission enum comment above for why the Functional
+# Consultant is deliberately excluded here.
+_OPPORTUNITY_PERMS: frozenset = frozenset({
+    Permission.OPPORTUNITY_CREATE,
+    Permission.OPPORTUNITY_READ,
+    Permission.OPPORTUNITY_EDIT,
+    Permission.OPPORTUNITY_UPLOAD_TOR,
+    Permission.OPPORTUNITY_GENERATE_RESPONSE,
+    Permission.OPPORTUNITY_MARK_WON,
+    Permission.OPPORTUNITY_CASE_STUDY_READ,
 })
 
 # Developer write set. Derived from the Developer capability list:
@@ -205,34 +268,42 @@ _CONSULTANT_WRITE_PERMS: frozenset = frozenset({
 _DEVELOPER_WRITE_PERMS: frozenset = frozenset({
     Permission.SOLUTION_RECORD_ACTUAL,
     Permission.TESTING_WRITE,
+    Permission.ISSUES_WRITE,
     Permission.DOCUMENTS_GENERATE,
     Permission.UPLOADS_WRITE,
     Permission.PHASE_EXECUTE,
 })
 
-# Marketer permission set. The product capability list grants:
+# Business Development permission set. The product capability list grants:
 #   * Chat                   -> CHAT_SUBMIT
 #   * Project list, case-study view -> PROJECT_READ
 #   * Document generation    -> DOCUMENTS_GENERATE, DOCUMENTS_READ
 #   * Account/profile        -> PROFILE_EDIT
+#   * TOR/opportunity workflow -> _OPPORTUNITY_PERMS (Phase 2.5 D1)
 #
 # 'Content library' and 'Testimonial/outcome tracker' have no backend
 # support and are NOT modelled as permissions (see module docstring).
-_MARKETER_PERMS: frozenset = _COMMON_USER_PERMS | frozenset({
+_BUSINESS_DEVELOPMENT_PERMS: frozenset = _COMMON_USER_PERMS | frozenset({
     Permission.PROJECT_READ,
     Permission.DOCUMENTS_READ,
     Permission.DOCUMENTS_GENERATE,
-})
+}) | _OPPORTUNITY_PERMS
 
 
 ROLE_PERMISSIONS: dict = {
-    # ERP User: assigned-project read-only plus cross-cutting. No
-    # PROJECT_CREATE - see the module docstring's capability-gap note.
-    UserRole.ERP_USER: _COMMON_USER_PERMS | _READ_PERMS,
+    # ERP User: cross-cutting plus PROJECT_READ so the project list is
+    # discoverable, and nothing else. Artifact-level access is
+    # context-scoped and grant-driven (see src/auth/project_access.py);
+    # it deliberately does not appear as a role-level permission. The
+    # `_READ_PERMS` bundle granted here previously was the incorrect
+    # pre-Phase-2.3 behavior.
+    UserRole.ERP_USER: _COMMON_USER_PERMS | frozenset({
+        Permission.PROJECT_READ,
+    }),
 
     # Functional Consultant: full project scope.
     UserRole.FUNCTIONAL_CONSULTANT: (
-        _COMMON_USER_PERMS | _READ_PERMS | _CONSULTANT_WRITE_PERMS
+        _COMMON_USER_PERMS | _READ_PERMS | _CONSULTANT_WRITE_PERMS | _INBOX_PERMS
     ),
 
     # Developer: full read scope, targeted writes.
@@ -240,8 +311,10 @@ ROLE_PERMISSIONS: dict = {
         _COMMON_USER_PERMS | _READ_PERMS | _DEVELOPER_WRITE_PERMS
     ),
 
-    # Marketer: cross-cutting plus project read and documents.
-    UserRole.MARKETER: _MARKETER_PERMS,
+    # Business Development: cross-cutting plus project read, documents, and the
+    # Opportunity/TOR workflow.
+    UserRole.BUSINESS_DEVELOPMENT: _BUSINESS_DEVELOPMENT_PERMS,
+
 }
 
 
@@ -293,7 +366,7 @@ class AccountType(str, Enum):
     ERP_USER = "erp_user"
     FUNCTIONAL_CONSULTANT = "functional_consultant"
     DEVELOPER = "developer"
-    MARKETER = "marketer"
+    BUSINESS_DEVELOPMENT = "business_development"
     ORGANIZATION = "organization"
 
     @property

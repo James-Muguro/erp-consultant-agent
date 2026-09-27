@@ -27,7 +27,7 @@ Signup account type
 -------------------
 SignupRequest.account_type selects one of five account choices:
 
-  * ERP_USER, FUNCTIONAL_CONSULTANT, DEVELOPER, MARKETER — the new
+  * ERP_USER, FUNCTIONAL_CONSULTANT, DEVELOPER, BUSINESS_DEVELOPMENT — the new
     user is granted the matching single application role via a
     UserRoleRecord. The four individual roles are separate; there is no
     combined-role concept.
@@ -345,10 +345,20 @@ class UserOut(BaseModel):
     roles         — application roles the user currently holds.
     organizations — organizations the user is a member of, with the
                     membership role.
+    permissions   — effective application permissions, computed server-
+                    side as the union of ROLE_PERMISSIONS over the
+                    user's application roles. Exposed so the frontend
+                    capability layer can evaluate access without
+                    duplicating the role→permission mapping.
+    organization_privileges — per-organization privileges, keyed by
+                    organization id. Values are the privileges granted
+                    by the user's membership role in that org, derived
+                    from ORG_ROLE_PRIVILEGES.
 
     Not built directly from the ORM User row via from_attributes: the
-    roles and organizations fields come from separate tables and are
-    assembled explicitly by _build_user_out.
+    roles, organizations, permissions, and organization_privileges
+    fields come from separate tables and computed mappings, and are
+    assembled explicitly by `_build_user_out`.
     """
     model_config = ConfigDict(from_attributes=False)
 
@@ -359,6 +369,8 @@ class UserOut(BaseModel):
     created_at: datetime
     roles: list[str] = Field(default_factory=list)
     organizations: list[OrganizationSummary] = Field(default_factory=list)
+    permissions: list[str] = Field(default_factory=list)
+    organization_privileges: dict[str, list[str]] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------

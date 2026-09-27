@@ -13,7 +13,7 @@ Identity, roles, and multi-tenancy:
 
   * User is the application identity.
   * UserRoleRecord grants application roles (erp_user,
-    functional_consultant, developer, marketer). Users may hold multiple
+    functional_consultant, developer, business_development). Users may hold multiple
     roles simultaneously; effective permissions are the union of the
     permission sets of every role held. There is no combined-role
     concept and no single 'role' column on users.
@@ -54,6 +54,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     Float,
@@ -272,7 +273,7 @@ class UserRoleRecord(Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False, index=True,
     )
-    role = Column(String, nullable=False)  # 'erp_user' | 'functional_consultant' | 'developer' | 'marketer'
+    role = Column(String, nullable=False)  # 'erp_user' | 'functional_consultant' | 'developer' | 'business_development'
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
 
     __table_args__ = (
@@ -623,6 +624,615 @@ class ProjectDocument(Base):
         DateTime(timezone=True), nullable=False, default=_utcnow, index=True,
     )
 
+# ============================================================================
+# Session-scoped per-user artifact grants (ERP User project access)
+# ============================================================================
+class SessionUserArtifactGrant(Base):
+    """Per-user, per-project, per-artifact access grant.
+
+    This table does NOT establish project membership. Membership is
+    derived: a personal project's member is its `user_id`; an org-owned
+    project's members are the members of the owning organization (see
+    `_get_owned_session` in orchestrator_api.py and `is_project_member`
+    in src/auth/project_access.py). This table answers a different
+    question - "which artifacts of this project may this already-a-
+    member user access?" - and is only consulted after membership has
+    been established.
+
+    Motivation: the ERP User role does not bundle project-artifact read
+    permissions. An ERP User who belongs to an organization can see the
+    org's projects (PROJECT_READ), but can only reach a given artifact
+    of a given project when an explicit active grant exists here.
+
+    Artifact types (String column, not a Postgres ENUM, so future types
+    do not require an ALTER TYPE):
+        requirements_questionnaire
+        frd
+        uat_scenarios
+        training_materials
+
+    Designations:
+      * is_signatory      - FRD only. Grants a real Confirm / Request
+                            changes sign-off, internally mapped to
+                            ReviewAction approve/reject. Implies FRD
+                            access, does not extend it (DB CHECK).
+      * is_uat_participant - UAT scenarios only. Implies UAT access,
+                            does not extend general testing access
+                            (DB CHECK).
+
+    Audit: rows are never deleted by normal application flows. Revocation
+    sets `revoked_at` and `revoked_by_user_id`, preserving the historical
+    record so a later regrant starts a new active row while the prior
+    revoked row remains queryable.
+
+    Uniqueness: a partial unique index over
+    (session_id, user_id, artifact_type) WHERE revoked_at IS NULL
+    enforces at most one ACTIVE grant per (user, project, artifact),
+    while allowing any number of historical revoked rows for the same
+    identity. This mirrors the partial-index convention used by the
+    project-intelligence tables.
+    """
+    __tablename__ = "session_user_artifact_grants"
+
+    id = Column(String, primary_key=True)
+    session_id = Column(
+        String,
+        ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    user_id = Column(
+        String,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    artifact_type = Column(String, nullable=False)
+    is_signatory = Column(
+        Boolean, nullable=False, default=False, server_default=text("false"),
+    )
+    is_uat_participant = Column(
+        Boolean, nullable=False, default=False, server_default=text("false"),
+    )
+    # Attribution: SET NULL so a historical grant survives deletion of
+    # the user who granted it.
+    granted_by_user_id = Column(
+        String,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    granted_at = Column(
+        DateTime(timezone=True), nullable=False, default=_utcnow,
+    )
+    # Soft-revoke. Active grants have revoked_at IS NULL; the partial
+    # unique index above is scoped to that subset.
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_by_user_id = Column(
+        String,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    __table_args__ = (
+        # At most one ACTIVE grant per (session, user, artifact). The
+        # `postgresql_where` / `sqlite_where` clauses are the same
+        # pattern used by the versioned project-intelligence tables.
+        Index(
+            "ix_session_user_artifact_grants_active_unique",
+            "session_id", "user_id", "artifact_type",
+            unique=True,
+            postgresql_where=text("revoked_at IS NULL"),
+            sqlite_where=text("revoked_at IS NULL"),
+        ),
+        # "Every active grant held by this user" across all projects.
+        Index(
+            "ix_session_user_artifact_grants_user_active",
+            "user_id", "revoked_at",
+        ),
+        # "Who has been granted this artifact on this project" - the
+        # consultant grant-management list.
+        Index(
+            "ix_session_user_artifact_grants_session_artifact",
+            "session_id", "artifact_type",
+        ),
+        # Designation coherence, enforced at the DB even if a future
+        # caller bypasses the service helper. Portable boolean form.
+        CheckConstraint(
+            "NOT is_signatory OR artifact_type = 'frd'",
+            name="ck_session_user_artifact_grants_signatory_only_frd",
+        ),
+        CheckConstraint(
+            "NOT is_uat_participant OR artifact_type = 'uat_scenarios'",
+            name="ck_session_user_artifact_grants_uat_only_uat",
+        ),
+    )
+
+class SessionStakeholderSubmission(Base):
+    """Raw stakeholder input submitted by a granted ERP User.
+
+    This is evidence, not a requirements write path. Submitting here does
+    NOT call requirements_agent.gather_requirements, does NOT touch
+    GeneratedDocument, and does NOT create a parallel requirements state.
+    The consultant is the authority for structured requirements and
+    reviews submissions in the consultant workspace.
+    """
+    __tablename__ = "session_stakeholder_submissions"
+
+    id = Column(String, primary_key=True)
+    session_id = Column(
+        String, ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    submitted_by_user_id = Column(
+        String, ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    answers = Column(Text, nullable=False)
+    submitted_at = Column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, index=True,
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_ssub_session_submitted_by",
+            "session_id", "submitted_by_user_id",
+        ),
+    )
+
+class AttentionItem(Base):
+    """Unified routing/attention item for the consultant inbox.
+
+    Single shared routing mechanism for every actionable consultant
+    hand-off. The three source types that currently feed this table are:
+      * erp_user_request         - an ERP User ticket/request
+      * developer_completion     - a developer-marked-complete issue/test
+      * bid_won                  - a Mark-as-Won Opportunity hand-off
+
+    Do not build parallel notification tables. Every routed action lands
+    here as one row.
+
+    Reopen is deliberately NOT a routed item. When a consultant reopens
+    a developer completion, the reopened status surfaces the work in the
+    developer's existing project workspace; the inbox is consultant-only
+    (INBOX_READ is Functional Consultant only), so a developer-facing
+    attention item would be unreadable by its recipient.
+
+    Source records remain authoritative. This table stores only routing
+    state (recipient, source pointer, resolution). Source-domain data is
+    resolved by an adapter when the inbox is read; nothing is duplicated.
+    """
+    __tablename__ = "attention_items"
+
+    id = Column(String, primary_key=True)
+    recipient_user_id = Column(
+        String,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    # NULL for a personal-project source. Populated for org-owned sources.
+    organization_id = Column(
+        String,
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=True, index=True,
+    )
+    # NULL for a bid-won item before the Project exists. Populated once
+    # the conversion transaction completes.
+    session_id = Column(
+        String,
+        ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        nullable=True, index=True,
+    )
+    # One of: 'erp_user_request' | 'developer_completion' | 'bid_won'.
+    # String column, not a Postgres ENUM, matching the schema's existing
+    # convention for extensible value sets.
+    source_type = Column(String, nullable=False)
+    # Physical row id of the source record. The source record is
+    # authoritative; this table only points at it.
+    source_id = Column(String, nullable=False)
+    # 'pending' | 'resolved'. Resolved items leave the default inbox but
+    # remain queryable through history.
+    status = Column(
+        String, nullable=False, default="pending",
+        server_default=text("'pending'"),
+    )
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, index=True,
+    )
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    resolved_by_user_id = Column(
+        String,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    __table_args__ = (
+        # Default inbox query: "my pending items".
+        Index(
+            "ix_attention_items_recipient_status",
+            "recipient_user_id", "status",
+        ),
+        # History query: "my resolved items, newest first".
+        Index(
+            "ix_attention_items_recipient_created",
+            "recipient_user_id", "created_at",
+        ),
+        # Source-side lookup: resolve all items for a source when it
+        # reaches its terminal state.
+        Index(
+            "ix_attention_items_source",
+            "source_type", "source_id",
+        ),
+        # At most one PENDING item per (source, recipient). Resolved
+        # items are exempt so a source can be reopened into a new item
+        # later if needed.
+        Index(
+            "ix_attention_items_pending_unique",
+            "source_type", "source_id", "recipient_user_id",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+            sqlite_where=text("status = 'pending'"),
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'resolved')",
+            name="ck_attention_items_status",
+        ),
+    )
+
+
+class ErpUserRequest(Base):
+    """A first-class ticket/request from an ERP User to the consultant.
+
+    Distinct from SessionStakeholderSubmission (Phase 2.4), which is
+    evidence captured from the questionnaire and never workflow-routed.
+    This table is the workflow item: it has a status, a resolver, and a
+    corresponding attention_items row per recipient consultant.
+
+    Creation is available to any ERP User with an active artifact grant
+    on the project (see src/api/erp_user_api.py). The Support tab in
+    ErpUserWorkspace is the ERP User surface; the ERP-User workspace is
+    isolated from the consultant workspace by route prefix.
+    """
+    __tablename__ = "erp_user_requests"
+
+    id = Column(String, primary_key=True)
+    session_id = Column(
+        String,
+        ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    created_by_user_id = Column(
+        String,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+    # 'change' | 'question' | 'issue' | 'other'. Plain string for
+    # extensibility.
+    request_type = Column(String, nullable=False)
+    subject = Column(String, nullable=False)
+    body = Column(Text, nullable=False)
+    # 'open' | 'resolved'.
+    status = Column(
+        String, nullable=False, default="open",
+        server_default=text("'open'"),
+    )
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, index=True,
+    )
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, default=_utcnow,
+        onupdate=_utcnow,
+    )
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    resolved_by_user_id = Column(
+        String,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_erp_user_requests_session_status",
+            "session_id", "status",
+        ),
+        Index(
+            "ix_erp_user_requests_creator",
+            "created_by_user_id",
+        ),
+        CheckConstraint(
+            "status IN ('open', 'resolved')",
+            name="ck_erp_user_requests_status",
+        ),
+    )
+
+# ============================================================================
+# Opportunity / TOR workflow (Phase 2.5 D1)
+# ============================================================================
+class Opportunity(Base):
+    """A prospective project, owned by an organization, managed by a
+    Business Development. Pre-award container for TOR ingestion, AI-drafted fit
+    responses, and the tender response document.
+
+    An Opportunity is NOT a Project. Until Mark-as-Won, it has no
+    SessionRecord. Conversion to a Project is a single atomic
+    transaction that creates the session and re-points the finalized
+    requirements (see opportunity_service.mark_won).
+
+    Status lifecycle:
+        draft           - editable; TOR may or may not be uploaded
+        tor_finalized   - every requirement has ai_draft_status='finalized'
+        won             - converted to a Project (converted_session_id set)
+        lost            - not converted; kept for the record
+        archived        - abandoned or cleaned up
+    """
+    __tablename__ = "opportunities"
+
+    id = Column(String, primary_key=True)
+    organization_id = Column(
+        String,
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    created_by_user_id = Column(
+        String,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+    owner_user_id = Column(
+        String,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+    title = Column(String, nullable=False)
+    client_name = Column(String, nullable=False)
+    status = Column(
+        String, nullable=False, default="draft",
+        server_default=text("'draft'"),
+    )
+    assigned_consultant_user_id = Column(
+        String,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+    converted_session_id = Column(
+        String,
+        ForeignKey("sessions.session_id", ondelete="SET NULL"),
+        nullable=True, unique=True,
+    )
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, default=_utcnow,
+        onupdate=_utcnow,
+    )
+    won_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_opportunities_org_status", "organization_id", "status"),
+        Index("ix_opportunities_owner", "owner_user_id"),
+        CheckConstraint(
+            "status IN ('draft', 'tor_finalized', 'won', 'lost', 'archived')",
+            name="ck_opportunities_status",
+        ),
+    )
+
+
+class OpportunityRequirement(Base):
+    """A single TOR-derived requirement row, awaiting Business Development review.
+
+    Distinct from RequirementItemRecord (session-scoped, canonical).
+    This is the pre-award staging buffer. On Mark-as-Won, each finalized
+    row is copied into a RequirementItemRecord in the new session, in a
+    single transaction. The two tables are NOT the same schema and are
+    NOT intended to be kept in sync afterwards - the Opportunity row
+    becomes historical evidence once the Project exists.
+
+    The AI draft fields (fit_response_ai, fit_response_ai_comment) are
+    never authoritative. Only the Business Development-set fields (fit_response,
+    fit_response_comment) participate in the final tender response and
+    the firm-knowledge ingest.
+    """
+    __tablename__ = "opportunity_requirements"
+
+    id = Column(String, primary_key=True)
+    opportunity_id = Column(
+        String,
+        ForeignKey("opportunities.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    external_code = Column(String, nullable=True, index=True)
+    category = Column(String, nullable=True)
+    description = Column(Text, nullable=False)
+    priority = Column(
+        String, nullable=False, default="Medium",
+        server_default=text("'Medium'"),
+    )
+    req_type = Column(
+        String, nullable=False, default="Functional",
+        server_default=text("'Functional'"),
+    )
+    acceptance_criteria = Column(Text, nullable=True)
+    status = Column(
+        String, nullable=False, default="draft",
+        server_default=text("'draft'"),
+    )
+    # 'low' | 'medium' | 'high' - optional business importance signal.
+    importance = Column(String, nullable=True)
+    # 'meets_out_of_the_box' | 'requires_customization' | 'not_supported'
+    fit_response = Column(String, nullable=True)
+    fit_response_ai = Column(String, nullable=True)
+    fit_response_comment = Column(Text, nullable=True)
+    fit_response_ai_comment = Column(Text, nullable=True)
+    # 'pending' | 'drafted' | 'finalized'
+    ai_draft_status = Column(
+        String, nullable=False, default="pending",
+        server_default=text("'pending'"),
+    )
+    # 'tor_word' | 'tor_excel' | 'manual'
+    source = Column(String, nullable=True)
+    source_excerpt = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, default=_utcnow,
+        onupdate=_utcnow,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "opportunity_id", "external_code",
+            name="uq_opportunity_requirements_opp_code",
+        ),
+        Index(
+            "ix_opportunity_requirements_opp_status",
+            "opportunity_id", "ai_draft_status",
+        ),
+        CheckConstraint(
+            "fit_response IS NULL OR fit_response IN "
+            "('meets_out_of_the_box', 'requires_customization', 'not_supported')",
+            name="ck_opportunity_requirements_fit_response",
+        ),
+        CheckConstraint(
+            "ai_draft_status IN ('pending', 'drafted', 'finalized')",
+            name="ck_opportunity_requirements_ai_draft_status",
+        ),
+    )
+
+
+class OpportunityDocument(Base):
+    """Uploaded TOR file. Pre-award counterpart of ProjectDocument.
+
+    Stored in object storage under the 'opportunities/' namespace. The
+    S3 object is deleted only when the Opportunity itself is deleted.
+    """
+    __tablename__ = "opportunity_documents"
+
+    id = Column(String, primary_key=True)
+    opportunity_id = Column(
+        String,
+        ForeignKey("opportunities.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    user_id = Column(
+        String,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+    filename = Column(String, nullable=False)
+    storage_key = Column(String, nullable=False, unique=True)
+    content_type = Column(String, nullable=False)
+    size_bytes = Column(Integer, nullable=False)
+    extracted_text_chars = Column(Integer, nullable=False, default=0)
+    # 'word' | 'excel'
+    source_format = Column(String, nullable=False)
+    uploaded_at = Column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, index=True,
+    )
+
+
+class OpportunityGeneratedDocument(Base):
+    """Generated tender response document. Pre-award counterpart of
+    GeneratedDocument. Same is_current partial-unique convention."""
+    __tablename__ = "opportunity_generated_documents"
+
+    id = Column(String, primary_key=True)
+    opportunity_id = Column(
+        String,
+        ForeignKey("opportunities.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    phase = Column(String, nullable=False)
+    label = Column(String, nullable=False)
+    is_current = Column(
+        Boolean, nullable=False, default=True,
+        server_default=text("true"), index=True,
+    )
+    filename = Column(String, nullable=False)
+    content_type = Column(
+        String, nullable=False,
+        default="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    content = Column(LargeBinary, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, default=_utcnow,
+        onupdate=_utcnow,
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_opportunity_generated_documents_opp_phase_label",
+            "opportunity_id", "phase", "label",
+        ),
+        Index(
+            "ix_opportunity_generated_documents_opp_phase_label_current",
+            "opportunity_id", "phase", "label",
+            unique=True,
+            postgresql_where=text("is_current"),
+            sqlite_where=text("is_current"),
+        ),
+    )
+
+
+class FirmKnowledgeEntry(Base):
+    """Firm-wide reusable knowledge, scoped to an organization.
+
+    First concrete implementation of the previously-deferred 'firm
+    knowledge reuse across projects' capability. Populated when a
+    Business Development finalizes an OpportunityRequirement: the requirement text
+    and the final response become a reusable pattern that informs
+    future AI drafts in the same organization.
+
+    Never auto-selects a final response. Historical entries are fed to
+    the LLM rerank step as context; the Business Development decides every final
+    fit_response. Conflicting historical entries are surfaced as
+    context, never resolved automatically.
+
+    source_type is a discriminator so the same table can hold future
+    knowledge types (e.g. 'solution_pattern', 'testimonial') without a
+    schema change. This phase only writes 'tor_requirement_response'.
+    """
+    __tablename__ = "firm_knowledge_entries"
+
+    id = Column(String, primary_key=True)
+    organization_id = Column(
+        String,
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    source_type = Column(String, nullable=False)
+    source_session_id = Column(
+        String,
+        ForeignKey("sessions.session_id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    source_opportunity_id = Column(
+        String,
+        ForeignKey("opportunities.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    source_external_code = Column(String, nullable=True)
+    category = Column(String, nullable=True)
+    requirement_text = Column(Text, nullable=False)
+    response_text = Column(Text, nullable=False)
+    response_kind = Column(String, nullable=True)
+    importance = Column(String, nullable=True)
+    erp_system = Column(String, nullable=True)
+    tags = Column(_json_type()(), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, index=True,
+    )
+
+    __table_args__ = (
+        # Idempotency: one knowledge entry per finalized TOR row.
+        UniqueConstraint(
+            "source_opportunity_id", "source_external_code",
+            name="uq_firm_knowledge_source",
+        ),
+        Index(
+            "ix_firm_knowledge_org_type",
+            "organization_id", "source_type",
+        ),
+        Index(
+            "ix_firm_knowledge_org_erp",
+            "organization_id", "erp_system",
+        ),
+    )
 
 # ============================================================================
 # Project memory
@@ -880,8 +1490,22 @@ class TestCaseRecord(Base):
     is_current column here, unlike RequirementItemRecord,
     ProcessStepRecord, and SolutionDecision. Regeneration updates the
     existing row's content fields in place, preserving its physical id,
-    created_at, and needs_retest flag. That statefulness is why
-    history-over-overwrite does not apply to this table.
+    created_at, needs_retest, and (since Phase 2.8) its workflow status.
+    Content regeneration must not silently reset an in-flight
+    completion.
+
+    Workflow status values (used by the developer / consultant
+    completion workflow):
+
+        open                         - initial state
+        developer_marked_complete    - awaiting consultant review
+        consultant_confirmed_resolved - closed
+        reopened_with_feedback       - consultant reopened, back with developer
+
+    The authoritative audit trail (who did what, when, with what note)
+    lives in ReviewAction rows. This table stores only the current
+    status and enough counters to distinguish "first-time open" from
+    "reopened".
 
     The prior full-table UniqueConstraint uq_test_case_session_external_code
     over (session_id, external_code) was incorrect - it prevented QA and
@@ -906,6 +1530,18 @@ class TestCaseRecord(Base):
     acceptance_criteria = Column(Text, nullable=True)
     related_design_component = Column(String, nullable=True)
     needs_retest = Column(Boolean, nullable=False, default=False)
+    status = Column(
+        String, nullable=False, default="open",
+        server_default=text("'open'"), index=True,
+    )
+    completion_count = Column(
+        Integer, nullable=False, default=0, server_default=text("0"),
+    )
+    last_completed_at = Column(DateTime(timezone=True), nullable=True)
+    last_completed_by_user_id = Column(
+        String, ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
     updated_at = Column(
         DateTime(timezone=True), nullable=False, default=_utcnow,
@@ -920,7 +1556,6 @@ class TestCaseRecord(Base):
         UniqueConstraint("session_id", "test_type", "external_code",
                          name="uq_test_case_session_type_external_code"),
     )
-
 
 class TrainingStepRecord(Base):
     """Structured training manual steps.
@@ -967,7 +1602,22 @@ class TrainingStepRecord(Base):
 # Issues, reviews, traceability
 # ============================================================================
 class ProjectIssue(Base):
-    """Unchanged from prior turn."""
+    """Unchanged from prior turn, extended in Phase 2.5 Step 2 (D2) with
+    the per-row state needed for the developer completion / consultant
+    confirm-reopen workflow.
+
+    Status values used by the workflow (existing default 'open'):
+
+        open                         - initial state, awaiting developer
+        developer_marked_complete    - awaiting consultant review
+        consultant_confirmed_resolved - closed
+        reopened_with_feedback       - consultant reopened, back with developer
+
+    The authoritative audit trail (who did what, when, with what note)
+    lives in ReviewAction rows, not on this table. This table stores only
+    the current status and enough counters to distinguish "first-time
+    open" from "reopened".
+    """
     __tablename__ = "project_issues"
 
     id = Column(String, primary_key=True)
@@ -986,6 +1636,14 @@ class ProjectIssue(Base):
     )
     classification = Column(String, nullable=True)
     status = Column(String, nullable=False, default="open")
+    completion_count = Column(
+        Integer, nullable=False, default=0, server_default=text("0"),
+    )
+    last_completed_at = Column(DateTime(timezone=True), nullable=True)
+    last_completed_by_user_id = Column(
+        String, ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
     updated_at = Column(
         DateTime(timezone=True), nullable=False, default=_utcnow,

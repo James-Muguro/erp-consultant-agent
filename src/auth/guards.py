@@ -35,10 +35,11 @@ from src.auth.permissions import (
 )
 from src.auth.rbac import (
     get_membership,
+    has_active_membership,
     membership_has_privilege,
     user_has_permission,
 )
-from src.db.models import OrganizationMembership, User
+from src.db.models import OrganizationMembership, SessionRecord, User
 
 
 def require_permission(permission: Permission):
@@ -101,4 +102,52 @@ def require_org_privilege(privilege: OrganizationPrivilege):
                 detail="You don't have permission to manage this organization.",
             )
         return membership
+    return dep
+
+def require_project_grant_management():
+    """Dependency factory for grant-management endpoints.
+
+    Allows:
+      * Personal-project owner (session.organization_id IS NULL and
+        session.user_id == current_user.id) regardless of capability.
+      * Callers with Permission.PROJECT_GRANTS_MANAGE who are also a
+        member of the project (personal owner, or active member of the
+        owning organization).
+
+    404 (not 403) for missing project OR unauthorized caller, matching
+    the enumeration-resistant _get_owned_session contract.
+    """
+
+    def dep(
+        session_id: str,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ) -> User:
+        session = db.get(SessionRecord, session_id)
+        if session is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Project not found",
+            )
+        if session.organization_id is None and session.user_id == current_user.id:
+            return current_user
+        if not user_has_permission(
+            db, current_user.id, Permission.PROJECT_GRANTS_MANAGE,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Project not found",
+            )
+        if session.organization_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Project not found",
+            )
+        if not has_active_membership(db, current_user.id, session.organization_id):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Project not found",
+            )
+        return current_user
+
     return dep

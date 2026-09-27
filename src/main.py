@@ -10,7 +10,6 @@ from src.memory import agent_memory
 from src.utils.logger import metrics_collector, setup_logging
 from src.config.settings import settings
 
-
 def print_banner():
     """Print application banner"""
     banner = """
@@ -170,27 +169,28 @@ def list_sessions(args):
 
 
 def show_memory_stats(args):
-    """Show memory statistics"""
-    
-    stats = agent_memory.get_memory_stats()
-    
+    """Show memory statistics for a specific session.
+
+    The previous implementation called a method that no longer exists
+    with the expected shape. The current AgentMemory.get_memory_stats
+    signature requires a session_id and returns a per-session summary.
+    """
+    session_id = getattr(args, "session_id", None)
+    if not session_id:
+        print("❌ --session-id is required for the 'memory' subcommand")
+        return
+
+    stats = agent_memory.get_memory_stats(session_id)
+
     print(f"\n🧠 Memory Statistics")
     print(f"{'='*60}")
-    
-    print(f"\nSessions:")
-    print(f"  Active: {stats['sessions']['active']}")
-    
-    print(f"\nMemory Bank:")
-    print(f"  Total Memories: {stats['memory_bank']['total_memories']}")
-    
-    print(f"\n  By Category:")
-    for category, count in stats['memory_bank']['categories'].items():
-        print(f"    - {category}: {count}")
-    
-    if stats['memory_bank']['top_tags']:
-        print(f"\n  Top Tags:")
-        for tag, count in stats['memory_bank']['top_tags'][:5]:
-            print(f"    - {tag}: {count}")
+    print(f"Session: {stats['session_id']}")
+    print(f"Total memories: {stats['total_memories']}")
+
+    if stats["categories"]:
+        print(f"\n  By category:")
+        for category, count in stats["categories"].items():
+            print(f"    - {category}: {count}")
 
 
 def main():
@@ -235,7 +235,8 @@ def main():
     subparsers.add_parser('list', help='List all sessions')
     
     # Memory stats command
-    subparsers.add_parser('memory', help='Show memory statistics')
+    memory_parser = subparsers.add_parser('memory', help='Show memory statistics')
+    memory_parser.add_argument('--session-id', required=True, help='Session ID')
     
     args = parser.parse_args()
     

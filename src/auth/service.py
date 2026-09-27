@@ -98,7 +98,7 @@ def create_user(
     alongside the user row:
 
       * Individual account types (ERP_USER, FUNCTIONAL_CONSULTANT,
-        DEVELOPER, MARKETER): one UserRoleRecord with the matching
+        DEVELOPER, BUSINESS_DEVELOPMENT): one UserRoleRecord with the matching
         application role.
 
       * Organization: one Organization row and one OrganizationMembership
