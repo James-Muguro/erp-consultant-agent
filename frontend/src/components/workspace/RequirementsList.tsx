@@ -1,19 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { Check, X } from "lucide-react";
 import { api } from "../../api/client";
+import { useCapabilities } from "../../auth/useCapabilities";
 import type { RequirementItem } from "../../types";
 import { EmptyRow, ErrorRow, LoadingRow, StatusBadge } from "./shared";
 
-/**
- * Requirements tab. Loads requirements, groups them by category, and
- * offers approve/reject on drafts.
- *
- * The fetch lives inside the effect so the setState calls are provably
- * downstream of an await, not synchronous with the effect body. A
- * reloadToken drives retry and post-action refetch; the per-run
- * `cancelled` flag discards in-flight responses when the effect re-runs.
- */
 export function RequirementsList({ sessionId }: { sessionId: string }) {
+  const capabilities = useCapabilities();
+  const canReview = capabilities.can("reviews:submit");
+
   const [requirements, setRequirements] = useState<RequirementItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -105,6 +100,7 @@ export function RequirementsList({ sessionId }: { sessionId: string }) {
           <ul className="space-y-2">
             {byCategory[category].map((r) => {
               const pending = actingOn === r.id;
+              const showReviewControls = canReview && r.status === "draft";
               return (
                 <li
                   key={r.id}
@@ -128,7 +124,7 @@ export function RequirementsList({ sessionId }: { sessionId: string }) {
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
                       <StatusBadge status={r.status} />
-                      {r.status === "draft" && (
+                      {showReviewControls && (
                         <div className="flex gap-1">
                           <button
                             type="button"

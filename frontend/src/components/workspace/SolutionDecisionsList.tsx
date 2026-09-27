@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Check, X } from "lucide-react";
 import { api } from "../../api/client";
+import { useCapabilities } from "../../auth/useCapabilities";
 import type { SolutionDecision } from "../../types";
 import {
   EmptyRow,
@@ -11,6 +12,9 @@ import {
 } from "./shared";
 
 export function SolutionDecisionsList({ sessionId }: { sessionId: string }) {
+  const capabilities = useCapabilities();
+  const canReview = capabilities.can("reviews:submit");
+
   const [decisions, setDecisions] = useState<SolutionDecision[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -109,6 +113,7 @@ export function SolutionDecisionsList({ sessionId }: { sessionId: string }) {
           <ul className="space-y-2">
             {byType[type].map((d) => {
               const pending = actingOn === d.id;
+              const showReviewControls = canReview && d.status === "draft";
               return (
                 <li
                   key={d.id}
@@ -136,7 +141,7 @@ export function SolutionDecisionsList({ sessionId }: { sessionId: string }) {
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
                       <StatusBadge status={d.status} />
-                      {d.status === "draft" && (
+                      {showReviewControls && (
                         <div className="flex gap-1">
                           <button
                             type="button"

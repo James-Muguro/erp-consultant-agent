@@ -1,5 +1,8 @@
 import { Link, useParams } from "react-router-dom";
 import { ErrorBoundary } from "../../routes/ErrorBoundary";
+import { NotAuthorizedState } from "../../routes/NotAuthorizedState";
+import { useCapabilities } from "../../auth/useCapabilities";
+import type { Permission } from "../../auth/capabilities";
 import { HealthOverview } from "./HealthOverview";
 import { RequirementsList } from "./RequirementsList";
 import { ProcessStepsList } from "./ProcessStepsList";
@@ -8,6 +11,28 @@ import { TestingTrainingList } from "./TestingTrainingList";
 import { IssuesList } from "./IssuesList";
 import { UploadsPanel } from "./UploadsPanel";
 import { DeliverablesPanel } from "./DeliverablesPanel";
+import { TeamAccessTab } from "./TeamAccessTab";
+import { SupportTab } from "./SupportTab";
+
+/**
+ * Project workspace.
+ *
+ * The overall workspace route is gated on phase:execute by RequireAuth
+ * via routeConfig. This component gates the individual tabs on their
+ * respective read capabilities, so a role that can enter the workspace
+ * but cannot use a specific section sees only the tabs it can use.
+ *
+ * phase:execute as the workspace-entry capability is a Phase 2.2
+ * decision. The backend does not currently expose a dedicated
+ * workspace-entry capability. phase:execute is the intersection of the
+ * Functional Consultant and Developer capability sets and excludes
+ * Business Development and ERP User — matching the locked role scope.
+ *
+ * ERP Users do NOT reach this component. Their artifact surface lives
+ * under /erp/p/*, gated on RequireArtifactGrant and per-endpoint
+ * backend authorization. The phase:execute gate on /p/* is not
+ * relaxed; the ERP User experience is a separate route tree.
+ */
 
 type Tab =
   | "overview"
@@ -16,29 +41,28 @@ type Tab =
   | "solution"
   | "testing"
   | "issues"
+  | "support"
   | "deliverables"
-  | "documents";
+  | "documents"
+  | "team-access";
 
-const TABS: { id: Tab; label: string }[] = [
-  { id: "overview", label: "Overview" },
-  { id: "requirements", label: "Requirements" },
-  { id: "process", label: "Process steps" },
-  { id: "solution", label: "Solution decisions" },
-  { id: "testing", label: "Testing & training" },
-  { id: "issues", label: "Issues" },
-  { id: "deliverables", label: "Deliverables" },
-  { id: "documents", label: "Uploads" },
+const TABS: { id: Tab; label: string; capability: Permission }[] = [
+  { id: "overview", label: "Overview", capability: "health:read" },
+  { id: "requirements", label: "Requirements", capability: "requirements:read" },
+  { id: "process", label: "Process steps", capability: "process_steps:read" },
+  { id: "solution", label: "Solution decisions", capability: "solution:read" },
+  { id: "testing", label: "Testing & training", capability: "testing:read" },
+  { id: "issues", label: "Issues", capability: "issues:read" },
+  { id: "support", label: "Support", capability: "issues:read" },
+  { id: "deliverables", label: "Deliverables", capability: "documents:read" },
+  { id: "documents", label: "Uploads", capability: "uploads:read" },
+  { id: "team-access", label: "Team access", capability: "project:grants:manage" },
 ];
 
 function isTab(value: string | undefined): value is Tab {
   return value !== undefined && TABS.some((t) => t.id === value);
 }
 
-/**
- * Fallback shown when a workspace tab body throws during render.
- * Rendered inside the tab content area so the tab strip stays mounted
- * and the user can switch to a different tab to recover.
- */
 function TabBodyError({
   error,
   onRetry,
@@ -75,7 +99,38 @@ function TabBodyError({
 
 export function ProjectWorkspace({ sessionId }: { sessionId: string }) {
   const { tab: rawTab } = useParams<{ tab?: string }>();
-  const tab: Tab = isTab(rawTab) ? rawTab : "overview";
+  const capabilities = useCapabilities();
+
+  // The visible tab set is the intersection of all tabs with the
+  // capabilities the caller actually holds. Computed on every render;
+  // useCapabilities is memoized on the user object, so this is cheap.
+  const visibleTabs = TABS.filter((t) => capabilities.can(t.capability));
+
+  // Defensive: a workspace participant should always have at least one
+  // authorized tab. If not, render the not-authorized state rather than
+  // an empty workspace with no content.
+  if (visibleTabs.length === 0) {
+    return (
+      <NotAuthorizedState
+        title="No workspace sections available"
+        description="Your account doesn't have access to any project workspace sections."
+        backTo="/"
+      />
+    );
+  }
+
+  // Determine which tab the URL requests and whether it is authorized.
+  const requestedTab: Tab | null = isTab(rawTab) ? rawTab : null;
+  const requestedTabConfig = requestedTab
+    ? TABS.find((t) => t.id === requestedTab)!
+    : null;
+  const requestedIsDenied =
+    requestedTabConfig !== null &&
+    !capabilities.can(requestedTabConfig.capability);
+
+  // Fallback when the URL has no explicit (or a mismatched) tab.
+  const fallbackTab: Tab = visibleTabs[0].id;
+  const activeTab: Tab = requestedTab ?? fallbackTab;
 
   function tabPath(id: Tab): string {
     return id === "overview" ? `/p/${sessionId}` : `/p/${sessionId}/${id}`;
@@ -88,8 +143,8 @@ export function ProjectWorkspace({ sessionId }: { sessionId: string }) {
         aria-label="Project sections"
         className="flex shrink-0 gap-1 overflow-x-auto border-b border-border bg-surface px-3 py-2 sm:px-4"
       >
-        {TABS.map((t) => {
-          const isActive = tab === t.id;
+        {visibleTabs.map((t) => {
+          const isActive = !requestedIsDenied && activeTab === t.id;
           return (
             <Link
               key={t.id}
@@ -110,20 +165,46 @@ export function ProjectWorkspace({ sessionId }: { sessionId: string }) {
 
       <div className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6">
         <ErrorBoundary
-          key={`${sessionId}-${tab}`}
+          key={`${sessionId}-${activeTab}-${requestedIsDenied}`}
           fallback={(error, reset) => (
             <TabBodyError error={error} onRetry={reset} />
           )}
         >
           <div className="mx-auto max-w-3xl" role="tabpanel">
-            {tab === "overview" && <HealthOverview sessionId={sessionId} />}
-            {tab === "requirements" && <RequirementsList sessionId={sessionId} />}
-            {tab === "process" && <ProcessStepsList sessionId={sessionId} />}
-            {tab === "solution" && <SolutionDecisionsList sessionId={sessionId} />}
-            {tab === "testing" && <TestingTrainingList sessionId={sessionId} />}
-            {tab === "issues" && <IssuesList sessionId={sessionId} />}
-            {tab === "deliverables" && <DeliverablesPanel sessionId={sessionId} />}
-            {tab === "documents" && <UploadsPanel sessionId={sessionId} />}
+            {requestedIsDenied ? (
+              <NotAuthorizedState
+                inline
+                title="You don't have access to this section"
+                description="Your account doesn't have the permissions required to view this project section."
+              />
+            ) : (
+              <>
+                {activeTab === "overview" && <HealthOverview sessionId={sessionId} />}
+                {activeTab === "requirements" && (
+                  <RequirementsList sessionId={sessionId} />
+                )}
+                {activeTab === "process" && (
+                  <ProcessStepsList sessionId={sessionId} />
+                )}
+                {activeTab === "solution" && (
+                  <SolutionDecisionsList sessionId={sessionId} />
+                )}
+                {activeTab === "testing" && (
+                  <TestingTrainingList sessionId={sessionId} />
+                )}
+                {activeTab === "issues" && <IssuesList sessionId={sessionId} />}
+                {activeTab === "support" && <SupportTab sessionId={sessionId} />}
+                {activeTab === "deliverables" && (
+                  <DeliverablesPanel sessionId={sessionId} />
+                )}
+                {activeTab === "documents" && (
+                  <UploadsPanel sessionId={sessionId} />
+                )}
+                {activeTab === "team-access" && (
+                  <TeamAccessTab sessionId={sessionId} />
+                )}
+              </>
+            )}
           </div>
         </ErrorBoundary>
       </div>

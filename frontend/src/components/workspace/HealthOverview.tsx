@@ -1,12 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { ChevronDown, RefreshCw, ShieldCheck } from "lucide-react";
 import { api } from "../../api/client";
+import { useCapabilities } from "../../auth/useCapabilities";
 import type { CoverageGaps, ProjectHealth } from "../../types";
 import { WorkspaceCard } from "./shared";
 
-/** Render a status-count map defensively. The backend contract is
- * `Record<string, number>`, but a shape mismatch should degrade to a
- * readable label rather than "undefined draft" or "[object Object]". */
 function renderCounts(counts: Record<string, number>): string[] {
   const out: string[] = [];
   for (const [label, raw] of Object.entries(counts)) {
@@ -61,6 +59,9 @@ function GapList({
 }
 
 export function HealthOverview({ sessionId }: { sessionId: string }) {
+  const capabilities = useCapabilities();
+  const canRunConsistency = capabilities.can("consistency:run");
+
   const [health, setHealth] = useState<ProjectHealth | null>(null);
   const [gaps, setGaps] = useState<CoverageGaps | null>(null);
   const [gapsError, setGapsError] = useState<string | null>(null);
@@ -191,10 +192,6 @@ export function HealthOverview({ sessionId }: { sessionId: string }) {
           </div>
         )}
 
-        {/* Baseline presence is a first-class signal from the backend:
-            an active baseline means the solution has been frozen at a
-            point in time. Surfacing it here is deliberate - the field
-            existed on the health response and had no consumer. */}
         <p className="mt-3 text-xs text-ink-faint">
           {health.has_active_baseline
             ? "An active solution baseline is recorded for this project."
@@ -245,23 +242,32 @@ export function HealthOverview({ sessionId }: { sessionId: string }) {
           ERP system mismatches, conflicting decisions, and customizations
           without a stated rationale. Findings appear in the Issues tab.
         </p>
-        <button
-          type="button"
-          onClick={handleConsistencyCheck}
-          disabled={checking}
-          className="flex items-center gap-2 rounded-md bg-accent px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-accent-strong disabled:opacity-60"
-        >
-          <ShieldCheck size={15} aria-hidden="true" />
-          {checking ? "Checking…" : "Run consistency check"}
-        </button>
-        {checkResult && (
-          <p aria-live="polite" className="mt-2 text-sm text-ink-muted">
-            {checkResult}
-          </p>
-        )}
-        {checkError && (
-          <p role="alert" className="mt-2 text-sm text-danger">
-            {checkError}
+        {canRunConsistency ? (
+          <>
+            <button
+              type="button"
+              onClick={handleConsistencyCheck}
+              disabled={checking}
+              className="flex items-center gap-2 rounded-md bg-accent px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-accent-strong disabled:opacity-60"
+            >
+              <ShieldCheck size={15} aria-hidden="true" />
+              {checking ? "Checking…" : "Run consistency check"}
+            </button>
+            {checkResult && (
+              <p aria-live="polite" className="mt-2 text-sm text-ink-muted">
+                {checkResult}
+              </p>
+            )}
+            {checkError && (
+              <p role="alert" className="mt-2 text-sm text-danger">
+                {checkError}
+              </p>
+            )}
+          </>
+        ) : (
+          <p className="text-xs text-ink-faint">
+            Running the consistency check requires the review capability,
+            which your account does not currently hold.
           </p>
         )}
       </WorkspaceCard>
