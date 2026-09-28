@@ -1,5 +1,5 @@
 """
-Configuration settings for ERP Consultant Agent.
+Configuration settings for Tarzyna.
 """
 from __future__ import annotations
 
@@ -162,6 +162,13 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     project_name: str = Field(default="ERP Consultant Agent")
     environment: str = Field(default="development")
+    frontend_base_url: Optional[str] = Field(
+        default=None,
+        description="Public base URL of the frontend, used to build links "
+                    "in emails (verification, password reset). No trailing "
+                    "slash. Required outside development. When unset in "
+                    "development, the first ALLOWED_ORIGINS entry is used.",
+    )
 
     # ------------------------------------------------------------------ #
     # Directories
@@ -553,6 +560,15 @@ class Settings(BaseSettings):
             and self.email_http_body_template
         )
 
+    @property
+    def resolved_frontend_base_url(self) -> str:
+        """Base URL for links in emails. Explicit setting first; the
+        first allowed origin only as a development convenience."""
+        if self.frontend_base_url:
+            return self.frontend_base_url
+        origins = self.allowed_origins_list
+        return origins[0] if origins else ""
+
     # ------------------------------------------------------------------ #
     # Validators
     # ------------------------------------------------------------------ #
@@ -581,6 +597,21 @@ class Settings(BaseSettings):
                 "Generate one: openssl rand -hex 32"
             )
         return v
+
+    @field_validator("frontend_base_url")
+    @classmethod
+    def _normalize_frontend_base_url(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        normalized = v.strip().rstrip("/")
+        if not normalized:
+            return None
+        if not normalized.startswith(("http://", "https://")):
+            raise ValueError(
+                "FRONTEND_BASE_URL must start with http:// or https:// "
+                f"(got {v!r})."
+            )
+        return normalized
 
     @field_validator("gemini_model", "groq_model", "openai_model", "anthropic_model")
     @classmethod
@@ -749,6 +780,18 @@ class Settings(BaseSettings):
                 f"email_delivery_enabled=True with email_provider="
                 f"{self.email_provider!r} requires the following settings: "
                 + ", ".join(missing) + "."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_frontend_base_url_outside_development(self) -> "Settings":
+        """A deployed environment must say where its frontend lives.
+        Falling back to a dev default there produces dead links in
+        real users' inboxes."""
+        if self.environment != "development" and not self.frontend_base_url:
+            raise ValueError(
+                f"FRONTEND_BASE_URL must be set when environment is "
+                f"{self.environment!r}."
             )
         return self
 

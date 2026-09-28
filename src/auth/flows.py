@@ -248,19 +248,14 @@ def _record_audit(
 # Email content and delivery
 # ---------------------------------------------------------------------------
 def _frontend_base_url() -> str:
-    """Base URL used to build user-facing links in emails.
-
-    Uses the first entry in `settings.allowed_origins_list` as the
-    canonical frontend origin - in a standard deployment the SPA is
-    served from one of the configured trusted origins, and the first is
-    the primary one. Documented as an assumption: if the frontend ever
-    runs on a different host than the API's trusted origins, add a
-    dedicated `frontend_base_url` setting rather than silently changing
-    this.
-    """
-    origins = settings.allowed_origins_list
-    return origins[0] if origins else "http://localhost:3000"
-
+    """Base URL for links embedded in auth emails. Resolved by settings;
+    nothing about the deployment host is hardcoded here."""
+    base = settings.resolved_frontend_base_url
+    if not base:
+        raise RuntimeError(
+            "No frontend base URL configured. Set FRONTEND_BASE_URL."
+        )
+    return base
 
 def _send_email_safe(
     to: str,
