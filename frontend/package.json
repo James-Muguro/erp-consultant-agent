@@ -11,9 +11,9 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "lucide-react": "^1.48.0",
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0",
+    "lucide-react": "^1.58.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
     "react-markdown": "^10.1.0",
     "react-router-dom": "^7.1.1",
     "rehype-raw": "^7.0.0",
